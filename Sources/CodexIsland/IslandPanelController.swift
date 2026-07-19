@@ -300,20 +300,7 @@ final class IslandPanelController: NSObject {
     }
 
     private func panelTop(on screen: NSScreen) -> CGFloat {
-        if notchGeometry(on: screen) != nil {
-            return screen.frame.maxY
-        }
-        return bodyTop(on: screen)
-    }
-
-    private func bodyTop(on screen: NSScreen) -> CGFloat {
-        guard notchGeometry(on: screen) != nil,
-              let leftArea = screen.auxiliaryTopLeftArea else {
-            return screen.frame.maxY - 8
-        }
-        // The body grows from the physical notch's lower edge, which is still
-        // inside the 34pt menu bar on this display.
-        return leftArea.minY
+        screen.frame.maxY
     }
 
     private var isPointerInsideInteractionRegion: Bool {
