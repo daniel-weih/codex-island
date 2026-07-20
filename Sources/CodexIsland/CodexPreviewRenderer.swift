@@ -168,6 +168,27 @@ enum CodexPreviewRenderer {
             "codex-island-compact-token-consuming-1x.png"
         )
         let expandedURL = directory.appendingPathComponent("codex-island-expanded.png")
+        let settingsURL = directory.appendingPathComponent(
+            "codex-island-expanded-settings.png"
+        )
+        let expandedEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-english.png"
+        )
+        let settingsEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-settings-english.png"
+        )
+        let resetHoverEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-reset-hover-english.png"
+        )
+        let headerQuitHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-quit-hover.png"
+        )
+        let headerIslandSettingsHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-island-settings-hover.png"
+        )
+        let headerCodexSettingsHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-codex-settings-hover.png"
+        )
         let hoverTopURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-top.png"
         )
@@ -183,6 +204,13 @@ enum CodexPreviewRenderer {
             compactBoundaryURL,
             compactConsuming1xURL,
             expandedURL,
+            settingsURL,
+            expandedEnglishURL,
+            settingsEnglishURL,
+            resetHoverEnglishURL,
+            headerIslandSettingsHoverURL,
+            headerCodexSettingsHoverURL,
+            headerQuitHoverURL,
             hoverTopURL,
             hoverBottomURL,
             resetHoverURL
@@ -253,6 +281,67 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
+            initialIslandSettingsPresented: true,
+            size: expandedSize,
+            to: settingsURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: expandedEnglishURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialIslandSettingsPresented: true,
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: settingsEnglishURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialResetSummaryHover: true,
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: resetHoverEnglishURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredHeaderAction: .islandSettings,
+            previewLanguagePreference: .chinese,
+            size: expandedSize,
+            to: headerIslandSettingsHoverURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredHeaderAction: .codexSettings,
+            previewLanguagePreference: .chinese,
+            size: expandedSize,
+            to: headerCodexSettingsHoverURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredHeaderAction: .quit,
+            previewLanguagePreference: .chinese,
+            size: expandedSize,
+            to: headerQuitHoverURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
             initialHoveredTokenThreadID: "preview-1",
             size: expandedSize,
             to: hoverTopURL
@@ -270,6 +359,7 @@ enum CodexPreviewRenderer {
             displayGeometry: geometry,
             expanded: true,
             initialResetSummaryHover: true,
+            previewLanguagePreference: .chinese,
             size: expandedSize,
             to: resetHoverURL
         )
@@ -283,7 +373,9 @@ enum CodexPreviewRenderer {
             height: CGFloat? = nil,
             scale: CGFloat = 2,
             initialHoveredTokenThreadID: String? = nil,
-            initialResetSummaryHover: Bool = false
+            initialResetSummaryHover: Bool = false,
+            initialIslandSettingsPresented: Bool = false,
+            previewLanguagePreference: IslandLanguagePreference? = nil
         ) throws {
             let url = directory.appendingPathComponent(fileName)
             let defaultHeight = expanded
@@ -300,6 +392,8 @@ enum CodexPreviewRenderer {
                 expanded: expanded,
                 initialHoveredTokenThreadID: initialHoveredTokenThreadID,
                 initialResetSummaryHover: initialResetSummaryHover,
+                initialIslandSettingsPresented: initialIslandSettingsPresented,
+                previewLanguagePreference: previewLanguagePreference,
                 size: CGSize(width: width, height: height ?? defaultHeight),
                 scale: scale,
                 to: url
@@ -462,7 +556,10 @@ enum CodexPreviewRenderer {
         expanded: Bool,
         initialHoveredTokenThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
+        initialIslandSettingsPresented: Bool = false,
+        initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
+        previewLanguagePreference: IslandLanguagePreference? = nil,
         size: CGSize,
         scale: CGFloat = 2,
         to url: URL
@@ -474,7 +571,10 @@ enum CodexPreviewRenderer {
             displayGeometry: displayGeometry,
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
             initialResetSummaryHover: initialResetSummaryHover,
+            initialIslandSettingsPresented: initialIslandSettingsPresented,
+            initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
+            previewLanguagePreference: previewLanguagePreference,
             usesTimelineUpdates: false
         )
             .frame(width: size.width, height: size.height)

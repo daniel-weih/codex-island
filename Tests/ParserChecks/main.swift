@@ -11,6 +11,7 @@ struct ParserChecks {
         checkTokenConsumptionPolicy()
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
+        checkLanguageResolution()
         checkThreadDeepLinks()
         checkUsageTimeline()
         checkRecentThreads()
@@ -74,6 +75,52 @@ struct ParserChecks {
                 rateLimitPlanType: nil
             ) == nil,
             "missing plan stays hidden"
+        )
+    }
+
+    private static func checkLanguageResolution() {
+        expect(
+            IslandLanguagePreference.stored(nil) == .automatic,
+            "missing language preference defaults to automatic"
+        )
+        expect(
+            IslandLanguagePreference.stored("unsupported") == .automatic,
+            "invalid stored language preference defaults to automatic"
+        )
+        expect(
+            IslandLanguageResolver.resolve(
+                preference: .automatic,
+                preferredLanguages: ["zh-Hans-CN"]
+            ) == .chinese,
+            "automatic language selects Chinese for zh-Hans"
+        )
+        expect(
+            IslandLanguageResolver.resolve(
+                preference: .automatic,
+                preferredLanguages: ["en-US"]
+            ) == .english,
+            "automatic language selects English for en-US"
+        )
+        expect(
+            IslandLanguageResolver.resolve(
+                preference: .automatic,
+                preferredLanguages: ["ja-JP", "zh-Hans-CN"]
+            ) == .english,
+            "automatic language falls back to English when the primary OS language is unsupported"
+        )
+        expect(
+            IslandLanguageResolver.resolve(
+                preference: .chinese,
+                preferredLanguages: ["en-US"]
+            ) == .chinese,
+            "manual Chinese overrides the OS language"
+        )
+        expect(
+            IslandLanguageResolver.resolve(
+                preference: .english,
+                preferredLanguages: ["zh-Hans-CN"]
+            ) == .english,
+            "manual English overrides the OS language"
         )
     }
 

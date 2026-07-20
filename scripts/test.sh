@@ -10,6 +10,7 @@ mkdir -p "$OUTPUT_DIR"
 swiftc \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexExecutableLocator.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexLauncher.swift" \
