@@ -22,12 +22,12 @@ enum IslandLayout {
         max(compactMinimumWidth, notchWidth + compactExtraWidth)
     }
 
-    static func compactHeight(forSafeTopInset safeTopInset: CGFloat) -> CGFloat {
-        safeTopInset > 0 ? safeTopInset : compactFallbackHeight
+    static func compactHeight(forTopRegionHeight topRegionHeight: CGFloat) -> CGFloat {
+        topRegionHeight > 0 ? topRegionHeight : compactFallbackHeight
     }
 
-    static func expandedHeaderHeight(forSafeTopInset safeTopInset: CGFloat) -> CGFloat {
-        safeTopInset > 0 ? safeTopInset : compactFallbackHeight
+    static func expandedHeaderHeight(forTopRegionHeight topRegionHeight: CGFloat) -> CGFloat {
+        topRegionHeight > 0 ? topRegionHeight : compactFallbackHeight
     }
 }
 
@@ -154,13 +154,13 @@ private func islandDefaultTokenPopoverPointer(rank: Int, canvasSize: CGSize) -> 
 }
 
 private func islandDefaultResetPopoverPointer(
-    safeTopInset: CGFloat,
+    topRegionHeight: CGFloat,
     canvasSize: CGSize
 ) -> CGPoint {
     CGPoint(
         x: canvasSize.width / 2 + IslandLayout.metricCenterGutter,
         y: IslandLayout.expandedHeaderHeight(
-            forSafeTopInset: safeTopInset
+            forTopRegionHeight: topRegionHeight
         ) + 63
     )
 }
@@ -169,29 +169,29 @@ private func islandDefaultResetPopoverPointer(
 final class IslandDisplayGeometry: ObservableObject {
     @Published private(set) var hasNotch: Bool
     @Published private(set) var notchWidth: CGFloat
-    @Published private(set) var safeTopInset: CGFloat
+    @Published private(set) var topRegionHeight: CGFloat
 
     init(
         hasNotch: Bool = false,
         notchWidth: CGFloat = 132,
-        safeTopInset: CGFloat = 0
+        topRegionHeight: CGFloat = IslandLayout.compactFallbackHeight
     ) {
         self.hasNotch = hasNotch
         self.notchWidth = notchWidth
-        self.safeTopInset = safeTopInset
+        self.topRegionHeight = topRegionHeight
     }
 
     func update(
         hasNotch: Bool,
         notchWidth: CGFloat,
-        safeTopInset: CGFloat
+        topRegionHeight: CGFloat
     ) {
         guard self.hasNotch != hasNotch
                 || self.notchWidth != notchWidth
-                || self.safeTopInset != safeTopInset else { return }
+                || self.topRegionHeight != topRegionHeight else { return }
         self.hasNotch = hasNotch
         self.notchWidth = notchWidth
-        self.safeTopInset = safeTopInset
+        self.topRegionHeight = topRegionHeight
     }
 
 }
@@ -340,7 +340,7 @@ struct IslandView: View {
             )
         case .reset:
             return islandDefaultResetPopoverPointer(
-                safeTopInset: displayGeometry.safeTopInset,
+                topRegionHeight: displayGeometry.topRegionHeight,
                 canvasSize: canvasSize
             )
         }
@@ -492,7 +492,7 @@ struct IslandView: View {
 
     private var expandedHeaderHeight: CGFloat {
         IslandLayout.expandedHeaderHeight(
-            forSafeTopInset: displayGeometry.safeTopInset
+            forTopRegionHeight: displayGeometry.topRegionHeight
         )
     }
 

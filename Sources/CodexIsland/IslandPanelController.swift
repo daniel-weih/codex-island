@@ -19,8 +19,8 @@ final class IslandPanelController: NSObject {
         width: IslandLayout.compactFallbackWidth,
         height: IslandLayout.compactFallbackHeight
     )
-    // The controller adds either the physical notch height or the fallback
-    // header height. expandedBodyHeight intentionally excludes both.
+    // The controller adds either the physical notch height or the target
+    // screen's measured menu-bar region. expandedBodyHeight excludes both.
     private let expandedSize = NSSize(
         width: IslandLayout.expandedWidth,
         height: IslandLayout.expandedBodyHeight
@@ -210,12 +210,13 @@ final class IslandPanelController: NSObject {
     private func reposition(animated: Bool) {
         guard let screen = preferredScreen() else { return }
         let notch = notchGeometry(on: screen)
+        let topRegionHeight = topRegionHeight(on: screen, hasNotch: notch != nil)
         displayGeometry.update(
             hasNotch: notch != nil,
             notchWidth: notch?.width ?? compactSize.width,
-            safeTopInset: notch == nil ? 0 : screen.safeAreaInsets.top
+            topRegionHeight: topRegionHeight
         )
-        let size = size(for: screen)
+        let size = size(for: screen, topRegionHeight: topRegionHeight)
         let frame = frame(for: size, on: screen)
 
         if animated {
@@ -274,28 +275,50 @@ final class IslandPanelController: NSObject {
         )
     }
 
-    private func size(for screen: NSScreen) -> NSSize {
+    private func size(for screen: NSScreen, topRegionHeight: CGFloat) -> NSSize {
         if viewModel.isExpanded {
             return NSSize(
                 width: min(expandedSize.width, screen.visibleFrame.width - 24),
                 height: expandedSize.height
                     + IslandLayout.expandedHeaderHeight(
-                        forSafeTopInset: notchGeometry(on: screen) == nil
-                            ? 0
-                            : screen.safeAreaInsets.top
+                        forTopRegionHeight: topRegionHeight
                     )
             )
         }
 
-        guard let notch = notchGeometry(on: screen) else { return compactSize }
+        guard let notch = notchGeometry(on: screen) else {
+            return NSSize(width: compactSize.width, height: topRegionHeight)
+        }
         return NSSize(
             width: min(
                 IslandLayout.compactWidth(forNotchWidth: notch.width),
                 screen.visibleFrame.width - 24
             ),
             height: IslandLayout.compactHeight(
-                forSafeTopInset: screen.safeAreaInsets.top
+                forTopRegionHeight: topRegionHeight
             )
+        )
+    }
+
+    private func topRegionHeight(on screen: NSScreen, hasNotch: Bool) -> CGFloat {
+        if hasNotch {
+            return IslandLayout.compactHeight(
+                forTopRegionHeight: screen.safeAreaInsets.top
+            )
+        }
+
+        // NSStatusBar.system.thickness describes status-item content, not the
+        // full menu-bar reservation, and can differ substantially under display
+        // scaling. visibleFrame gives the actual top edge available to windows.
+        let measuredMenuBarHeight = max(
+            0,
+            screen.frame.maxY - screen.visibleFrame.maxY
+        )
+        let scale = max(1, screen.backingScaleFactor)
+        let pixelAlignedHeight =
+            (measuredMenuBarHeight * scale).rounded() / scale
+        return IslandLayout.compactHeight(
+            forTopRegionHeight: pixelAlignedHeight
         )
     }
 

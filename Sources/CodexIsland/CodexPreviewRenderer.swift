@@ -190,11 +190,11 @@ enum CodexPreviewRenderer {
         let geometry = IslandDisplayGeometry(
             hasNotch: true,
             notchWidth: 185,
-            safeTopInset: 32
+            topRegionHeight: 32
         )
         let expandedSize = CGSize(
             width: IslandLayout.expandedWidth,
-            height: IslandLayout.expandedBodyHeight + geometry.safeTopInset
+            height: IslandLayout.expandedBodyHeight + geometry.topRegionHeight
         )
         try render(
             snapshot: snapshot,
@@ -202,7 +202,7 @@ enum CodexPreviewRenderer {
             expanded: false,
             size: CGSize(
                 width: IslandLayout.compactWidth(forNotchWidth: 185),
-                height: IslandLayout.compactHeight(forSafeTopInset: 32)
+                height: IslandLayout.compactHeight(forTopRegionHeight: 32)
             ),
             to: compactURL
         )
@@ -213,7 +213,7 @@ enum CodexPreviewRenderer {
             initialTokenConsumptionPhase: 0.46,
             size: CGSize(
                 width: IslandLayout.compactWidth(forNotchWidth: 185),
-                height: IslandLayout.compactHeight(forSafeTopInset: 32)
+                height: IslandLayout.compactHeight(forTopRegionHeight: 32)
             ),
             to: compactConsumingURL
         )
@@ -224,7 +224,7 @@ enum CodexPreviewRenderer {
             initialTokenConsumptionPhase: 0.46,
             size: CGSize(
                 width: IslandLayout.compactWidth(forNotchWidth: 185),
-                height: IslandLayout.compactHeight(forSafeTopInset: 32)
+                height: IslandLayout.compactHeight(forTopRegionHeight: 32)
             ),
             scale: 1,
             to: compactConsuming1xURL
@@ -238,7 +238,7 @@ enum CodexPreviewRenderer {
             initialTokenConsumptionPhase: 0.46,
             size: CGSize(
                 width: IslandLayout.compactWidth(forNotchWidth: 185),
-                height: IslandLayout.compactHeight(forSafeTopInset: 32)
+                height: IslandLayout.compactHeight(forTopRegionHeight: 32)
             ),
             to: compactBoundaryURL
         )
@@ -288,11 +288,11 @@ enum CodexPreviewRenderer {
             let url = directory.appendingPathComponent(fileName)
             let defaultHeight = expanded
                 ? IslandLayout.expandedBodyHeight
-                    + (previewGeometry.hasNotch
-                        ? previewGeometry.safeTopInset
-                        : IslandLayout.compactFallbackHeight)
+                    + IslandLayout.expandedHeaderHeight(
+                        forTopRegionHeight: previewGeometry.topRegionHeight
+                    )
                 : IslandLayout.compactHeight(
-                    forSafeTopInset: previewGeometry.safeTopInset
+                    forTopRegionHeight: previewGeometry.topRegionHeight
                 )
             try render(
                 snapshot: previewSnapshot,
@@ -319,7 +319,7 @@ enum CodexPreviewRenderer {
         let noNotchGeometry = IslandDisplayGeometry(
             hasNotch: false,
             notchWidth: 0,
-            safeTopInset: 0
+            topRegionHeight: 31
         )
         try renderMatrixPreview(
             named: "matrix-expanded-no-notch-threads-5-scale-2x.png",
