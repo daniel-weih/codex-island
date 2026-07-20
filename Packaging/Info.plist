@@ -10,6 +10,8 @@
     <string>CodexIsland</string>
     <key>CFBundleIdentifier</key>
     <string>com.codexisland.app</string>
+    <key>CFBundleIconFile</key>
+    <string>CodexIsland.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

@@ -36,6 +36,13 @@ swift run
 open "dist/Codex Island.app"
 ```
 
+打包成带 App、DMG 文件与挂载卷图标的安装包：
+
+```bash
+./scripts/package_dmg.sh
+open "dist/Codex-Island.dmg"
+```
+
 如果 `codex` 不在常见路径中，可显式指定：
 
 ```bash
