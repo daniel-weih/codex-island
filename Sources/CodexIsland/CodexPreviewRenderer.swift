@@ -575,6 +575,7 @@ enum CodexPreviewRenderer {
             initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
             previewLanguagePreference: previewLanguagePreference,
+            launchAtLoginBackend: .previewDisabled,
             usesTimelineUpdates: false
         )
             .frame(width: size.width, height: size.height)

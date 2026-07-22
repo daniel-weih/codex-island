@@ -300,6 +300,7 @@ struct IslandView: View {
     private var tokenConsumptionEffectEnabled = true
     @AppStorage("codexIsland.languagePreference")
     private var storedLanguagePreference = IslandLanguagePreference.automatic.rawValue
+    @State private var launchAtLoginSetting: LaunchAtLoginSettingModel
     @State private var activePopover: IslandPopoverPresentation?
     @State private var isIslandSettingsPresented = false
     @State private var hoveredHeaderAction: IslandHeaderAction?
@@ -318,6 +319,7 @@ struct IslandView: View {
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         previewLanguagePreference: IslandLanguagePreference? = nil,
+        launchAtLoginBackend: LaunchAtLoginBackend = .live,
         usesTimelineUpdates: Bool = true
     ) {
         self.viewModel = viewModel
@@ -325,6 +327,11 @@ struct IslandView: View {
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewLanguagePreference = previewLanguagePreference
         self.usesTimelineUpdates = usesTimelineUpdates
+        _launchAtLoginSetting = State(
+            initialValue: LaunchAtLoginSettingModel(
+                backend: launchAtLoginBackend
+            )
+        )
 
         if let threadID = initialHoveredTokenThreadID,
            let rank = viewModel.snapshot.recentThreads.firstIndex(where: {
@@ -678,11 +685,14 @@ struct IslandView: View {
                 IslandSettingsPanel(
                     statusAnimationsEnabled: $statusAnimationsEnabled,
                     tokenConsumptionEffectEnabled: $tokenConsumptionEffectEnabled,
+                    launchAtLoginState: launchAtLoginSetting.state,
+                    launchAtLoginEnabled: launchAtLoginBinding,
                     languagePreference: languagePreferenceBinding,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh
                 )
                 .frame(maxHeight: .infinity)
+                .onAppear(perform: refreshLaunchAtLoginSetting)
                 .transition(
                     .move(edge: .trailing)
                         .combined(with: .opacity)
@@ -761,6 +771,23 @@ struct IslandView: View {
             get: { selectedLanguagePreference },
             set: { storedLanguagePreference = $0.rawValue }
         )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLoginSetting.state.isEnabled },
+            set: { shouldEnable in
+                var updated = launchAtLoginSetting
+                updated.setEnabled(shouldEnable)
+                launchAtLoginSetting = updated
+            }
+        )
+    }
+
+    private func refreshLaunchAtLoginSetting() {
+        var updated = launchAtLoginSetting
+        updated.refresh()
+        launchAtLoginSetting = updated
     }
 
     private var isIslandSettingsButtonHovered: Bool {
@@ -1268,6 +1295,8 @@ private struct IslandHeaderTooltip: View {
 private struct IslandSettingsPanel: View {
     @Binding var statusAnimationsEnabled: Bool
     @Binding var tokenConsumptionEffectEnabled: Bool
+    let launchAtLoginState: LaunchAtLoginPresentationState
+    @Binding var launchAtLoginEnabled: Bool
     @Binding var languagePreference: IslandLanguagePreference
     let isRefreshing: Bool
     let onRefresh: () -> Void
@@ -1317,6 +1346,14 @@ private struct IslandSettingsPanel: View {
                     ),
                     tint: .cyan,
                     isOn: $tokenConsumptionEffectEnabled
+                )
+
+                IslandSettingToggleCard(
+                    icon: "power",
+                    title: language.text("开机启动", "Launch at login"),
+                    detail: launchAtLoginDetailText,
+                    tint: .purple,
+                    isOn: $launchAtLoginEnabled
                 )
             }
             .frame(height: 58)
@@ -1417,6 +1454,17 @@ private struct IslandSettingsPanel: View {
         return language.text("手动选择界面语言", "Manually selected")
     }
 
+    private var launchAtLoginDetailText: String {
+        switch launchAtLoginState {
+        case .disabled:
+            return language.text("当前关闭", "Currently off")
+        case .enabled:
+            return language.text("登录后自动运行", "Starts after login")
+        case .updateFailed:
+            return language.text("更新失败，请重试", "Update failed · Retry")
+        }
+    }
+
     private var settingsCardBackground: some View {
         RoundedRectangle(cornerRadius: 9, style: .continuous)
             .fill(Color.white.opacity(0.028))
@@ -1436,40 +1484,70 @@ private struct IslandSettingToggleCard: View {
     let title: String
     let detail: String
     let tint: Color
+    let isInteractive: Bool
     @Binding var isOn: Bool
 
     @Environment(\.displayScale) private var displayScale
     @State private var isHovered = false
 
+    init(
+        icon: String,
+        title: String,
+        detail: String,
+        tint: Color,
+        isInteractive: Bool = true,
+        isOn: Binding<Bool>
+    ) {
+        self.icon = icon
+        self.title = title
+        self.detail = detail
+        self.tint = tint
+        self.isInteractive = isInteractive
+        _isOn = isOn
+    }
+
     var body: some View {
-        Toggle(isOn: $isOn) {
-            HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(tint.opacity(isOn ? 0.12 : 0.055))
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(tint.opacity(isOn ? 0.12 : 0.055))
 
-                    Image(systemName: icon)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
-                }
-                .frame(width: 27, height: 27)
+                        Image(systemName: icon)
+                            .font(.system(size: 7.4, weight: .semibold))
+                            .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
+                    }
+                    .frame(width: 20, height: 20)
 
-                VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                        .font(.system(size: 7.5, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.74))
                         .lineLimit(1)
-
-                    Text(detail)
-                        .font(.system(size: 6.3, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.27))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.80)
+                        .minimumScaleFactor(0.82)
                 }
+
+                Text(detail)
+                    .font(.system(size: 6.1, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.27))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.80)
             }
+
+            Spacer(minLength: 4)
+
+            Toggle(isOn: $isOn) {
+                EmptyView()
+            }
+            .labelsHidden()
+            .toggleStyle(IslandToggleStyle(tint: tint))
+            .frame(width: 24, height: 13)
+            .fixedSize(horizontal: true, vertical: true)
+            .layoutPriority(2)
+            .accessibilityLabel(Text(title))
         }
-        .toggleStyle(IslandToggleStyle(tint: tint))
-        .padding(.horizontal, 9)
+        .disabled(!isInteractive)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -1484,7 +1562,7 @@ private struct IslandSettingToggleCard: View {
         )
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.08)) {
-                isHovered = hovering
+                isHovered = hovering && isInteractive
             }
         }
     }
@@ -1575,44 +1653,41 @@ private struct IslandToggleStyle: ToggleStyle {
     let tint: Color
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 8) {
-            configuration.label
+        ZStack {
+            Capsule(style: .continuous)
+                .fill(
+                    configuration.isOn
+                        ? tint.opacity(0.68)
+                        : Color.white.opacity(0.12)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            Color.white.opacity(
+                                configuration.isOn ? 0.08 : 0.07
+                            ),
+                            lineWidth: 1 / max(1, displayScale)
+                        )
+                )
 
-            Spacer(minLength: 8)
-
-            ZStack {
-                Capsule(style: .continuous)
-                    .fill(
-                        configuration.isOn
-                            ? tint.opacity(0.68)
-                            : Color.white.opacity(0.12)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(
-                                Color.white.opacity(
-                                    configuration.isOn ? 0.08 : 0.07
-                                ),
-                                lineWidth: 1 / max(1, displayScale)
-                            )
-                    )
-
-                Circle()
-                    .fill(
-                        configuration.isOn
-                            ? Color.white.opacity(0.92)
-                            : Color.white.opacity(0.42)
-                    )
-                    .frame(width: 9, height: 9)
-                    .offset(x: configuration.isOn ? 5.2 : -5.2)
-                    .shadow(color: .black.opacity(0.24), radius: 1, y: 0.5)
-            }
-            .frame(width: 24, height: 13)
+            Circle()
+                .fill(
+                    configuration.isOn
+                        ? Color.white.opacity(0.92)
+                        : Color.white.opacity(0.42)
+                )
+                .frame(width: 9, height: 9)
+                .offset(x: configuration.isOn ? 5.2 : -5.2)
+                .shadow(color: .black.opacity(0.24), radius: 1, y: 0.5)
         }
-        .contentShape(Rectangle())
+        .frame(width: 24, height: 13)
+        .opacity(isEnabled ? 1 : 0.48)
+        .contentShape(Capsule(style: .continuous))
         .onTapGesture {
+            guard isEnabled else { return }
             withAnimation(.easeOut(duration: 0.12)) {
                 configuration.isOn.toggle()
             }

@@ -14,6 +14,7 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexExecutableLocator.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexLauncher.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/LaunchAtLoginSetting.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexStatusPayloadParser.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadSettingsReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadActivityReader.swift" \

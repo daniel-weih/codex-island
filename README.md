@@ -13,6 +13,7 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 - `rateLimitResetCredits.availableCount` 显示可用 reset 次数；悬停可查看全部可用次数的到期时间
 - Profile 头像、昵称、账户累计 Token，以及近 30 个完整日历日的每日 Token 柱图
 - 点击展开态的非会话区域可激活 Codex App；右上角齿轮通过官方深链打开设置
+- 灵动岛设置支持状态动效、Token 消耗动效、界面语言与开机启动；开机启动默认关闭，主动开启后随 macOS 用户登录自动运行
 - Codex 账户套餐，以及最近五条 CLI/App 会话各自的模型、推理强度和 Fast 状态
 - 最近五条会话的近实时执行状态：执行中、空闲、已中断或失败
 - 最近五条会话的累计 Token；悬停数值可查看输入、缓存输入、输出与推理输出明细
@@ -42,6 +43,8 @@ open "dist/Codex Island.app"
 ./scripts/package_dmg.sh
 open "dist/Codex-Island.dmg"
 ```
+
+可在灵动岛设置中开启“开机启动”。默认关闭；开启后，应用只会写入当前用户的 `~/Library/LaunchAgents/com.codexisland.app.login-item.plist`，并从下一次 macOS 用户登录开始自动运行。该启动项直接运行 Codex Island 并关联 `com.codexisland.app`，避免 macOS 将后台项目显示为通用的 `open` 命令；上一版已开启的 `open` 格式会在新版启动时自动迁移并保持开启。该方式不要求 Apple Developer 证书或管理员权限；关闭开关会删除上述专用 plist，不会影响其他登录项。
 
 如果 `codex` 不在常见路径中，可显式指定：
 

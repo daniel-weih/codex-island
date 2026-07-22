@@ -12,6 +12,7 @@ struct ParserChecks {
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
         checkLanguageResolution()
+        checkLaunchAtLoginSetting()
         checkThreadDeepLinks()
         checkUsageTimeline()
         checkRecentThreads()
@@ -121,6 +122,224 @@ struct ParserChecks {
                 preferredLanguages: ["zh-Hans-CN"]
             ) == .english,
             "manual English overrides the OS language"
+        )
+    }
+
+    private static func checkLaunchAtLoginSetting() {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("codex-island-launch-agent-\(UUID().uuidString)")
+        let plistURL = directory
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("com.codexisland.app.login-item.plist")
+        let appBundleURL = URL(
+            fileURLWithPath: "/Applications/Codex Island.app",
+            isDirectory: true
+        )
+        let appExecutableURL = appBundleURL
+            .appendingPathComponent("Contents/MacOS/Codex Island")
+        let bundleIdentifier = "com.codexisland.app"
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let productionBackend = LaunchAtLoginBackend.launchAgent(
+            plistURL: plistURL,
+            appBundleURL: appBundleURL,
+            appExecutableURL: appExecutableURL,
+            bundleIdentifier: bundleIdentifier,
+            fileManager: fileManager
+        )
+        var productionSetting = LaunchAtLoginSettingModel(
+            backend: productionBackend
+        )
+        expect(productionSetting.state == .disabled, "missing launch agent defaults off")
+        expect(!fileManager.fileExists(atPath: plistURL.path), "initialization never creates launch agent")
+        productionSetting.refresh()
+        expect(!fileManager.fileExists(atPath: plistURL.path), "refresh never creates launch agent")
+
+        productionSetting.setEnabled(true)
+        expect(productionSetting.state == .enabled, "valid launch agent enables login launch")
+        expect(fileManager.fileExists(atPath: plistURL.path), "enable writes the launch agent plist")
+
+        do {
+            let data = try Data(contentsOf: plistURL)
+            let propertyList = try PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil
+            ) as? [String: Any]
+            expect(
+                propertyList?["Label"] as? String
+                    == "\(bundleIdentifier).login-item",
+                "launch agent uses the dedicated label"
+            )
+            expect(propertyList?["RunAtLoad"] as? Bool == true, "launch agent runs when loaded")
+            expect(
+                propertyList?["ProgramArguments"] as? [String]
+                    == [appExecutableURL.path],
+                "launch agent directly executes the branded app binary"
+            )
+            expect(
+                propertyList?["AssociatedBundleIdentifiers"] as? [String]
+                    == [bundleIdentifier],
+                "launch agent is associated with the Codex Island bundle"
+            )
+            expect(propertyList?["KeepAlive"] == nil, "launch agent never keeps or relaunches the app")
+            expect(
+                !String(decoding: data, as: UTF8.self).contains("/usr/bin/open"),
+                "launch agent never exposes the generic open executable"
+            )
+
+            let attributes = try fileManager.attributesOfItem(atPath: plistURL.path)
+            expect(
+                attributes[.posixPermissions] as? Int == 0o644,
+                "launch agent plist has user-writable standard permissions"
+            )
+
+            let plutil = Process()
+            plutil.executableURL = URL(fileURLWithPath: "/usr/bin/plutil")
+            plutil.arguments = ["-lint", plistURL.path]
+            plutil.standardOutput = FileHandle.nullDevice
+            plutil.standardError = FileHandle.nullDevice
+            try plutil.run()
+            plutil.waitUntilExit()
+            expect(plutil.terminationStatus == 0, "launch agent plist passes plutil lint")
+        } catch {
+            expect(false, "launch agent plist inspection: \(error.localizedDescription)")
+        }
+
+        productionSetting.setEnabled(true)
+        expect(productionSetting.state == .enabled, "repeated enable remains idempotent")
+        productionSetting.setEnabled(false)
+        expect(productionSetting.state == .disabled, "disable removes login launch")
+        expect(!fileManager.fileExists(atPath: plistURL.path), "disable removes only the launch agent plist")
+        productionSetting.setEnabled(false)
+        expect(productionSetting.state == .disabled, "repeated disable remains idempotent")
+
+        do {
+            try fileManager.createDirectory(
+                at: plistURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let legacyData = try PropertyListSerialization.data(
+                fromPropertyList: [
+                    "Label": "\(bundleIdentifier).login-item",
+                    "ProgramArguments": [
+                        "/usr/bin/open",
+                        "-g",
+                        appBundleURL.path
+                    ],
+                    "RunAtLoad": true
+                ],
+                format: .xml,
+                options: 0
+            )
+            try legacyData.write(to: plistURL, options: .atomic)
+
+            let migratedSetting = LaunchAtLoginSettingModel(
+                backend: productionBackend
+            )
+            expect(
+                migratedSetting.state == .enabled,
+                "legacy open registration migrates without disabling login launch"
+            )
+
+            let migratedData = try Data(contentsOf: plistURL)
+            let migratedPropertyList = try PropertyListSerialization.propertyList(
+                from: migratedData,
+                options: [],
+                format: nil
+            ) as? [String: Any]
+            expect(
+                migratedPropertyList?["ProgramArguments"] as? [String]
+                    == [appExecutableURL.path],
+                "legacy registration is rewritten to the branded executable"
+            )
+            expect(
+                migratedPropertyList?["AssociatedBundleIdentifiers"] as? [String]
+                    == [bundleIdentifier],
+                "legacy migration adds app attribution"
+            )
+        } catch {
+            expect(false, "legacy launch agent migration: \(error.localizedDescription)")
+        }
+
+        var migratedSetting = LaunchAtLoginSettingModel(backend: productionBackend)
+        migratedSetting.setEnabled(false)
+        expect(!fileManager.fileExists(atPath: plistURL.path), "migrated registration remains removable")
+
+        let initialService = FakeLaunchAtLoginService(status: .notRegistered)
+        var initialSetting = LaunchAtLoginSettingModel(
+            backend: initialService.backend
+        )
+        expect(initialSetting.state == .disabled, "launch at login defaults off")
+        expect(initialService.registerCallCount == 0, "initialization never registers login item")
+        initialSetting.refresh()
+        expect(initialService.registerCallCount == 0, "refresh never registers login item")
+
+        let enabledService = FakeLaunchAtLoginService(status: .notRegistered)
+        enabledService.statusAfterRegister = .enabled
+        enabledService.statusAfterUnregister = .notRegistered
+        var enabledSetting = LaunchAtLoginSettingModel(
+            backend: enabledService.backend
+        )
+        enabledSetting.setEnabled(true)
+        expect(enabledSetting.state == .enabled, "successful registration enables login item")
+        expect(enabledService.registerCallCount == 1, "enable registers exactly once")
+        enabledSetting.setEnabled(true)
+        expect(enabledService.registerCallCount == 1, "already enabled login item is idempotent")
+        enabledSetting.setEnabled(false)
+        expect(enabledSetting.state == .disabled, "successful unregistration disables login item")
+        expect(enabledService.unregisterCallCount == 1, "disable unregisters exactly once")
+        enabledSetting.setEnabled(false)
+        expect(enabledService.unregisterCallCount == 1, "already disabled login item is idempotent")
+
+        let failedEnableService = FakeLaunchAtLoginService(status: .notRegistered)
+        failedEnableService.registerError = LaunchAtLoginTestError.operationFailed
+        var failedEnableSetting = LaunchAtLoginSettingModel(
+            backend: failedEnableService.backend
+        )
+        let readsBeforeEnable = failedEnableService.statusReadCount
+        failedEnableSetting.setEnabled(true)
+        expect(
+            failedEnableSetting.state == .updateFailed(isEnabled: false),
+            "failed registration preserves actual disabled state"
+        )
+        expect(
+            failedEnableService.statusReadCount > readsBeforeEnable,
+            "failed registration rereads system state"
+        )
+
+        let failedDisableService = FakeLaunchAtLoginService(status: .enabled)
+        failedDisableService.unregisterError = LaunchAtLoginTestError.operationFailed
+        var failedDisableSetting = LaunchAtLoginSettingModel(
+            backend: failedDisableService.backend
+        )
+        failedDisableSetting.setEnabled(false)
+        expect(
+            failedDisableSetting.state == .updateFailed(isEnabled: true),
+            "failed unregistration preserves actual enabled state"
+        )
+
+        let migrationService = FakeLaunchAtLoginService(status: .legacyRegistered)
+        migrationService.statusAfterRegister = .enabled
+        let migrationSetting = LaunchAtLoginSettingModel(
+            backend: migrationService.backend
+        )
+        expect(migrationSetting.state == .enabled, "successful legacy migration stays enabled")
+        expect(migrationService.registerCallCount == 1, "legacy migration rewrites exactly once")
+
+        let failedMigrationService = FakeLaunchAtLoginService(status: .legacyRegistered)
+        failedMigrationService.registerError = LaunchAtLoginTestError.operationFailed
+        let failedMigrationSetting = LaunchAtLoginSettingModel(
+            backend: failedMigrationService.backend
+        )
+        expect(
+            failedMigrationSetting.state == .updateFailed(isEnabled: true),
+            "failed legacy migration preserves the actual enabled state"
+        )
+        expect(
+            failedMigrationService.statusReadCount >= 2,
+            "failed legacy migration rereads disk-backed state"
         )
     }
 
@@ -1012,6 +1231,44 @@ struct ParserChecks {
         expect(
             alternateID?.id == "legacy-thread-id",
             "legacy stable thread ID fields are preferred over synthetic fallbacks"
+        )
+    }
+}
+
+private enum LaunchAtLoginTestError: Error {
+    case operationFailed
+}
+
+private final class FakeLaunchAtLoginService {
+    var status: LaunchAtLoginServiceStatus
+    var statusAfterRegister: LaunchAtLoginServiceStatus?
+    var statusAfterUnregister: LaunchAtLoginServiceStatus?
+    var registerError: Error?
+    var unregisterError: Error?
+    private(set) var statusReadCount = 0
+    private(set) var registerCallCount = 0
+    private(set) var unregisterCallCount = 0
+
+    init(status: LaunchAtLoginServiceStatus) {
+        self.status = status
+    }
+
+    var backend: LaunchAtLoginBackend {
+        LaunchAtLoginBackend(
+            readStatus: { [self] in
+                statusReadCount += 1
+                return status
+            },
+            register: { [self] in
+                registerCallCount += 1
+                if let registerError { throw registerError }
+                if let statusAfterRegister { status = statusAfterRegister }
+            },
+            unregister: { [self] in
+                unregisterCallCount += 1
+                if let unregisterError { throw unregisterError }
+                if let statusAfterUnregister { status = statusAfterUnregister }
+            }
         )
     }
 }
