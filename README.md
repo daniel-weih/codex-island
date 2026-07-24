@@ -4,6 +4,42 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 
 账户、用量和会话索引来自本机 `codex app-server` 的只读接口；会话配置来自该会话本地 rollout 中最近一次 `thread_settings_applied`。Profile 昵称和头像通过 Codex App 当前使用的 Profile 接口按需读取，认证 token 只在请求期间保留于内存，不会写盘或输出到日志。程序不会解析会话消息正文，也不会调用消耗 reset credit 的接口。
 
+## 下载
+
+不需要安装 Swift 或配置本地构建环境，直接下载最新版：
+
+**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**
+
+当前版本为 `v2026.07.24`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
+
+## 界面预览
+
+### 展开态
+
+![Codex Island 展开态总览](docs/images/ui/dashboard.png)
+
+> 截图由内置离屏预览生成，其中的额度、Token、套餐、日期和会话内容均为演示数据。
+
+### 收起态
+
+| 静默状态 | Token 消耗中 |
+| :---: | :---: |
+| ![Codex Island 收起态](docs/images/ui/compact.png) | ![Codex Island Token 消耗动效状态](docs/images/ui/compact-consuming.png) |
+
+### 悬停明细
+
+**重置次数到期时间**
+
+![Codex Island 重置次数到期时间悬浮卡片](docs/images/ui/reset-expirations.png)
+
+**会话 Token 明细**
+
+![Codex Island 会话 Token 明细悬浮卡片](docs/images/ui/token-details.png)
+
+### 设置
+
+![Codex Island 设置面板](docs/images/ui/settings.png)
+
 ## 当前能力
 
 - 顶部居中、全 Space 可见的无边框悬浮面板，并适配刘海屏与普通外接屏
