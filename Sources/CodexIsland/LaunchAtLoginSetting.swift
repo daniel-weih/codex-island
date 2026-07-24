@@ -38,11 +38,22 @@ struct LaunchAtLoginBackend {
             ?? appBundleURL.appendingPathComponent(
                 "Contents/MacOS/Codex Island"
             )
-        let plistURL = fileManager.homeDirectoryForCurrentUser
+        let launchAgentsDirectory = fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let plistURL = launchAgentsDirectory
             .appendingPathComponent("\(launchAgentLabel).plist")
+        let legacyPlistURLs = (
+            try? fileManager.contentsOfDirectory(
+                at: launchAgentsDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        )?.filter {
+            $0 != plistURL && $0.pathExtension == "plist"
+        } ?? []
         return launchAgent(
             plistURL: plistURL,
+            legacyPlistURLs: legacyPlistURLs,
             appBundleURL: appBundleURL,
             appExecutableURL: appExecutableURL,
             bundleIdentifier: Bundle.main.bundleIdentifier
@@ -59,6 +70,7 @@ struct LaunchAtLoginBackend {
 
     static func launchAgent(
         plistURL: URL,
+        legacyPlistURLs: [URL] = [],
         appBundleURL: URL,
         appExecutableURL: URL,
         bundleIdentifier: String,
@@ -85,33 +97,57 @@ struct LaunchAtLoginBackend {
             "RunAtLoad"
         ]
 
+        func propertyList(at url: URL) -> [String: Any]? {
+            guard
+                let data = try? Data(contentsOf: url),
+                let propertyList = try? PropertyListSerialization.propertyList(
+                    from: data,
+                    options: [],
+                    format: nil
+                )
+            else {
+                return nil
+            }
+            return propertyList as? [String: Any]
+        }
+
+        func isLegacyCodexIslandAgent(at url: URL) -> Bool {
+            guard
+                let dictionary = propertyList(at: url),
+                dictionary["RunAtLoad"] as? Bool == true,
+                let arguments = dictionary["ProgramArguments"] as? [String],
+                arguments == programArguments || arguments == legacyProgramArguments
+            else {
+                return false
+            }
+
+            let label = (dictionary["Label"] as? String ?? "").lowercased()
+            let filename = url.lastPathComponent.lowercased()
+            return label.contains("codex-island")
+                || filename.contains("codex-island")
+        }
+
         return LaunchAtLoginBackend(
             readStatus: {
-                guard
-                    let data = try? Data(contentsOf: plistURL),
-                    let propertyList = try? PropertyListSerialization.propertyList(
-                        from: data,
-                        options: [],
-                        format: nil
-                    ),
-                    let dictionary = propertyList as? [String: Any],
-                    dictionary["Label"] as? String == launchAgentLabel,
-                    dictionary["RunAtLoad"] as? Bool == true
-                else {
-                    return .notRegistered
+                if let dictionary = propertyList(at: plistURL),
+                   dictionary["Label"] as? String == launchAgentLabel,
+                   dictionary["RunAtLoad"] as? Bool == true {
+                    if Set(dictionary.keys) == expectedKeys,
+                       dictionary["ProgramArguments"] as? [String]
+                        == programArguments,
+                       dictionary["AssociatedBundleIdentifiers"] as? [String]
+                        == [bundleIdentifier] {
+                        return .enabled
+                    }
+
+                    if Set(dictionary.keys) == legacyKeys,
+                       dictionary["ProgramArguments"] as? [String]
+                        == legacyProgramArguments {
+                        return .legacyRegistered
+                    }
                 }
 
-                if Set(dictionary.keys) == expectedKeys,
-                   dictionary["ProgramArguments"] as? [String]
-                    == programArguments,
-                   dictionary["AssociatedBundleIdentifiers"] as? [String]
-                    == [bundleIdentifier] {
-                    return .enabled
-                }
-
-                if Set(dictionary.keys) == legacyKeys,
-                   dictionary["ProgramArguments"] as? [String]
-                    == legacyProgramArguments {
+                if legacyPlistURLs.contains(where: isLegacyCodexIslandAgent) {
                     return .legacyRegistered
                 }
 
@@ -132,12 +168,19 @@ struct LaunchAtLoginBackend {
                     [.posixPermissions: 0o644],
                     ofItemAtPath: plistURL.path
                 )
+                for legacyURL in legacyPlistURLs
+                    where isLegacyCodexIslandAgent(at: legacyURL) {
+                    try fileManager.removeItem(at: legacyURL)
+                }
             },
             unregister: {
-                guard fileManager.fileExists(atPath: plistURL.path) else {
-                    return
+                if fileManager.fileExists(atPath: plistURL.path) {
+                    try fileManager.removeItem(at: plistURL)
                 }
-                try fileManager.removeItem(at: plistURL)
+                for legacyURL in legacyPlistURLs
+                    where isLegacyCodexIslandAgent(at: legacyURL) {
+                    try fileManager.removeItem(at: legacyURL)
+                }
             }
         )
     }

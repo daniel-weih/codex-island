@@ -267,6 +267,55 @@ struct ParserChecks {
         migratedSetting.setEnabled(false)
         expect(!fileManager.fileExists(atPath: plistURL.path), "migrated registration remains removable")
 
+        let previousPlistURL = plistURL.deletingLastPathComponent()
+            .appendingPathComponent("legacy.codex-island.login-item.plist")
+        do {
+            let previousData = try PropertyListSerialization.data(
+                fromPropertyList: [
+                    "AssociatedBundleIdentifiers": ["legacy.codex-island"],
+                    "Label": "legacy.codex-island.login-item",
+                    "ProgramArguments": [appExecutableURL.path],
+                    "RunAtLoad": true
+                ],
+                format: .xml,
+                options: 0
+            )
+            try previousData.write(to: previousPlistURL, options: .atomic)
+
+            let renamedBackend = LaunchAtLoginBackend.launchAgent(
+                plistURL: plistURL,
+                legacyPlistURLs: [previousPlistURL],
+                appBundleURL: appBundleURL,
+                appExecutableURL: appExecutableURL,
+                bundleIdentifier: bundleIdentifier,
+                fileManager: fileManager
+            )
+            let renamedSetting = LaunchAtLoginSettingModel(
+                backend: renamedBackend
+            )
+            expect(
+                renamedSetting.state == .enabled,
+                "renamed bundle registration migrates without disabling login launch"
+            )
+            expect(
+                fileManager.fileExists(atPath: plistURL.path),
+                "renamed bundle migration writes the current launch agent"
+            )
+            expect(
+                !fileManager.fileExists(atPath: previousPlistURL.path),
+                "renamed bundle migration removes the previous launch agent"
+            )
+
+            var removableSetting = renamedSetting
+            removableSetting.setEnabled(false)
+            expect(
+                !fileManager.fileExists(atPath: plistURL.path),
+                "renamed bundle migration remains removable"
+            )
+        } catch {
+            expect(false, "renamed launch agent migration: \(error.localizedDescription)")
+        }
+
         let initialService = FakeLaunchAtLoginService(status: .notRegistered)
         var initialSetting = LaunchAtLoginSettingModel(
             backend: initialService.backend

@@ -16,6 +16,10 @@ install -m 755 "$BIN_DIR/CodexIsland" "$APP_DIR/Contents/MacOS/Codex Island"
 install -m 644 "$ROOT_DIR/Packaging/Info.plist" "$APP_DIR/Contents/Info.plist"
 install -m 644 "$ROOT_DIR/Packaging/CodexIsland.icns" "$APP_DIR/Contents/Resources/CodexIsland.icns"
 
+# Swift release binaries retain local source paths in debug symbols. Strip them
+# before signing so distributed builds do not expose the builder's home path.
+strip -S "$APP_DIR/Contents/MacOS/Codex Island"
+
 codesign --force --deep --sign - "$APP_DIR"
 
 echo "$APP_DIR"

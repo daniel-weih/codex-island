@@ -451,7 +451,7 @@ enum CodexPreviewRenderer {
 
         var longIdentitySnapshot = snapshot
         longIdentitySnapshot.profileIdentity.displayName =
-            "Codex Island · Codex Visual Design Review"
+            "Codex Island · Visual Design Review"
         longIdentitySnapshot.account.planType = "enterprise-unlimited-organization"
         longIdentitySnapshot.rateLimit?.planType = "enterprise-unlimited-organization"
         try renderMatrixPreview(
