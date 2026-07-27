@@ -13,6 +13,7 @@ enum IslandLayout {
     static let activityChartBarSpacing: CGFloat = 2
     static let activityIndicatorSlotWidth: CGFloat = 10
     static let threadSourceColumnWidth: CGFloat = 24
+    static let threadStatusColumnWidth: CGFloat = 48
     static let compactTokenEffectWidth: CGFloat = 9.5
     static let headerActionButtonSize: CGFloat = 24
     static let headerActionSpacing: CGFloat = 4
@@ -293,6 +294,7 @@ final class IslandDisplayGeometry: ObservableObject {
 struct IslandView: View {
     @ObservedObject var viewModel: CodexStatusViewModel
     @ObservedObject var displayGeometry: IslandDisplayGeometry
+    @ObservedObject var displaySelection: IslandDisplaySelectionModel
     @Environment(\.displayScale) private var displayScale
     @AppStorage("codexIsland.statusAnimationsEnabled")
     private var statusAnimationsEnabled = true
@@ -307,15 +309,18 @@ struct IslandView: View {
     @State private var headerTooltipPointer: CGPoint?
     private let initialPopover: IslandPopoverPresentation?
     private let initialTokenConsumptionPhase: Double?
+    private let previewDisplayPickerPresentation: Bool?
     private let previewLanguagePreference: IslandLanguagePreference?
     private let usesTimelineUpdates: Bool
 
     init(
         viewModel: CodexStatusViewModel,
         displayGeometry: IslandDisplayGeometry,
+        displaySelection: IslandDisplaySelectionModel,
         initialHoveredTokenThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
         initialIslandSettingsPresented: Bool = false,
+        previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         previewLanguagePreference: IslandLanguagePreference? = nil,
@@ -324,7 +329,9 @@ struct IslandView: View {
     ) {
         self.viewModel = viewModel
         self.displayGeometry = displayGeometry
+        self.displaySelection = displaySelection
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
+        self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
         self.previewLanguagePreference = previewLanguagePreference
         self.usesTimelineUpdates = usesTimelineUpdates
         _launchAtLoginSetting = State(
@@ -688,6 +695,8 @@ struct IslandView: View {
                     launchAtLoginState: launchAtLoginSetting.state,
                     launchAtLoginEnabled: launchAtLoginBinding,
                     languagePreference: languagePreferenceBinding,
+                    displaySelection: displaySelection,
+                    previewDisplayPickerPresentation: previewDisplayPickerPresentation,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh
                 )
@@ -1298,6 +1307,8 @@ private struct IslandSettingsPanel: View {
     let launchAtLoginState: LaunchAtLoginPresentationState
     @Binding var launchAtLoginEnabled: Bool
     @Binding var languagePreference: IslandLanguagePreference
+    @ObservedObject var displaySelection: IslandDisplaySelectionModel
+    let previewDisplayPickerPresentation: Bool?
     let isRefreshing: Bool
     let onRefresh: () -> Void
 
@@ -1380,9 +1391,16 @@ private struct IslandSettingsPanel: View {
                         .lineLimit(1)
                 }
 
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
 
                 IslandLanguagePicker(selection: $languagePreference)
+
+                PixelVerticalDivider(height: 18, opacity: 0.08)
+
+                IslandDisplayPicker(
+                    selection: displaySelection,
+                    previewPresentation: previewDisplayPickerPresentation
+                )
 
                 PixelVerticalDivider(height: 18, opacity: 0.08)
 
@@ -1434,6 +1452,7 @@ private struct IslandSettingsPanel: View {
                 )
             }
             .padding(.horizontal, 9)
+            .frame(maxWidth: .infinity)
             .frame(height: 46)
             .background(settingsCardBackground)
             .overlay(settingsCardBorder)
@@ -1476,6 +1495,217 @@ private struct IslandSettingsPanel: View {
                 Color.white.opacity(0.065),
                 lineWidth: 1 / max(1, displayScale)
             )
+    }
+}
+
+private struct IslandDisplayPicker: View {
+    @ObservedObject var selection: IslandDisplaySelectionModel
+
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandInterfaceLanguage) private var language
+    @State private var isHovered = false
+    @State private var isPresented = false
+    private let previewPresentation: Bool?
+
+    init(
+        selection: IslandDisplaySelectionModel,
+        previewPresentation: Bool? = nil
+    ) {
+        self.selection = selection
+        self.previewPresentation = previewPresentation
+    }
+
+    var body: some View {
+        ZStack {
+            Button {
+                guard previewPresentation == nil else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isPresented.toggle()
+                }
+            } label: {
+                pickerLabel
+            }
+            .buttonStyle(.plain)
+            .help(
+                language.text(
+                    "选择灵动岛显示位置",
+                    "Choose which display hosts Codex Island"
+                )
+            )
+            .accessibilityLabel(
+                language.text(
+                    "灵动岛显示位置：\(selectedLabel)",
+                    "Codex Island display: \(selectedLabel)"
+                )
+            )
+        }
+        .frame(width: 104, height: 20)
+        .overlay(alignment: .bottomTrailing) {
+            if isMenuPresented {
+                displayMenu
+                    .offset(y: -24)
+                    .transition(
+                        previewPresentation == nil
+                            ? .opacity.combined(
+                                with: .scale(
+                                    scale: 0.96,
+                                    anchor: .bottomTrailing
+                                )
+                            )
+                            : .identity
+                    )
+                    .zIndex(1)
+            }
+        }
+        .zIndex(isMenuPresented ? 20 : 0)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.08)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private var pickerLabel: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "display")
+                .font(.system(size: 7.2, weight: .semibold))
+
+            Text(selectedLabel)
+                .font(.system(size: 6.5, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 1)
+
+            Image(systemName: isMenuPresented ? "chevron.up" : "chevron.down")
+                .font(.system(size: 5.2, weight: .bold))
+                .opacity(0.58)
+        }
+        .foregroundStyle(
+            Color.cyan.opacity(isHovered || isMenuPresented ? 0.90 : 0.72)
+        )
+        .padding(.horizontal, 7)
+        .frame(width: 104, height: 20)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    Color.cyan.opacity(
+                        isHovered || isMenuPresented ? 0.12 : 0.07
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    Color.cyan.opacity(
+                        isHovered || isMenuPresented ? 0.18 : 0.10
+                    ),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+    }
+
+    private var displayMenu: some View {
+        VStack(spacing: 1) {
+            ForEach(selection.choices) { choice in
+                Button {
+                    guard choice.isAvailable else { return }
+                    selection.preference = choice.target
+                    if previewPresentation == nil {
+                        withAnimation(.easeOut(duration: 0.10)) {
+                            isPresented = false
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(
+                            systemName: choice.target == selection.preference
+                                ? "checkmark.circle.fill"
+                                : "circle"
+                        )
+                            .font(.system(size: 6.4, weight: .semibold))
+                            .foregroundStyle(
+                                choice.target == selection.preference
+                                    ? Color.cyan.opacity(0.86)
+                                    : Color.white.opacity(0.18)
+                            )
+                            .frame(width: 8)
+
+                        Text(optionLabel(for: choice))
+                            .font(.system(size: 6.6, weight: .semibold, design: .rounded))
+                            .foregroundStyle(
+                                choice.isAvailable
+                                    ? Color.white.opacity(0.72)
+                                    : Color.white.opacity(0.28)
+                            )
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 6)
+                    .frame(width: 142, height: 17)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!choice.isAvailable)
+                .accessibilityLabel(optionLabel(for: choice))
+                .accessibilityAddTraits(
+                    choice.target == selection.preference ? .isSelected : []
+                )
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(red: 0.025, green: 0.028, blue: 0.036))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(0.11),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+        .shadow(color: .black.opacity(0.62), radius: 5, y: 2)
+    }
+
+    private var selectedLabel: String {
+        guard let selected = selection.choices.first(where: {
+            $0.target == selection.preference
+        }) else {
+            return language.text("自动选屏", "Auto display")
+        }
+        if selected.target == .automatic {
+            return language.text("自动选屏", "Auto display")
+        }
+        return optionLabel(for: selected)
+    }
+
+    private var isMenuPresented: Bool {
+        previewPresentation ?? isPresented
+    }
+
+    private func optionLabel(for choice: IslandDisplayChoice) -> String {
+        switch choice.target {
+        case .automatic:
+            return language.text("自动", "Automatic")
+        case .builtIn:
+            return choice.isAvailable
+                ? language.text("内建显示器", "Built-in display")
+                : language.text(
+                    "内建显示器（未连接）",
+                    "Built-in display (disconnected)"
+                )
+        case .external:
+            guard let display = choice.display else {
+                return language.text("外接屏未连接", "Display disconnected")
+            }
+            if let duplicateIndex = choice.duplicateIndex {
+                return "\(display.name) · \(duplicateIndex)"
+            }
+            return display.name
+        }
     }
 }
 
@@ -1759,12 +1989,17 @@ private struct ConversationRow: View {
                         onHoverChange: onTokenHover
                     )
 
-                    Spacer(minLength: 2)
+                    Spacer(minLength: 0)
 
                     Text(trailingLabel)
                         .font(.system(size: 7.5, weight: .medium, design: .rounded))
                         .foregroundStyle(trailingColor)
-                        .fixedSize(horizontal: true, vertical: true)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                        .frame(
+                            width: IslandLayout.threadStatusColumnWidth,
+                            alignment: .trailing
+                        )
                         .help(executionStateHelp)
                 }
                 .padding(.leading, IslandLayout.metricCenterGutter)

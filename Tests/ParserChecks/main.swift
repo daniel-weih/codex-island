@@ -12,6 +12,7 @@ struct ParserChecks {
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
         checkLanguageResolution()
+        checkDisplayTargetResolution()
         checkLaunchAtLoginSetting()
         checkThreadDeepLinks()
         checkUsageTimeline()
@@ -122,6 +123,124 @@ struct ParserChecks {
                 preferredLanguages: ["zh-Hans-CN"]
             ) == .english,
             "manual English overrides the OS language"
+        )
+    }
+
+    private static func checkDisplayTargetResolution() {
+        let builtIn = IslandDisplayDescriptor(
+            identifier: "built-in-uuid",
+            name: "Built-in Retina Display",
+            isBuiltIn: true,
+            sortIndex: 0
+        )
+        let externalLeft = IslandDisplayDescriptor(
+            identifier: "external-left-uuid",
+            name: "HP Z27s",
+            isBuiltIn: false,
+            sortIndex: 1
+        )
+        let externalRight = IslandDisplayDescriptor(
+            identifier: "external-right-uuid",
+            name: "HP Z27s",
+            isBuiltIn: false,
+            sortIndex: 2
+        )
+        let displays = [builtIn, externalLeft, externalRight]
+
+        expect(
+            IslandDisplayTargetPreference.stored(nil) == .automatic,
+            "missing display preference defaults to automatic"
+        )
+        expect(
+            IslandDisplayTargetPreference.stored("unsupported") == .automatic,
+            "invalid display preference defaults to automatic"
+        )
+        expect(
+            IslandDisplayTargetPreference.stored("external:external-left-uuid")
+                == .external(identifier: "external-left-uuid"),
+            "external display preference round-trips its stable identifier"
+        )
+        expect(
+            IslandDisplayTargetPreference.builtIn.storedValue == "built-in",
+            "built-in display preference has a stable persisted value"
+        )
+        expect(
+            IslandDisplayTargetPreference
+                .external(identifier: externalRight.identifier)
+                .storedValue == "external:external-right-uuid",
+            "external display preference persists the stable display identifier"
+        )
+        expect(
+            IslandDisplaySelectionResolver.resolveIdentifier(
+                preference: .automatic,
+                displays: displays,
+                automaticIdentifier: builtIn.identifier
+            ) == builtIn.identifier,
+            "automatic display selection preserves the existing resolver result"
+        )
+        expect(
+            IslandDisplaySelectionResolver.resolveIdentifier(
+                preference: .builtIn,
+                displays: displays,
+                automaticIdentifier: externalLeft.identifier
+            ) == builtIn.identifier,
+            "built-in preference overrides the automatic external display"
+        )
+        expect(
+            IslandDisplaySelectionResolver.resolveIdentifier(
+                preference: .external(identifier: externalRight.identifier),
+                displays: displays,
+                automaticIdentifier: builtIn.identifier
+            ) == externalRight.identifier,
+            "named external display resolves by stable identifier"
+        )
+        expect(
+            IslandDisplaySelectionResolver.resolveIdentifier(
+                preference: .external(identifier: externalRight.identifier),
+                displays: [builtIn, externalLeft],
+                automaticIdentifier: builtIn.identifier
+            ) == builtIn.identifier,
+            "disconnected external display temporarily falls back to automatic"
+        )
+        expect(
+            IslandDisplaySelectionResolver.resolveIdentifier(
+                preference: .external(identifier: externalRight.identifier),
+                displays: displays,
+                automaticIdentifier: builtIn.identifier
+            ) == externalRight.identifier,
+            "reconnected external display restores the saved target"
+        )
+
+        let choices = IslandDisplayChoiceBuilder.makeChoices(
+            displays: displays,
+            selection: .external(identifier: externalRight.identifier)
+        )
+        expect(
+            choices.map(\.target) == [
+                .automatic,
+                .builtIn,
+                .external(identifier: externalLeft.identifier),
+                .external(identifier: externalRight.identifier)
+            ],
+            "display choices include automatic, built-in, and every external display"
+        )
+        expect(
+            choices.compactMap(\.duplicateIndex) == [1, 2],
+            "same-name external displays receive deterministic disambiguation indexes"
+        )
+
+        let disconnectedChoices = IslandDisplayChoiceBuilder.makeChoices(
+            displays: [builtIn, externalLeft],
+            selection: .external(identifier: externalRight.identifier)
+        )
+        expect(
+            disconnectedChoices.last == IslandDisplayChoice(
+                target: .external(identifier: externalRight.identifier),
+                display: nil,
+                duplicateIndex: nil,
+                isAvailable: false
+            ),
+            "a disconnected saved display remains visible without losing the preference"
         )
     }
 

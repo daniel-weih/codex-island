@@ -12,6 +12,11 @@ enum CodexPreviewRenderer {
         let previewResetExpirations = [14, 21, 28, 35, 42].map { days in
             Date().addingTimeInterval(TimeInterval(days * 24 * 60 * 60))
         }
+        let previewAvatarData = ProcessInfo.processInfo.environment[
+            "CODEX_ISLAND_PREVIEW_AVATAR_PATH"
+        ].flatMap { path in
+            try? Data(contentsOf: URL(fileURLWithPath: path))
+        }
 
         let snapshot = CodexSnapshot(
             connection: .connected,
@@ -43,7 +48,7 @@ enum CodexPreviewRenderer {
             ),
             profileIdentity: ProfileIdentitySummary(
                 displayName: "Daniel",
-                avatarData: nil
+                avatarData: previewAvatarData
             ),
             recentThreads: [
                 ThreadSummary(
@@ -177,6 +182,12 @@ enum CodexPreviewRenderer {
         let settingsEnglishURL = directory.appendingPathComponent(
             "codex-island-expanded-settings-english.png"
         )
+        let settingsDisplayMenuURL = directory.appendingPathComponent(
+            "codex-island-expanded-settings-display-menu.png"
+        )
+        let settingsDisplayMenuEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-settings-display-menu-english.png"
+        )
         let resetHoverEnglishURL = directory.appendingPathComponent(
             "codex-island-expanded-reset-hover-english.png"
         )
@@ -191,6 +202,9 @@ enum CodexPreviewRenderer {
         )
         let hoverTopURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-top.png"
+        )
+        let hoverTopEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-token-hover-top-english.png"
         )
         let hoverBottomURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-bottom.png"
@@ -207,14 +221,33 @@ enum CodexPreviewRenderer {
             settingsURL,
             expandedEnglishURL,
             settingsEnglishURL,
+            settingsDisplayMenuURL,
+            settingsDisplayMenuEnglishURL,
             resetHoverEnglishURL,
             headerIslandSettingsHoverURL,
             headerCodexSettingsHoverURL,
             headerQuitHoverURL,
             hoverTopURL,
+            hoverTopEnglishURL,
             hoverBottomURL,
             resetHoverURL
         ]
+        var englishSnapshot = snapshot
+        let englishThreadTitles = [
+            "Create hatch pet",
+            "Fix OpenClaw OAuth authentication",
+            "Improve local model arithmetic",
+            "Upgrade local OpenClaw",
+            "Analyze Codex session files"
+        ]
+        englishSnapshot.recentThreads = zip(
+            snapshot.recentThreads,
+            englishThreadTitles
+        ).map { thread, title in
+            var localizedThread = thread
+            localizedThread.title = title
+            return localizedThread
+        }
         let geometry = IslandDisplayGeometry(
             hasNotch: true,
             notchWidth: 185,
@@ -286,7 +319,7 @@ enum CodexPreviewRenderer {
             to: settingsURL
         )
         try render(
-            snapshot: snapshot,
+            snapshot: englishSnapshot,
             displayGeometry: geometry,
             expanded: true,
             previewLanguagePreference: .english,
@@ -294,7 +327,7 @@ enum CodexPreviewRenderer {
             to: expandedEnglishURL
         )
         try render(
-            snapshot: snapshot,
+            snapshot: englishSnapshot,
             displayGeometry: geometry,
             expanded: true,
             initialIslandSettingsPresented: true,
@@ -304,6 +337,25 @@ enum CodexPreviewRenderer {
         )
         try render(
             snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialIslandSettingsPresented: true,
+            previewDisplayPickerPresentation: true,
+            size: expandedSize,
+            to: settingsDisplayMenuURL
+        )
+        try render(
+            snapshot: englishSnapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialIslandSettingsPresented: true,
+            previewDisplayPickerPresentation: true,
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: settingsDisplayMenuEnglishURL
+        )
+        try render(
+            snapshot: englishSnapshot,
             displayGeometry: geometry,
             expanded: true,
             initialResetSummaryHover: true,
@@ -345,6 +397,15 @@ enum CodexPreviewRenderer {
             initialHoveredTokenThreadID: "preview-1",
             size: expandedSize,
             to: hoverTopURL
+        )
+        try render(
+            snapshot: englishSnapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredTokenThreadID: "preview-1",
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: hoverTopEnglishURL
         )
         try render(
             snapshot: snapshot,
@@ -504,6 +565,12 @@ enum CodexPreviewRenderer {
             scale: 1
         )
         try renderMatrixPreview(
+            named: "matrix-expanded-notch-threads-5-english-scale-1x.png",
+            snapshot: englishSnapshot,
+            scale: 1,
+            previewLanguagePreference: .english
+        )
+        try renderMatrixPreview(
             named: "matrix-compact-notch-scale-1x.png",
             snapshot: snapshot,
             expanded: false,
@@ -557,6 +624,7 @@ enum CodexPreviewRenderer {
         initialHoveredTokenThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
         initialIslandSettingsPresented: Bool = false,
+        previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         previewLanguagePreference: IslandLanguagePreference? = nil,
@@ -566,12 +634,31 @@ enum CodexPreviewRenderer {
     ) throws {
         let viewModel = CodexStatusViewModel(initialSnapshot: snapshot)
         viewModel.isExpanded = expanded
+        let displaySelection = IslandDisplaySelectionModel(
+            initialPreference: .automatic,
+            previewDisplays: [
+                IslandDisplayDescriptor(
+                    identifier: "preview-built-in",
+                    name: "Built-in Retina Display",
+                    isBuiltIn: true,
+                    sortIndex: 0
+                ),
+                IslandDisplayDescriptor(
+                    identifier: "preview-external",
+                    name: "HP Z27s",
+                    isBuiltIn: false,
+                    sortIndex: 1
+                )
+            ]
+        )
         let view = IslandView(
             viewModel: viewModel,
             displayGeometry: displayGeometry,
+            displaySelection: displaySelection,
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
             initialResetSummaryHover: initialResetSummaryHover,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
+            previewDisplayPickerPresentation: previewDisplayPickerPresentation,
             initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
             previewLanguagePreference: previewLanguagePreference,

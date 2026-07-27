@@ -28,6 +28,7 @@ final class IslandPanelController: NSObject {
 
     private let viewModel: CodexStatusViewModel
     private let displayGeometry = IslandDisplayGeometry()
+    private let displaySelection: IslandDisplaySelectionModel
     private let panel: IslandPanel
     private var expandWorkItem: DispatchWorkItem?
     private var collapseWorkItem: DispatchWorkItem?
@@ -39,6 +40,7 @@ final class IslandPanelController: NSObject {
 
     init(viewModel: CodexStatusViewModel) {
         self.viewModel = viewModel
+        displaySelection = IslandDisplaySelectionModel()
         panel = IslandPanel(
             contentRect: NSRect(origin: .zero, size: compactSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -49,13 +51,23 @@ final class IslandPanelController: NSObject {
 
         configurePanel(panel)
         let hostingView = NSHostingView(
-            rootView: IslandView(viewModel: viewModel, displayGeometry: displayGeometry)
+            rootView: IslandView(
+                viewModel: viewModel,
+                displayGeometry: displayGeometry,
+                displaySelection: displaySelection
+            )
         )
         hostingView.sizingOptions = []
         hostingView.wantsLayer = true
         hostingView.layer?.isOpaque = false
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView = hostingView
+
+        displaySelection.onPreferenceChange = { [weak self] in
+            guard let self else { return }
+            self.reposition(animated: false)
+            self.evaluatePointerPosition()
+        }
 
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -65,6 +77,7 @@ final class IslandPanelController: NSObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.targetScreen = self.initialTargetScreen()
+                self.displaySelection.refresh()
                 if self.panel.isVisible {
                     self.reposition(animated: false)
                 }
@@ -82,6 +95,7 @@ final class IslandPanelController: NSObject {
     }
 
     func start() {
+        displaySelection.refresh()
         targetScreen = initialTargetScreen()
         reposition(animated: false)
         panel.ignoresMouseEvents = true
@@ -238,6 +252,12 @@ final class IslandPanelController: NSObject {
     }
 
     private func preferredScreen() -> NSScreen? {
+        displaySelection.resolveScreen(
+            automaticScreen: automaticPreferredScreen()
+        )
+    }
+
+    private func automaticPreferredScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
         return targetScreen
             ?? NSScreen.screens.first(where: { notchRect(on: $0)?.contains(mouse) == true })
@@ -328,9 +348,7 @@ final class IslandPanelController: NSObject {
 
     private var isPointerInsideInteractionRegion: Bool {
         let mouse = NSEvent.mouseLocation
-        let isInsideNotch = NSScreen.screens.contains {
-            notchRect(on: $0)?.contains(mouse) == true
-        }
+        let isInsideNotch = preferredScreen().flatMap(notchRect)?.contains(mouse) == true
         let isInsidePanel = panel.isVisible && panel.frame.contains(mouse)
         return isInsideNotch || isInsidePanel
     }
