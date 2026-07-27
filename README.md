@@ -80,9 +80,9 @@ open "dist/Codex-Island.dmg"
 
 ### Download the DMG (Alternative)
 
-**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**
+**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.07.27/Codex-Island.dmg)**
 
-The current release is `v2026.07.24` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
+The current release is `v2026.07.27` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
 
 ### Launch at Login
 

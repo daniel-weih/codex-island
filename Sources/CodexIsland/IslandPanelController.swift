@@ -37,6 +37,7 @@ final class IslandPanelController: NSObject {
     private var pointerIsInside = false
     private var targetScreen: NSScreen?
     private var screenObserver: NSObjectProtocol?
+    private var displayTransitionGeneration = 0
 
     init(viewModel: CodexStatusViewModel) {
         self.viewModel = viewModel
@@ -65,8 +66,7 @@ final class IslandPanelController: NSObject {
 
         displaySelection.onPreferenceChange = { [weak self] in
             guard let self else { return }
-            self.reposition(animated: false)
-            self.evaluatePointerPosition()
+            self.scheduleDisplayPreferenceChange()
         }
 
         screenObserver = NotificationCenter.default.addObserver(
@@ -105,6 +105,7 @@ final class IslandPanelController: NSObject {
     }
 
     func stop() {
+        displayTransitionGeneration &+= 1
         expandWorkItem?.cancel()
         collapseWorkItem?.cancel()
         if let globalMouseMonitor {
@@ -116,6 +117,45 @@ final class IslandPanelController: NSObject {
             self.localMouseMonitor = nil
         }
         panel.orderOut(nil)
+    }
+
+    private func scheduleDisplayPreferenceChange() {
+        // A display choice is made while the expanded panel is tracking the
+        // pointer on the old screen. Cancel that interaction before moving the
+        // panel so a pending collapse animation cannot race the cross-screen
+        // frame update.
+        expandWorkItem?.cancel()
+        expandWorkItem = nil
+        collapseWorkItem?.cancel()
+        collapseWorkItem = nil
+        pointerIsInside = false
+        panel.ignoresMouseEvents = true
+        panel.orderOut(nil)
+        viewModel.isExpanded = false
+
+        // Moving an NSHostingView-backed window synchronously from the SwiftUI
+        // button action can re-enter AppKit's constraint update cycle when the
+        // target screen changes its safe-area insets. Wait until the picker
+        // animation and the current display cycle have finished before setting
+        // the cross-screen frame.
+        displayTransitionGeneration &+= 1
+        let generation = displayTransitionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self,
+                  self.displayTransitionGeneration == generation else {
+                return
+            }
+            self.completeDisplayPreferenceChange()
+        }
+    }
+
+    private func completeDisplayPreferenceChange() {
+        // Rebuild the NSScreen mapping before resolving the saved display, then
+        // reattach the nonactivating panel to the target display's active Space.
+        displaySelection.refresh()
+        reposition(animated: false)
+        panel.orderFrontRegardless()
+        evaluatePointerPosition()
     }
 
     private func installPointerMonitoring() {

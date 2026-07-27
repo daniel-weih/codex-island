@@ -80,9 +80,9 @@ open "dist/Codex-Island.dmg"
 
 ### 直接下载 DMG（备选）
 
-**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**
+**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.07.27/Codex-Island.dmg)**
 
-当前版本为 `v2026.07.24`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
+当前版本为 `v2026.07.27`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
 
 ### 开机启动
 
