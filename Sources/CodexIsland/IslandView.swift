@@ -4,7 +4,7 @@ import SwiftUI
 enum IslandLayout {
     static let compactMinimumWidth: CGFloat = 300
     static let compactExtraWidth: CGFloat = 115
-    static let compactFallbackWidth: CGFloat = 240
+    static let compactFallbackWidth: CGFloat = 160
     static let compactFallbackHeight: CGFloat = 32
     static let expandedWidth: CGFloat = 500
     static let contentHorizontalInset: CGFloat = 14
