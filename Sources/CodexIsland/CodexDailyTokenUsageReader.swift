@@ -1,9 +1,17 @@
 import Foundation
 
-/// Computes today's locally-persisted Token increments for root CLI/App
-/// conversations. Absolute cumulative counters are reduced to positive deltas,
-/// so replayed `token_count` notifications do not inflate the result.
+struct LocalTokenUsageSnapshot: Equatable, Sendable {
+    var todayTokens: Int64
+    var hourlyBuckets: [HourlyUsageBucket]
+}
+
+/// Computes recent locally-persisted Token increments for CLI/App model calls.
+/// Absolute cumulative counters are reduced to positive deltas, so replayed
+/// `token_count` notifications do not inflate the result. Forks use their own
+/// session timestamp, while subagents use their explicit activity boundary, so
+/// copied parent history is excluded while new work remains visible.
 enum CodexDailyTokenUsageReader {
+    static let recentHourCount = 48
     private static let cache = DailyTokenUsageCache()
 
     static func readToday(
@@ -11,20 +19,33 @@ enum CodexDailyTokenUsageReader {
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent
     ) throws -> Int64 {
-        try cache.readToday(
+        try readRecentHours(
             from: rolloutPaths,
             now: now,
             calendar: calendar
+        ).todayTokens
+    }
+
+    static func readRecentHours(
+        from rolloutPaths: [String],
+        now: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) throws -> LocalTokenUsageSnapshot {
+        try cache.readRecentHours(
+            from: rolloutPaths,
+            now: now,
+            calendar: calendar,
+            hourCount: recentHourCount
         )
     }
 
-    /// Finds every locally-persisted root CLI/App rollout that could contain
-    /// today's activity or a still-fresh cross-midnight running turn.
-    static func discoverRootConversationRollouts(
+    /// Finds every local CLI/App rollout that could contain model calls in the
+    /// rolling hourly chart or a still-fresh running turn.
+    static func discoverLocalUsageRollouts(
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent
     ) throws -> [String] {
-        try DailyTokenUsageCache.discoverRootConversationRollouts(
+        try DailyTokenUsageCache.discoverLocalUsageRollouts(
             now: now,
             calendar: calendar
         )
@@ -47,8 +68,11 @@ private struct DailyTokenFileEntry {
     var modifiedAt: Date
     var previousTotal: Int64?
     var todayTotal: Int64
+    var hourlyTotals: [Date: Int64]
     var trailingLineStartOffset: UInt64?
-    var isExcludedFork: Bool
+    var countingStart: Date
+    var isExcluded: Bool
+    var isWaitingForSubagentBoundary: Bool
 }
 
 private enum DailyTokenUsageError: LocalizedError {
@@ -67,11 +91,16 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private static let maximumRelevantLineSize = 64 * 1024
     private static let maximumSessionMetaSize = 512 * 1024
     private static let tokenCountMarker = Data("token_count".utf8)
+    private static let subagentBoundaryMarker = Data(
+        "inter_agent_communication_metadata".utf8
+    )
     private static let freshRunningLookback: TimeInterval = 30 * 60
 
     private let lock = NSLock()
     private var dayStart: Date?
     private var nextDayStart: Date?
+    private var hourlyRangeStart: Date?
+    private var hourlyRangeEnd: Date?
     private var entries: [String: DailyTokenFileEntry] = [:]
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
@@ -91,14 +120,34 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         defer { lock.unlock() }
         dayStart = nil
         nextDayStart = nil
+        hourlyRangeStart = nil
+        hourlyRangeEnd = nil
         entries.removeAll()
     }
 
-    func readToday(
+    func readRecentHours(
         from rolloutPaths: [String],
         now: Date,
-        calendar: Calendar
-    ) throws -> Int64 {
+        calendar: Calendar,
+        hourCount: Int
+    ) throws -> LocalTokenUsageSnapshot {
+        guard hourCount > 0,
+              let currentHourStart = calendar.dateInterval(
+                of: .hour,
+                for: now
+              )?.start,
+              let resolvedHourlyRangeStart = calendar.date(
+                byAdding: .hour,
+                value: -(hourCount - 1),
+                to: currentHourStart
+              ),
+              let resolvedHourlyRangeEnd = calendar.date(
+                byAdding: .hour,
+                value: 1,
+                to: currentHourStart
+              ) else {
+            throw DailyTokenUsageError.noReadableRollouts
+        }
         let resolvedDayStart = calendar.startOfDay(for: now)
         guard let resolvedNextDayStart = calendar.date(
             byAdding: .day,
@@ -111,28 +160,52 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if dayStart != resolvedDayStart || nextDayStart != resolvedNextDayStart {
+        if dayStart != resolvedDayStart
+            || nextDayStart != resolvedNextDayStart
+            || hourlyRangeStart != resolvedHourlyRangeStart
+            || hourlyRangeEnd != resolvedHourlyRangeEnd {
             dayStart = resolvedDayStart
             nextDayStart = resolvedNextDayStart
+            hourlyRangeStart = resolvedHourlyRangeStart
+            hourlyRangeEnd = resolvedHourlyRangeEnd
             entries.removeAll()
         }
 
         let paths = Array(Set(rolloutPaths.filter { !$0.isEmpty })).sorted()
-        guard !paths.isEmpty else { return 0 }
+        guard !paths.isEmpty else {
+            return LocalTokenUsageSnapshot(
+                todayTokens: 0,
+                hourlyBuckets: Self.emptyHourlyBuckets(
+                    startingAt: resolvedHourlyRangeStart,
+                    count: hourCount,
+                    calendar: calendar
+                )
+            )
+        }
 
         var readableCount = 0
         var total: Int64 = 0
+        var hourlyTotals: [Date: Int64] = [:]
         for path in paths {
             let url = URL(fileURLWithPath: path).standardizedFileURL
             do {
                 let entry = try refreshedEntry(
                     for: url,
                     dayStart: resolvedDayStart,
-                    nextDayStart: resolvedNextDayStart
+                    nextDayStart: resolvedNextDayStart,
+                    hourlyRangeStart: resolvedHourlyRangeStart,
+                    hourlyRangeEnd: resolvedHourlyRangeEnd,
+                    calendar: calendar
                 )
                 entries[url.path] = entry
                 readableCount += 1
                 total = Self.clampedAdd(total, entry.todayTotal)
+                for (hourStart, tokens) in entry.hourlyTotals {
+                    hourlyTotals[hourStart] = Self.clampedAdd(
+                        hourlyTotals[hourStart, default: 0],
+                        tokens
+                    )
+                }
             } catch {
                 // A thread may disappear from the state index while it is being
                 // archived. Preserve the rest of the independently readable sum.
@@ -143,16 +216,35 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         guard readableCount > 0 else {
             throw DailyTokenUsageError.noReadableRollouts
         }
-        return total
+        let buckets = Self.emptyHourlyBuckets(
+            startingAt: resolvedHourlyRangeStart,
+            count: hourCount,
+            calendar: calendar
+        ).map { bucket in
+            HourlyUsageBucket(
+                hourStart: bucket.hourStart,
+                tokens: hourlyTotals[bucket.hourStart] ?? 0
+            )
+        }
+        return LocalTokenUsageSnapshot(
+            todayTokens: total,
+            hourlyBuckets: buckets
+        )
     }
 
-    static func discoverRootConversationRollouts(
+    static func discoverLocalUsageRollouts(
         now: Date,
         calendar: Calendar
     ) throws -> [String] {
-        let dayStart = calendar.startOfDay(for: now)
+        let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start
+            ?? calendar.startOfDay(for: now)
+        let historyStart = calendar.date(
+            byAdding: .hour,
+            value: -(CodexDailyTokenUsageReader.recentHourCount - 1),
+            to: currentHourStart
+        ) ?? currentHourStart
         let cutoff = min(
-            dayStart,
+            historyStart,
             now.addingTimeInterval(-freshRunningLookback)
         )
         let configuredHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
@@ -185,7 +277,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 guard values?.isRegularFile == true,
                       let modifiedAt = values?.contentModificationDate,
                       modifiedAt >= cutoff,
-                      (try? isRootCLIOrAppRollout(url: url)) == true else {
+                      (try? isLocalUsageRollout(url: url)) == true else {
                     continue
                 }
                 paths.append(url.standardizedFileURL.path)
@@ -197,7 +289,10 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private func refreshedEntry(
         for url: URL,
         dayStart: Date,
-        nextDayStart: Date
+        nextDayStart: Date,
+        hourlyRangeStart: Date,
+        hourlyRangeEnd: Date,
+        calendar: Calendar
     ) throws -> DailyTokenFileEntry {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
@@ -218,7 +313,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
         if var cached = entries[url.path],
            cached.fileIdentity == fileIdentity,
-           fileSize > cached.fileSize {
+           fileSize > cached.fileSize,
+           !cached.isWaitingForSubagentBoundary {
             let originalSize = cached.fileSize
             let scanStart = min(
                 cached.trailingLineStartOffset ?? originalSize,
@@ -226,9 +322,10 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             )
             cached.fileSize = fileSize
             cached.modifiedAt = modifiedAt
-            if !cached.isExcludedFork {
+            if !cached.isExcluded {
                 var previousTotal = cached.previousTotal
                 var todayTotal = cached.todayTotal
+                var hourlyTotals = cached.hourlyTotals
                 try Self.scanForward(
                     url: url,
                     from: scanStart,
@@ -238,12 +335,18 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                         event,
                         previousTotal: &previousTotal,
                         todayTotal: &todayTotal,
+                        hourlyTotals: &hourlyTotals,
+                        countingStart: cached.countingStart,
                         dayStart: dayStart,
-                        nextDayStart: nextDayStart
+                        nextDayStart: nextDayStart,
+                        hourlyRangeStart: hourlyRangeStart,
+                        hourlyRangeEnd: hourlyRangeEnd,
+                        calendar: calendar
                     )
                 }
                 cached.previousTotal = previousTotal
                 cached.todayTotal = todayTotal
+                cached.hourlyTotals = hourlyTotals
                 cached.trailingLineStartOffset = try Self.findTrailingLineStartOffset(
                     url: url,
                     fileSize: fileSize
@@ -252,33 +355,45 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return cached
         }
 
-        let excluded = try Self.isForkedOrSubagentRollout(url: url)
+        let session = try Self.localUsageSession(url: url)
+        let countingStart = max(
+            hourlyRangeStart,
+            session.activityStartedAt ?? session.startedAt ?? hourlyRangeStart
+        )
         var entry = DailyTokenFileEntry(
             fileIdentity: fileIdentity,
             fileSize: fileSize,
             modifiedAt: modifiedAt,
             previousTotal: nil,
             todayTotal: 0,
+            hourlyTotals: [:],
             trailingLineStartOffset: try Self.findTrailingLineStartOffset(
                 url: url,
                 fileSize: fileSize
             ),
-            isExcludedFork: excluded
+            countingStart: countingStart,
+            isExcluded: !session.isIncluded || session.isWaitingForActivityBoundary,
+            isWaitingForSubagentBoundary: session.isWaitingForActivityBoundary
         )
-        guard !excluded, modifiedAt >= dayStart else { return entry }
+        guard !entry.isExcluded, modifiedAt >= countingStart else { return entry }
 
         let events = try Self.scanBackwardToDailyBaseline(
             url: url,
             fileSize: fileSize,
-            dayStart: dayStart
+            dayStart: countingStart
         )
         for event in events.reversed() {
             Self.consume(
                 event,
                 previousTotal: &entry.previousTotal,
                 todayTotal: &entry.todayTotal,
+                hourlyTotals: &entry.hourlyTotals,
+                countingStart: countingStart,
                 dayStart: dayStart,
-                nextDayStart: nextDayStart
+                nextDayStart: nextDayStart,
+                hourlyRangeStart: hourlyRangeStart,
+                hourlyRangeEnd: hourlyRangeEnd,
+                calendar: calendar
             )
         }
         return entry
@@ -288,8 +403,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         _ event: DailyTokenEvent,
         previousTotal: inout Int64?,
         todayTotal: inout Int64,
+        hourlyTotals: inout [Date: Int64],
+        countingStart: Date,
         dayStart: Date,
-        nextDayStart: Date
+        nextDayStart: Date,
+        hourlyRangeStart: Date,
+        hourlyRangeEnd: Date,
+        calendar: Calendar
     ) {
         let delta: Int64
         if let previousTotal {
@@ -303,12 +423,37 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         }
         previousTotal = event.totalTokens
 
-        guard event.timestamp >= dayStart, event.timestamp < nextDayStart else { return }
-        todayTotal = clampedAdd(todayTotal, delta)
+        guard event.timestamp >= countingStart else { return }
+        if event.timestamp >= dayStart, event.timestamp < nextDayStart {
+            todayTotal = clampedAdd(todayTotal, delta)
+        }
+        if event.timestamp >= hourlyRangeStart,
+           event.timestamp < hourlyRangeEnd,
+           let hourStart = calendar.dateInterval(
+            of: .hour,
+            for: event.timestamp
+           )?.start {
+            hourlyTotals[hourStart] = clampedAdd(
+                hourlyTotals[hourStart, default: 0],
+                delta
+            )
+        }
+    }
+
+    private static func emptyHourlyBuckets(
+        startingAt start: Date,
+        count: Int,
+        calendar: Calendar
+    ) -> [HourlyUsageBucket] {
+        (0..<count).compactMap { offset in
+            calendar.date(byAdding: .hour, value: offset, to: start).map {
+                HourlyUsageBucket(hourStart: $0, tokens: 0)
+            }
+        }
     }
 
     /// Returns newest-to-oldest events, including the first absolute counter
-    /// before local midnight as the baseline for a cross-midnight conversation.
+    /// before the requested range as the cumulative baseline.
     private static func scanBackwardToDailyBaseline(
         url: URL,
         fileSize: UInt64,
@@ -478,33 +623,51 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         return nil
     }
 
-    private static func isForkedOrSubagentRollout(url: URL) throws -> Bool {
-        let line = try readSessionMetaLine(url: url)
-        guard !line.isEmpty else { return false }
-        if line.count > maximumSessionMetaSize {
-            return containsForkOrSubagentMarker(line)
-        }
-        guard let payload = sessionMetaPayload(line) else { return false }
-        return isForkedOrSubagent(payload)
+    private struct LocalUsageSession {
+        var startedAt: Date?
+        var activityStartedAt: Date?
+        var isIncluded: Bool
+        var isWaitingForActivityBoundary: Bool
     }
 
-    private static func isRootCLIOrAppRollout(url: URL) throws -> Bool {
+    private static func localUsageSession(url: URL) throws -> LocalUsageSession {
         let line = try readSessionMetaLine(url: url)
-        guard !line.isEmpty else { return false }
-
-        if let payload = sessionMetaPayload(line) {
-            guard !isForkedOrSubagent(payload),
-                  let source = payload.string("source")?.lowercased() else {
-                return false
-            }
-            return source == "cli" || source == "vscode"
+        guard !line.isEmpty else {
+            return LocalUsageSession(
+                startedAt: nil,
+                activityStartedAt: nil,
+                isIncluded: false,
+                isWaitingForActivityBoundary: false
+            )
         }
+        guard let object = sessionMetaObject(line),
+              let payload = object.dictionary("payload") else {
+            return LocalUsageSession(
+                startedAt: nil,
+                activityStartedAt: nil,
+                isIncluded: containsLocalUsageSourceMarker(line),
+                isWaitingForActivityBoundary: false
+            )
+        }
+        let isSubagent = isSubagentUsageSession(payload)
+        let activityStartedAt = isSubagent
+            ? try firstSubagentActivityBoundary(url: url)
+            : nil
+        return LocalUsageSession(
+            startedAt: object.string("timestamp").flatMap(parseTimestamp),
+            activityStartedAt: activityStartedAt,
+            isIncluded: isLocalUsageSession(payload),
+            isWaitingForActivityBoundary: isSubagent && activityStartedAt == nil
+        )
+    }
 
-        // `source` is near the beginning of session_meta. This fallback keeps
-        // unusually large metadata rows discoverable without retaining them.
-        guard !containsForkOrSubagentMarker(line) else { return false }
-        return line.range(of: Data("\"source\":\"cli\"".utf8)) != nil
-            || line.range(of: Data("\"source\":\"vscode\"".utf8)) != nil
+    private static func isLocalUsageRollout(url: URL) throws -> Bool {
+        let line = try readSessionMetaLine(url: url)
+        guard let object = sessionMetaObject(line),
+              let payload = object.dictionary("payload") else {
+            return containsLocalUsageSourceMarker(line)
+        }
+        return isLocalUsageSession(payload)
     }
 
     private static func readSessionMetaLine(url: URL) throws -> Data {
@@ -524,32 +687,77 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         return line
     }
 
-    private static func sessionMetaPayload(_ line: Data) -> JSONObject? {
+    private static func sessionMetaObject(_ line: Data) -> JSONObject? {
         guard let object = try? JSONSerialization.jsonObject(with: line) as? JSONObject,
-              object.string("type") == "session_meta",
-              let payload = object.dictionary("payload") else {
+              object.string("type") == "session_meta" else {
             return nil
         }
-        return payload
+        return object
     }
 
-    private static func isForkedOrSubagent(_ payload: JSONObject) -> Bool {
-        if let forkedFromID = payload.string("forked_from_id"),
-           !forkedFromID.trimmingCharacters(
-               in: CharacterSet.whitespacesAndNewlines
-           ).isEmpty {
+    private static func isLocalUsageSession(_ payload: JSONObject) -> Bool {
+        if let source = payload.string("source")?.lowercased(),
+           source == "cli" || source == "vscode" {
             return true
         }
-        if payload.string("thread_source")?.lowercased() == "subagent" {
-            return true
-        }
-        return payload.dictionary("source")?.dictionary("subagent") != nil
+        return isSubagentUsageSession(payload)
     }
 
-    private static func containsForkOrSubagentMarker(_ line: Data) -> Bool {
-        line.range(of: Data("\"forked_from_id\"".utf8)) != nil
+    private static func isSubagentUsageSession(_ payload: JSONObject) -> Bool {
+        payload.string("thread_source")?.lowercased() == "subagent"
+            || payload.dictionary("source")?.dictionary("subagent") != nil
+    }
+
+    private static func containsLocalUsageSourceMarker(_ line: Data) -> Bool {
+        line.range(of: Data("\"source\":\"cli\"".utf8)) != nil
+            || line.range(of: Data("\"source\":\"vscode\"".utf8)) != nil
             || line.range(of: Data("\"thread_source\":\"subagent\"".utf8)) != nil
             || line.range(of: Data("\"source\":{\"subagent\"".utf8)) != nil
+    }
+
+    /// A spawned subagent rollout begins with a timestamp-rewritten replay of
+    /// its parent's history. The first inter-agent metadata row separates that
+    /// replay from work performed by the child itself. Until the row is fully
+    /// committed, the rollout must contribute zero rather than briefly showing
+    /// the copied cumulative counters as new usage.
+    private static func firstSubagentActivityBoundary(url: URL) throws -> Date? {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var line = Data()
+        var skippingOversizedLine = false
+        while true {
+            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+            guard !chunk.isEmpty else { return nil }
+
+            for byte in chunk {
+                if byte == 0x0A {
+                    if !skippingOversizedLine,
+                       let boundary = parseSubagentActivityBoundary(line) {
+                        return boundary
+                    }
+                    line.removeAll(keepingCapacity: true)
+                    skippingOversizedLine = false
+                } else if !skippingOversizedLine {
+                    if line.count < maximumRelevantLineSize {
+                        line.append(byte)
+                    } else {
+                        line.removeAll(keepingCapacity: false)
+                        skippingOversizedLine = true
+                    }
+                }
+            }
+        }
+    }
+
+    private static func parseSubagentActivityBoundary(_ line: Data) -> Date? {
+        guard line.range(of: subagentBoundaryMarker) != nil,
+              let object = try? JSONSerialization.jsonObject(with: line) as? JSONObject,
+              object.string("type") == "inter_agent_communication_metadata",
+              let timestamp = object.string("timestamp") else {
+            return nil
+        }
+        return parseTimestamp(timestamp)
     }
 
     private static func findTrailingLineStartOffset(

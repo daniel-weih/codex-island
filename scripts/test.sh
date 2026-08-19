@@ -5,8 +5,11 @@ set -euo pipefail
 ROOT_DIR="${0:A:h:h}"
 OUTPUT_DIR="$ROOT_DIR/.build/parser-checks"
 OUTPUT="$OUTPUT_DIR/ParserChecks"
+SCREENSHOT_OUTPUT_DIR="$ROOT_DIR/.build/screenshot-checks"
+SCREENSHOT_OUTPUT="$SCREENSHOT_OUTPUT_DIR/ScreenshotChecks"
 
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$SCREENSHOT_OUTPUT_DIR"
 swiftc \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
@@ -24,3 +27,11 @@ swiftc \
     -o "$OUTPUT"
 
 "$OUTPUT"
+
+swiftc \
+    -parse-as-library \
+    "$ROOT_DIR/Sources/CodexIsland/IslandScreenshotService.swift" \
+    "$ROOT_DIR/Tests/ScreenshotChecks/main.swift" \
+    -o "$SCREENSHOT_OUTPUT"
+
+"$SCREENSHOT_OUTPUT"

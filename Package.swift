@@ -12,7 +12,10 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "CodexIsland"
+            name: "CodexIsland",
+            resources: [
+                .process("Resources")
+            ]
         )
     ],
     swiftLanguageModes: [.v5]

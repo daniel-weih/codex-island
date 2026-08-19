@@ -152,6 +152,7 @@ enum CodexPreviewRenderer {
                 )
             ],
             todayThreadTokens: 84_350_271,
+            hourlyThreadTokens: previewHourlyUsageBuckets(),
             hasRunningSession: true,
             activeModel: ModelSummary(
                 id: "gpt-5.6-sol",
@@ -173,6 +174,18 @@ enum CodexPreviewRenderer {
             "codex-island-compact-token-consuming-1x.png"
         )
         let expandedURL = directory.appendingPathComponent("codex-island-expanded.png")
+        let expandedHourlyURL = directory.appendingPathComponent(
+            "codex-island-expanded-hourly.png"
+        )
+        let expandedTsinghuaURL = directory.appendingPathComponent(
+            "codex-island-expanded-tsinghua.png"
+        )
+        let companyThemePreviews: [(theme: IslandColorTheme, url: URL)] = [
+            (.meituan, directory.appendingPathComponent("codex-island-expanded-meituan.png")),
+            (.bytedance, directory.appendingPathComponent("codex-island-expanded-bytedance.png")),
+            (.alibaba, directory.appendingPathComponent("codex-island-expanded-alibaba.png")),
+            (.tencent, directory.appendingPathComponent("codex-island-expanded-tencent.png"))
+        ]
         let settingsURL = directory.appendingPathComponent(
             "codex-island-expanded-settings.png"
         )
@@ -197,8 +210,8 @@ enum CodexPreviewRenderer {
         let headerIslandSettingsHoverURL = directory.appendingPathComponent(
             "codex-island-expanded-header-island-settings-hover.png"
         )
-        let headerCodexSettingsHoverURL = directory.appendingPathComponent(
-            "codex-island-expanded-header-codex-settings-hover.png"
+        let headerScreenshotHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-screenshot-hover.png"
         )
         let hoverTopURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-top.png"
@@ -218,6 +231,8 @@ enum CodexPreviewRenderer {
             compactBoundaryURL,
             compactConsuming1xURL,
             expandedURL,
+            expandedHourlyURL,
+            expandedTsinghuaURL,
             settingsURL,
             expandedEnglishURL,
             settingsEnglishURL,
@@ -225,13 +240,14 @@ enum CodexPreviewRenderer {
             settingsDisplayMenuEnglishURL,
             resetHoverEnglishURL,
             headerIslandSettingsHoverURL,
-            headerCodexSettingsHoverURL,
+            headerScreenshotHoverURL,
             headerQuitHoverURL,
             hoverTopURL,
             hoverTopEnglishURL,
             hoverBottomURL,
             resetHoverURL
         ]
+        outputURLs.append(contentsOf: companyThemePreviews.map(\.url))
         var englishSnapshot = snapshot
         let englishThreadTitles = [
             "Create hatch pet",
@@ -314,6 +330,32 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
+            initialTokenChartRange: .hours48,
+            size: expandedSize,
+            to: expandedHourlyURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            previewColorTheme: .tsinghua,
+            size: expandedSize,
+            to: expandedTsinghuaURL
+        )
+        for preview in companyThemePreviews {
+            try render(
+                snapshot: snapshot,
+                displayGeometry: geometry,
+                expanded: true,
+                previewColorTheme: preview.theme,
+                size: expandedSize,
+                to: preview.url
+            )
+        }
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
             initialIslandSettingsPresented: true,
             size: expandedSize,
             to: settingsURL
@@ -376,10 +418,10 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredHeaderAction: .codexSettings,
+            initialHoveredHeaderAction: .screenshot,
             previewLanguagePreference: .chinese,
             size: expandedSize,
-            to: headerCodexSettingsHoverURL
+            to: headerScreenshotHoverURL
         )
         try render(
             snapshot: snapshot,
@@ -394,7 +436,7 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredTokenThreadID: "preview-1",
+            initialHoveredTokenThreadID: "preview-2",
             size: expandedSize,
             to: hoverTopURL
         )
@@ -411,7 +453,7 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredTokenThreadID: "preview-4",
+            initialHoveredTokenThreadID: "preview-3",
             size: expandedSize,
             to: hoverBottomURL
         )
@@ -617,6 +659,34 @@ enum CodexPreviewRenderer {
         }
     }
 
+    private static func previewHourlyUsageBuckets(
+        now: Date = Date()
+    ) -> [HourlyUsageBucket] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .autoupdatingCurrent
+        guard let currentHour = calendar.dateInterval(of: .hour, for: now)?.start else {
+            return []
+        }
+        let values: [Int64] = [
+            3, 0, 7, 11, 5, 0, 18, 26, 14, 9, 4, 0,
+            2, 6, 13, 21, 34, 19, 8, 0, 5, 12, 25, 41,
+            28, 17, 6, 0, 9, 15, 31, 46, 23, 12, 7, 3,
+            0, 8, 20, 37, 52, 29, 16, 10, 4, 13, 32, 24
+        ]
+        return values.enumerated().compactMap { index, value in
+            calendar.date(
+                byAdding: .hour,
+                value: index - (values.count - 1),
+                to: currentHour
+            ).map {
+                HourlyUsageBucket(
+                    hourStart: $0,
+                    tokens: value * 1_000_000
+                )
+            }
+        }
+    }
+
     private static func render(
         snapshot: CodexSnapshot,
         displayGeometry: IslandDisplayGeometry,
@@ -627,7 +697,9 @@ enum CodexPreviewRenderer {
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
+        initialTokenChartRange: TokenChartRange = .days30,
         previewLanguagePreference: IslandLanguagePreference? = nil,
+        previewColorTheme: IslandColorTheme = .ocean,
         size: CGSize,
         scale: CGFloat = 2,
         to url: URL
@@ -661,7 +733,9 @@ enum CodexPreviewRenderer {
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,
             initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
+            initialTokenChartRange: initialTokenChartRange,
             previewLanguagePreference: previewLanguagePreference,
+            previewColorTheme: previewColorTheme,
             launchAtLoginBackend: .previewDisabled,
             usesTimelineUpdates: false
         )

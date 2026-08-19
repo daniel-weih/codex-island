@@ -3,7 +3,17 @@ import Foundation
 typealias JSONObject = [String: Any]
 
 enum CodexDisplayPolicy {
-    static let recentThreadLimit = 5
+    static let recentThreadLimit = 3
+    static let recentThreadFetchLimit = 12
+
+    /// Keeps active work visible when the compact dashboard has fewer rows than
+    /// the backing thread query. The input is already ordered by recency, so a
+    /// stable partition preserves that order within both groups.
+    static func visibleRecentThreads(from threads: [ThreadSummary]) -> [ThreadSummary] {
+        let running = threads.filter { $0.executionState == .running }
+        let remaining = threads.filter { $0.executionState != .running }
+        return Array((running + remaining).prefix(recentThreadLimit))
+    }
 
     static func shouldAnimateTokenConsumption(
         previous: Int64?,
@@ -20,6 +30,143 @@ enum CodexDisplayPolicy {
         guard let current else { return previous }
         guard let previous else { return current }
         return max(previous, current)
+    }
+
+    /// Compares actual quota use with a perfectly even burn through the current
+    /// reset window. The difference is relative to the expected use at this point
+    /// in the cycle, so 30% used versus 20% elapsed is 50% ahead of pace.
+    static func quotaConsumptionPace(
+        window: RateLimitWindow?,
+        now: Date = Date()
+    ) -> QuotaConsumptionPaceAssessment? {
+        guard let window,
+              let durationMinutes = window.windowDurationMinutes,
+              durationMinutes > 0,
+              let resetsAt = window.resetsAt else {
+            return nil
+        }
+
+        let duration = TimeInterval(durationMinutes) * 60
+        let lastResetAt = resetsAt.addingTimeInterval(-duration)
+        guard now >= lastResetAt, now < resetsAt else { return nil }
+
+        let elapsedPercent = now.timeIntervalSince(lastResetAt) / duration * 100
+        guard elapsedPercent > 0 else { return nil }
+        let usedPercent = min(100, max(0, window.usedPercent))
+        let relativeDifferencePercent = (
+            usedPercent / elapsedPercent - 1
+        ) * 100
+        let pace: QuotaConsumptionPace
+
+        if relativeDifferencePercent < -10 {
+            pace = .slow
+        } else if relativeDifferencePercent <= 10 {
+            pace = .normal
+        } else if relativeDifferencePercent <= 25 {
+            pace = .warning
+        } else {
+            pace = .critical
+        }
+
+        return QuotaConsumptionPaceAssessment(
+            pace: pace,
+            usedPercent: usedPercent,
+            elapsedPercent: elapsedPercent,
+            relativeDifferencePercent: relativeDifferencePercent,
+            lastResetAt: lastResetAt,
+            nextResetAt: resetsAt
+        )
+    }
+
+    /// Converts the current percentage allowance into an approximate Token
+    /// equivalent using the user's observed Token volume in this reset window.
+    /// The first partial day is prorated because account usage is day-bucketed.
+    static func estimatedRemainingTokens(
+        window: RateLimitWindow?,
+        dailyUsageBuckets: [DailyUsageBucket],
+        todayTokens: Int64?,
+        now: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> Int64? {
+        guard let window,
+              let durationMinutes = window.windowDurationMinutes,
+              durationMinutes > 0,
+              let resetsAt = window.resetsAt else {
+            return nil
+        }
+
+        let usedPercent = min(100, max(0, window.usedPercent))
+        let remainingPercent = window.remainingPercent
+        guard usedPercent > 0, remainingPercent > 0 else { return nil }
+
+        let duration = TimeInterval(durationMinutes) * 60
+        let lastResetAt = resetsAt.addingTimeInterval(-duration)
+        guard now >= lastResetAt, now < resetsAt else { return nil }
+
+        let resetDay = calendar.startOfDay(for: lastResetAt)
+        let today = calendar.startOfDay(for: now)
+        var observedTokens = 0.0
+
+        for bucket in dailyUsageBuckets {
+            guard let bucketDay = usageDay(
+                from: bucket.startDate,
+                calendar: calendar
+            ),
+            bucketDay >= resetDay,
+            bucketDay < today else {
+                continue
+            }
+
+            var fraction = 1.0
+            if bucketDay == resetDay,
+               let nextDay = calendar.date(byAdding: .day, value: 1, to: bucketDay) {
+                let dayDuration = nextDay.timeIntervalSince(bucketDay)
+                if dayDuration > 0 {
+                    fraction = min(
+                        1,
+                        max(0, nextDay.timeIntervalSince(lastResetAt) / dayDuration)
+                    )
+                }
+            }
+            observedTokens += Double(max(0, bucket.tokens)) * fraction
+        }
+
+        if let todayTokens, today >= resetDay {
+            var fraction = 1.0
+            if today == resetDay {
+                let elapsedToday = now.timeIntervalSince(today)
+                if elapsedToday > 0 {
+                    fraction = min(
+                        1,
+                        max(0, now.timeIntervalSince(lastResetAt) / elapsedToday)
+                    )
+                }
+            }
+            observedTokens += Double(max(0, todayTokens)) * fraction
+        }
+
+        guard observedTokens > 0 else { return nil }
+        let estimate = observedTokens * remainingPercent / usedPercent
+        guard estimate.isFinite, estimate > 0 else { return nil }
+        return Int64(min(estimate.rounded(), Double(Int64.max)))
+    }
+
+    private static func usageDay(
+        from value: String,
+        calendar: Calendar
+    ) -> Date? {
+        let parts = value.split(separator: "-")
+        guard parts.count == 3,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]) else {
+            return nil
+        }
+        return calendar.date(from: DateComponents(
+            year: year,
+            month: month,
+            day: day
+        )).map { calendar.startOfDay(for: $0) }
     }
 
     /// `account/read` reports both Pro tiers as `pro`. The Codex quota bucket
@@ -84,6 +231,22 @@ struct RateLimitWindow: Equatable {
     }
 }
 
+enum QuotaConsumptionPace: Equatable, Sendable {
+    case slow
+    case normal
+    case warning
+    case critical
+}
+
+struct QuotaConsumptionPaceAssessment: Equatable, Sendable {
+    var pace: QuotaConsumptionPace
+    var usedPercent: Double
+    var elapsedPercent: Double
+    var relativeDifferencePercent: Double
+    var lastResetAt: Date
+    var nextResetAt: Date
+}
+
 struct RateLimitBucket: Equatable {
     var id: String
     var name: String?
@@ -128,6 +291,13 @@ struct DailyUsageBucket: Equatable, Identifiable, Sendable {
     var tokens: Int64
 
     var id: String { startDate }
+}
+
+struct HourlyUsageBucket: Equatable, Identifiable, Sendable {
+    var hourStart: Date
+    var tokens: Int64
+
+    var id: Date { hourStart }
 }
 
 struct ProfileIdentitySummary: Equatable {
@@ -209,9 +379,12 @@ struct CodexSnapshot: Equatable {
     var usage: UsageSummary
     var profileIdentity: ProfileIdentitySummary = .empty
     var recentThreads: [ThreadSummary]
-    /// Token increments persisted by local root CLI/App conversations today.
+    /// Token increments persisted by local CLI/App model calls today.
     /// `nil` means the local activity index has not been loaded yet.
     var todayThreadTokens: Int64? = nil
+    /// Local model-call Token increments for the last 48 clock hours,
+    /// including the current partial hour.
+    var hourlyThreadTokens: [HourlyUsageBucket] = []
     /// Compact-island activity state. This intentionally differs from the
     /// expanded header's app-server connection indicator.
     var hasRunningSession: Bool = false
