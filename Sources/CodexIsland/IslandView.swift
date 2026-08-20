@@ -49,6 +49,7 @@ private enum IslandTypography {
     static let emphasized: CGFloat = 12.5
     static let profileName: CGFloat = 15.5
     static let display: CGFloat = 24
+    static let settingBadge: CGFloat = 10
 }
 
 private enum IslandCoordinateSpace {
@@ -58,6 +59,7 @@ private enum IslandCoordinateSpace {
 enum IslandHeaderAction: Sendable {
     case islandSettings
     case screenshot
+    case codexSettings
     case quit
 }
 
@@ -540,6 +542,8 @@ struct IslandView: View {
             return interfaceLanguage.text("灵动岛设置", "Island settings")
         case .screenshot:
             return interfaceLanguage.text("截图并复制", "Copy screenshot")
+        case .codexSettings:
+            return interfaceLanguage.text("Codex 设置", "Codex settings")
         case .quit:
             return interfaceLanguage.text("退出应用", "Quit app")
         }
@@ -551,7 +555,8 @@ struct IslandView: View {
     ) -> CGPoint {
         let buttonsToRight: CGFloat
         switch action {
-        case .screenshot: buttonsToRight = 2
+        case .screenshot: buttonsToRight = 3
+        case .codexSettings: buttonsToRight = 2
         case .islandSettings: buttonsToRight = 1
         case .quit: buttonsToRight = 0
         }
@@ -754,7 +759,7 @@ struct IslandView: View {
                     .frame(maxHeight: .infinity)
                     .transition(
                         .move(edge: .leading)
-                            .combined(with: .opacity)
+                        .combined(with: .opacity)
                     )
             }
         }
@@ -810,6 +815,7 @@ struct IslandView: View {
 
             HStack(spacing: IslandLayout.headerActionSpacing) {
                 screenshotButton
+                codexSettingsButton
                 islandSettingsButton
                 quitButton
             }
@@ -873,6 +879,10 @@ struct IslandView: View {
 
     private var isScreenshotButtonHovered: Bool {
         hoveredHeaderAction == .screenshot
+    }
+
+    private var isCodexSettingsButtonHovered: Bool {
+        hoveredHeaderAction == .codexSettings
     }
 
     private var isQuitButtonHovered: Bool {
@@ -984,6 +994,44 @@ struct IslandView: View {
                     "将灵动岛截图复制到剪切板",
                     "Copy Island screenshot to clipboard"
                 )
+        )
+    }
+
+    private var codexSettingsButton: some View {
+        Button {
+            CodexLauncher.openSettings()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(
+                        Color.white.opacity(
+                            isCodexSettingsButtonHovered ? 0.075 : 0
+                        )
+                    )
+                    .frame(width: 22, height: 22)
+
+                Image(systemName: "gearshape")
+                    .font(.system(size: IslandTypography.body, weight: .semibold))
+                    .foregroundStyle(
+                        Color.white.opacity(
+                            isCodexSettingsButtonHovered ? 0.72 : 0.38
+                        )
+                    )
+            }
+            .frame(
+                width: IslandLayout.headerActionButtonSize,
+                height: IslandLayout.headerActionButtonSize
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onContinuousHover(
+            coordinateSpace: .named(IslandCoordinateSpace.name)
+        ) { phase in
+            handleHeaderActionHover(.codexSettings, phase: phase)
+        }
+        .accessibilityLabel(
+            interfaceLanguage.text("打开 Codex 设置", "Open Codex settings")
         )
     }
 
@@ -1492,15 +1540,13 @@ private struct IslandSettingsPanel: View {
                 Spacer(minLength: 4)
 
                 IslandLanguagePicker(selection: $languagePreference)
-
-                PixelVerticalDivider(height: 18, opacity: 0.08)
+                    .layoutPriority(2)
 
                 IslandDisplayPicker(
                     selection: displaySelection,
                     previewPresentation: previewDisplayPickerPresentation
                 )
-
-                PixelVerticalDivider(height: 18, opacity: 0.08)
+                .layoutPriority(1)
 
                 Button(action: onRefresh) {
                     HStack(spacing: 3) {
@@ -1597,6 +1643,7 @@ private struct IslandSettingsPanel: View {
 }
 
 private struct IslandDisplayPicker: View {
+    private static let width: CGFloat = 116
     @ObservedObject var selection: IslandDisplaySelectionModel
 
     @Environment(\.displayScale) private var displayScale
@@ -1637,7 +1684,7 @@ private struct IslandDisplayPicker: View {
                 )
             )
         }
-        .frame(width: 104, height: 20)
+        .frame(width: Self.width, height: 28)
         .overlay(alignment: .bottomTrailing) {
             if isMenuPresented {
                 displayMenu
@@ -1666,24 +1713,24 @@ private struct IslandDisplayPicker: View {
     private var pickerLabel: some View {
         HStack(spacing: 4) {
             Image(systemName: "display")
-                .font(.system(size: 7.2, weight: .semibold))
+                .font(.system(size: 10.5, weight: .semibold))
 
             Text(selectedLabel)
-                .font(.system(size: 6.5, weight: .semibold, design: .rounded))
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             Spacer(minLength: 1)
 
             Image(systemName: isMenuPresented ? "chevron.up" : "chevron.down")
-                .font(.system(size: 5.2, weight: .bold))
+                .font(.system(size: 7, weight: .bold))
                 .opacity(0.58)
         }
         .foregroundStyle(
             Color.cyan.opacity(isHovered || isMenuPresented ? 0.90 : 0.72)
         )
         .padding(.horizontal, 7)
-        .frame(width: 104, height: 20)
+        .frame(width: Self.width, height: 28)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(
@@ -1772,10 +1819,10 @@ private struct IslandDisplayPicker: View {
         guard let selected = selection.choices.first(where: {
             $0.target == selection.preference
         }) else {
-            return language.text("自动选屏", "Auto display")
+            return language.text("自动选屏", "Auto")
         }
         if selected.target == .automatic {
-            return language.text("自动选屏", "Auto display")
+            return language.text("自动选屏", "Auto")
         }
         return optionLabel(for: selected)
     }
@@ -1977,6 +2024,7 @@ private struct IslandThemePicker: View {
 }
 
 private struct IslandLanguagePicker: View {
+    private static let width: CGFloat = 120
     @Binding var selection: IslandLanguagePreference
 
     @Environment(\.displayScale) private var displayScale
@@ -1999,8 +2047,10 @@ private struct IslandLanguagePicker: View {
                                 : Color.white.opacity(0.34)
                         )
                         .lineLimit(1)
-                        .padding(.horizontal, 6)
-                        .frame(height: 26)
+                        .frame(
+                            width: optionWidth(for: preference),
+                            height: 24
+                        )
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .fill(
@@ -2018,6 +2068,7 @@ private struct IslandLanguagePicker: View {
             }
         }
         .padding(2)
+        .frame(width: Self.width)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(Color.white.opacity(0.045))
@@ -2029,6 +2080,15 @@ private struct IslandLanguagePicker: View {
                     lineWidth: 1 / max(1, displayScale)
                 )
         )
+    }
+
+    private func optionWidth(
+        for preference: IslandLanguagePreference
+    ) -> CGFloat {
+        switch preference {
+        case .automatic, .chinese: return 34
+        case .english: return 46
+        }
     }
 
     private func optionLabel(
@@ -2119,6 +2179,9 @@ private struct ConversationRow: View {
                 rowWidth: proxy.size.width,
                 bucketCount: activityBucketCount
             )
+            let configurationDensity = ThreadConfigurationDensity(
+                availableRowWidth: proxy.size.width
+            )
 
             HStack(spacing: 0) {
                 HStack(spacing: 5) {
@@ -2149,7 +2212,10 @@ private struct ConversationRow: View {
                     )
 
                 HStack(spacing: 4) {
-                    ThreadFastStatusView(thread: thread)
+                    ThreadConfigurationView(
+                        thread: thread,
+                        density: configurationDensity
+                    )
 
                     ThreadTokenUsageView(
                         usage: thread.tokenUsage,
@@ -2559,6 +2625,117 @@ private struct PulsingStatusDot: View {
     }
 }
 
+private enum ThreadConfigurationDensity {
+    case full
+    case compact
+    case minimal
+
+    init(availableRowWidth: CGFloat) {
+        if availableRowWidth >= 450 {
+            self = .full
+        } else if availableRowWidth >= 370 {
+            self = .compact
+        } else {
+            self = .minimal
+        }
+    }
+
+    var showsModel: Bool { self == .full }
+    var showsReasoning: Bool { self != .minimal }
+}
+
+private struct ThreadConfigurationView: View {
+    private static let modelWidth: CGFloat = 58
+    private static let reasoningWidth: CGFloat = 56
+    private static let fastWidth: CGFloat = 62
+    private static let spacing: CGFloat = 4
+    let thread: ThreadSummary
+    let density: ThreadConfigurationDensity
+    @Environment(\.islandInterfaceLanguage) private var language
+
+    var body: some View {
+        HStack(spacing: Self.spacing) {
+            if density.showsModel {
+                modelSlot
+            }
+            if density.showsReasoning {
+                reasoningSlot
+            }
+            ThreadFastStatusView(thread: thread)
+        }
+        .frame(width: configurationWidth, alignment: .leading)
+        .help(configurationHelp)
+    }
+
+    private var configurationWidth: CGFloat {
+        switch density {
+        case .full:
+            return Self.modelWidth + Self.reasoningWidth + Self.fastWidth
+                + Self.spacing * 2
+        case .compact:
+            return Self.reasoningWidth + Self.fastWidth + Self.spacing
+        case .minimal:
+            return Self.fastWidth
+        }
+    }
+
+    @ViewBuilder
+    private var modelSlot: some View {
+        if let model = thread.model {
+            Text(displayModelName(model))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.46))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.modelWidth, alignment: .leading)
+        } else {
+            Color.clear.frame(width: Self.modelWidth, height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var reasoningSlot: some View {
+        if let effort = thread.reasoningEffort {
+            let normalized = effort.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isUltra = normalized.lowercased() == "ultra"
+            ThreadSettingBadge(
+                text: normalized.uppercased(),
+                color: isUltra
+                    ? Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.94)
+                    : .white.opacity(0.42)
+            )
+            .frame(width: Self.reasoningWidth, alignment: .leading)
+        } else {
+            Color.clear.frame(width: Self.reasoningWidth, height: 1)
+        }
+    }
+
+    private var configurationHelp: String {
+        let model = thread.model.map(displayModelName)
+            ?? language.text("模型未知", "Model unknown")
+        let reasoning = thread.reasoningEffort?.uppercased()
+            ?? language.text("推理强度未知", "Reasoning effort unknown")
+        let fast: String
+        if let tier = thread.serviceTier?.lowercased() {
+            fast = tier == "priority" || tier == "fast"
+                ? language.text("Fast 开启", "Fast on")
+                : language.text("Fast 关闭", "Fast off")
+        } else {
+            fast = language.text("Fast 状态未知", "Fast status unknown")
+        }
+        let source = thread.serviceTierSource == .effectiveConfig
+            ? language.text(
+                "，Fast 按当前配置推断",
+                ", Fast inferred from the current configuration"
+            )
+            : ""
+        return language.text(
+            "\(model)，\(reasoning)，\(fast)\(source)",
+            "\(model), \(reasoning), \(fast)\(source)"
+        )
+    }
+}
+
 private struct ThreadFastStatusView: View {
     let thread: ThreadSummary
     @Environment(\.islandInterfaceLanguage) private var language
@@ -2760,7 +2937,7 @@ private struct ThreadSettingBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
+            .font(.system(size: IslandTypography.settingBadge, weight: .semibold, design: .monospaced))
             .foregroundStyle(color)
             .lineLimit(1)
             .padding(.horizontal, 5)
@@ -2856,8 +3033,7 @@ private struct AccountActivityCard: View {
 
                 QuotaMetric(
                     window: window,
-                    usage: usage,
-                    todayTokens: todayTokens
+                    usage: usage
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -3370,13 +3546,12 @@ private struct HourlyTokenActivityChart: View {
 private struct QuotaMetric: View {
     let window: RateLimitWindow?
     let usage: UsageSummary
-    let todayTokens: Int64?
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 if let resetTimestamp {
                     Text(
                         language.text(
@@ -3402,24 +3577,49 @@ private struct QuotaMetric: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .lineLimit(1)
 
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(remainingText)
-                    .font(.system(size: IslandTypography.display, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.94))
-                    .fixedSize(horizontal: true, vertical: true)
-
-                if let estimatedRemainingTokenText {
-                    Text(estimatedRemainingTokenText)
-                        .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+            GeometryReader { proxy in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(remainingText)
+                        .font(.system(size: IslandTypography.display, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(theme.accent.opacity(0.78))
-                        .lineLimit(1)
-                        .help(estimatedRemainingTokenHelp)
-                        .accessibilityLabel(estimatedRemainingTokenHelp)
+                        .foregroundStyle(.white.opacity(0.94))
+                        .fixedSize(horizontal: true, vertical: true)
+
+                    if let estimatedRemainingTokenText {
+                        Text(estimatedRemainingTokenText)
+                            .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.accent.opacity(0.78))
+                            .fixedSize(horizontal: true, vertical: true)
+                            .help(estimatedRemainingTokenHelp)
+                            .accessibilityLabel(estimatedRemainingTokenHelp)
+                    }
+                }
+                .frame(
+                    width: proxy.size.width,
+                    height: proxy.size.height,
+                    alignment: .leading
+                )
+                .overlay(alignment: .leading) {
+                    if estimatedRemainingTokenText != nil {
+                        Canvas { context, size in
+                            let annotation = context.resolve(
+                                Text(estimatedRemainingTokenAnnotation)
+                                    .font(.system(size: 8, weight: .medium, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.30))
+                            )
+                            context.draw(
+                                annotation,
+                                at: CGPoint(x: 152, y: size.height / 2 + 4),
+                                anchor: .leading
+                            )
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 30)
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -3463,8 +3663,7 @@ private struct QuotaMetric: View {
     private var estimatedRemainingTokens: Int64? {
         CodexDisplayPolicy.estimatedRemainingTokens(
             window: window,
-            dailyUsageBuckets: usage.dailyUsageBuckets,
-            todayTokens: todayTokens
+            dailyUsageBuckets: usage.dailyUsageBuckets
         )
     }
 
@@ -3473,10 +3672,17 @@ private struct QuotaMetric: View {
         return "≈\(compactTokenCount(estimatedRemainingTokens)) Token"
     }
 
+    private var estimatedRemainingTokenAnnotation: String {
+        language.text(
+            "（根据最近一周使用情况估算）",
+            "(estimated from last 7 days)"
+        )
+    }
+
     private var estimatedRemainingTokenHelp: String {
         language.text(
-            "根据本额度周期的实际 Token 消耗与剩余比例估算",
-            "Estimated from Token usage and the remaining quota in this cycle"
+            "根据最近 7 个完整自然日的日均 Token、额度周期长度与剩余比例估算",
+            "Estimated from your average daily Token use over the previous 7 complete days, the quota window, and its remaining percentage"
         )
     }
 
@@ -3869,22 +4075,7 @@ private func compactPlanBadgeLabel(_ value: String) -> String {
 }
 
 private func displayModelName(_ rawValue: String) -> String {
-    let slug = rawValue.split(separator: "/").last.map(String.init) ?? rawValue
-    return slug
-        .split(separator: "-", omittingEmptySubsequences: false)
-        .map { part -> String in
-            let value = String(part)
-            let lowercased = value.lowercased()
-            if lowercased == "gpt" { return "GPT" }
-            if lowercased == "sol" { return "Sol" }
-            if lowercased.first == "o", lowercased.dropFirst().first?.isNumber == true {
-                return lowercased.uppercased()
-            }
-            guard let first = lowercased.first else { return value }
-            if first.isNumber { return value }
-            return first.uppercased() + lowercased.dropFirst()
-        }
-        .joined(separator: "-")
+    CodexDisplayPolicy.displayModelName(rawValue)
 }
 
 private func conversationUpdatedLabel(

@@ -5,6 +5,7 @@ typealias JSONObject = [String: Any]
 enum CodexDisplayPolicy {
     static let recentThreadLimit = 3
     static let recentThreadFetchLimit = 12
+    static let usageHabitDayCount = 7
 
     /// Keeps active work visible when the compact dashboard has fewer rows than
     /// the backing thread query. The input is already ordered by recency, so a
@@ -78,13 +79,13 @@ enum CodexDisplayPolicy {
         )
     }
 
-    /// Converts the current percentage allowance into an approximate Token
-    /// equivalent using the user's observed Token volume in this reset window.
-    /// The first partial day is prorated because account usage is day-bucketed.
+    /// Converts the remaining allowance into a personalized Token estimate.
+    /// The baseline is the user's average daily volume over the previous 7
+    /// complete calendar days, including inactive days, scaled to the quota
+    /// window and its remaining percentage.
     static func estimatedRemainingTokens(
         window: RateLimitWindow?,
         dailyUsageBuckets: [DailyUsageBucket],
-        todayTokens: Int64?,
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent
     ) -> Int64? {
@@ -95,60 +96,64 @@ enum CodexDisplayPolicy {
             return nil
         }
 
-        let usedPercent = min(100, max(0, window.usedPercent))
         let remainingPercent = window.remainingPercent
-        guard usedPercent > 0, remainingPercent > 0 else { return nil }
+        guard remainingPercent > 0 else { return nil }
 
         let duration = TimeInterval(durationMinutes) * 60
         let lastResetAt = resetsAt.addingTimeInterval(-duration)
         guard now >= lastResetAt, now < resetsAt else { return nil }
 
-        let resetDay = calendar.startOfDay(for: lastResetAt)
         let today = calendar.startOfDay(for: now)
-        var observedTokens = 0.0
+        guard let historyStart = calendar.date(
+            byAdding: .day,
+            value: -usageHabitDayCount,
+            to: today
+        ) else {
+            return nil
+        }
+
+        var historicalTokens = 0.0
 
         for bucket in dailyUsageBuckets {
             guard let bucketDay = usageDay(
                 from: bucket.startDate,
                 calendar: calendar
             ),
-            bucketDay >= resetDay,
+            bucketDay >= historyStart,
             bucketDay < today else {
                 continue
             }
-
-            var fraction = 1.0
-            if bucketDay == resetDay,
-               let nextDay = calendar.date(byAdding: .day, value: 1, to: bucketDay) {
-                let dayDuration = nextDay.timeIntervalSince(bucketDay)
-                if dayDuration > 0 {
-                    fraction = min(
-                        1,
-                        max(0, nextDay.timeIntervalSince(lastResetAt) / dayDuration)
-                    )
-                }
-            }
-            observedTokens += Double(max(0, bucket.tokens)) * fraction
+            historicalTokens += Double(max(0, bucket.tokens))
         }
 
-        if let todayTokens, today >= resetDay {
-            var fraction = 1.0
-            if today == resetDay {
-                let elapsedToday = now.timeIntervalSince(today)
-                if elapsedToday > 0 {
-                    fraction = min(
-                        1,
-                        max(0, now.timeIntervalSince(lastResetAt) / elapsedToday)
-                    )
-                }
-            }
-            observedTokens += Double(max(0, todayTokens)) * fraction
-        }
-
-        guard observedTokens > 0 else { return nil }
-        let estimate = observedTokens * remainingPercent / usedPercent
+        guard historicalTokens > 0 else { return nil }
+        let averageDailyTokens = historicalTokens / Double(usageHabitDayCount)
+        let windowDays = Double(durationMinutes) / (24 * 60)
+        let estimate = averageDailyTokens * windowDays * remainingPercent / 100
         guard estimate.isFinite, estimate > 0 else { return nil }
         return Int64(min(estimate.rounded(), Double(Int64.max)))
+    }
+
+    static func displayModelName(_ rawValue: String) -> String {
+        let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let slug = trimmedValue.split(separator: "/").last.map(String.init) ?? trimmedValue
+        var parts = slug.split(separator: "-", omittingEmptySubsequences: false)
+            .map(String.init)
+        if parts.first?.lowercased() == "gpt" {
+            parts.removeFirst()
+        }
+        guard !parts.isEmpty else { return slug }
+        return parts.map { part -> String in
+            let lowercased = part.lowercased()
+            if lowercased == "sol" { return "Sol" }
+            if lowercased.first == "o", lowercased.dropFirst().first?.isNumber == true {
+                return lowercased.uppercased()
+            }
+            guard let first = lowercased.first else { return part }
+            if first.isNumber { return part }
+            return first.uppercased() + lowercased.dropFirst()
+        }
+        .joined(separator: "-")
     }
 
     private static func usageDay(

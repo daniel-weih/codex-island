@@ -213,6 +213,9 @@ enum CodexPreviewRenderer {
         let headerScreenshotHoverURL = directory.appendingPathComponent(
             "codex-island-expanded-header-screenshot-hover.png"
         )
+        let headerCodexSettingsHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-codex-settings-hover.png"
+        )
         let hoverTopURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-top.png"
         )
@@ -241,6 +244,7 @@ enum CodexPreviewRenderer {
             resetHoverEnglishURL,
             headerIslandSettingsHoverURL,
             headerScreenshotHoverURL,
+            headerCodexSettingsHoverURL,
             headerQuitHoverURL,
             hoverTopURL,
             hoverTopEnglishURL,
@@ -422,6 +426,15 @@ enum CodexPreviewRenderer {
             previewLanguagePreference: .chinese,
             size: expandedSize,
             to: headerScreenshotHoverURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredHeaderAction: .codexSettings,
+            previewLanguagePreference: .chinese,
+            size: expandedSize,
+            to: headerCodexSettingsHoverURL
         )
         try render(
             snapshot: snapshot,

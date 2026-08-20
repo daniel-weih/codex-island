@@ -11,6 +11,7 @@ struct ParserChecks {
         checkTokenConsumptionPolicy()
         checkQuotaConsumptionPace()
         checkEstimatedRemainingTokens()
+        checkDisplayModelNames()
         checkVisibleThreadPriority()
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
@@ -687,21 +688,32 @@ struct ParserChecks {
     private static func checkEstimatedRemainingTokens() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let resetDay = calendar.date(from: DateComponents(
+        let now = calendar.date(from: DateComponents(
             year: 2026,
-            month: 1,
+            month: 2,
             day: 1,
             hour: 12
         ))!
-        let nextReset = calendar.date(byAdding: .day, value: 7, to: resetDay)!
-        let now = calendar.date(byAdding: .day, value: 5, to: resetDay)!
-        let buckets = [
-            DailyUsageBucket(startDate: "2026-01-01", tokens: 240),
-            DailyUsageBucket(startDate: "2026-01-02", tokens: 100),
-            DailyUsageBucket(startDate: "2026-01-03", tokens: 100),
-            DailyUsageBucket(startDate: "2026-01-04", tokens: 100),
-            DailyUsageBucket(startDate: "2026-01-05", tokens: 100)
-        ]
+        let nextReset = calendar.date(byAdding: .day, value: 2, to: now)!
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        var buckets = (1...CodexDisplayPolicy.usageHabitDayCount).map { offset in
+            DailyUsageBucket(
+                startDate: formatter.string(
+                    from: calendar.date(byAdding: .day, value: -offset, to: now)!
+                ),
+                tokens: 100
+            )
+        }
+        buckets.append(
+            DailyUsageBucket(startDate: "2026-02-01", tokens: 100_000)
+        )
+        buckets.append(
+            DailyUsageBucket(startDate: "2025-12-31", tokens: 100_000)
+        )
         let estimate = CodexDisplayPolicy.estimatedRemainingTokens(
             window: RateLimitWindow(
                 usedPercent: 50,
@@ -709,23 +721,40 @@ struct ParserChecks {
                 resetsAt: nextReset
             ),
             dailyUsageBuckets: buckets,
-            todayTokens: 50,
             now: now,
             calendar: calendar
         )
         expect(
-            estimate == 570,
-            "remaining Token estimate prorates the first reset day"
+            estimate == 350,
+            "remaining Token estimate uses the previous 7 complete days"
         )
         expect(
             CodexDisplayPolicy.estimatedRemainingTokens(
                 window: nil,
                 dailyUsageBuckets: buckets,
-                todayTokens: 50,
                 now: now,
                 calendar: calendar
             ) == nil,
             "remaining Token estimate stays hidden without quota metadata"
+        )
+    }
+
+    private static func checkDisplayModelNames() {
+        expect(
+            CodexDisplayPolicy.displayModelName("openai/gpt-5.6-sol") == "5.6-Sol",
+            "model display removes provider and GPT prefixes"
+        )
+        expect(
+            CodexDisplayPolicy.displayModelName("GPT-5.5") == "5.5",
+            "model display removes the GPT prefix case-insensitively"
+        )
+        expect(
+            CodexDisplayPolicy.displayModelName("o3") == "O3",
+            "non-GPT model names preserve their compact family name"
+        )
+        expect(
+            CodexDisplayPolicy.displayModelName(" gpt ") == "gpt",
+            "a bare GPT family name remains non-empty after trimming"
         )
     }
 
@@ -1410,6 +1439,7 @@ struct ParserChecks {
                     sessionMeta(startedAt: laterToday, subagent: true),
                     token(laterToday, total: 500, last: 500),
                     token(laterToday, total: 570, last: 70),
+                    #"{"type":"response_item","payload":{"text":"inter_agent_communication_metadata"}}"#,
                     subagentBoundary(laterToday.addingTimeInterval(1)),
                     token(laterToday.addingTimeInterval(2), total: 640, last: 70)
                 ],

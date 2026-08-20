@@ -19,7 +19,7 @@ struct ScreenshotChecks {
     static func main() {
         let pasteboard = NSPasteboard(
             name: NSPasteboard.Name(
-                "com.hongwei.codex-island.screenshot-checks.\(UUID().uuidString)"
+                "com.codex-island.screenshot-checks.\(UUID().uuidString)"
             )
         )
         defer { pasteboard.releaseGlobally() }
