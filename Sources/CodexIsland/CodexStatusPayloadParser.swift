@@ -90,7 +90,7 @@ enum CodexStatusPayloadParser {
 
     static func parseRecentThreads(
         _ result: JSONObject,
-        limit: Int = CodexDisplayPolicy.recentThreadLimit
+        limit: Int = 5
     ) -> [ThreadSummary] {
         guard limit > 0 else { return [] }
         let payloads = result.array("data")?

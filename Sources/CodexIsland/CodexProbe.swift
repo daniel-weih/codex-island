@@ -45,7 +45,7 @@ enum CodexProbe {
             let threadResult = try await client.request(
                 method: "thread/list",
                 params: [
-                    "limit": CodexDisplayPolicy.recentThreadLimit,
+                    "limit": CodexDisplayPolicy.recentThreadFetchLimit,
                     "sortKey": "recency_at",
                     "sortDirection": "desc",
                     "archived": false,
@@ -53,7 +53,10 @@ enum CodexProbe {
                     "useStateDbOnly": true
                 ]
             )
-            let threads = CodexStatusPayloadParser.parseRecentThreads(threadResult)
+            let threads = CodexStatusPayloadParser.parseRecentThreads(
+                threadResult,
+                limit: CodexDisplayPolicy.recentThreadFetchLimit
+            )
             print("recent_threads=\(threads.count)")
             let configuredCount = threads.reduce(into: 0) { count, thread in
                 guard let path = thread.rolloutPath else { return }

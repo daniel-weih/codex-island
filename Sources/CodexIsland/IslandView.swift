@@ -9,19 +9,26 @@ enum IslandLayout {
     static let expandedWidth: CGFloat = 500
     static let contentHorizontalInset: CGFloat = 14
     static let metricCenterGutter: CGFloat = 10
-    static let conversationRowHeight: CGFloat = 18
+    static let conversationRowHeight: CGFloat = 28
     static let activityChartBarSpacing: CGFloat = 2
+    static let hourlyActivityChartBarSpacing: CGFloat = 1.5
     static let activityIndicatorSlotWidth: CGFloat = 10
-    static let threadSourceColumnWidth: CGFloat = 24
-    static let threadStatusColumnWidth: CGFloat = 48
+    static let threadSourceColumnWidth: CGFloat = 28
+    static let threadTrailingColumnWidth: CGFloat = 70
     static let compactTokenEffectWidth: CGFloat = 9.5
-    static let headerActionButtonSize: CGFloat = 24
+    static let headerActionButtonSize: CGFloat = 28
     static let headerActionSpacing: CGFloat = 4
     static let headerTooltipCursorGap: CGFloat = 4
     static let headerTooltipTopGap: CGFloat = 2
     static let recentConversationsHeight = conversationRowHeight
         * CGFloat(CodexDisplayPolicy.recentThreadLimit)
-    static let expandedBodyHeight: CGFloat = 84 + recentConversationsHeight
+    static let expandedMetricsHeight: CGFloat = 210
+    static let expandedSeparatorHeight: CGFloat = 1
+    static let expandedBottomPadding: CGFloat = 14
+    static let expandedBodyHeight: CGFloat = expandedMetricsHeight
+        + recentConversationsHeight
+        + expandedSeparatorHeight * 2
+        + expandedBottomPadding
 
     static func compactWidth(forNotchWidth notchWidth: CGFloat) -> CGFloat {
         max(compactMinimumWidth, notchWidth + compactExtraWidth)
@@ -36,13 +43,21 @@ enum IslandLayout {
     }
 }
 
+private enum IslandTypography {
+    /// The former task-title size is now the readability floor for UI copy.
+    static let body: CGFloat = 11.5
+    static let emphasized: CGFloat = 12.5
+    static let profileName: CGFloat = 15.5
+    static let display: CGFloat = 24
+}
+
 private enum IslandCoordinateSpace {
     static let name = "codex-island"
 }
 
 enum IslandHeaderAction: Sendable {
     case islandSettings
-    case codexSettings
+    case screenshot
     case quit
 }
 
@@ -51,13 +66,12 @@ private func activityIndicatorOffset(
     bucketCount: Int
 ) -> CGFloat {
     guard bucketCount > 0 else { return -2 }
-    let panelWidth = rowWidth + IslandLayout.contentHorizontalInset * 2
-    let chartWidth = panelWidth / 2
-        - IslandLayout.contentHorizontalInset
-        - IslandLayout.metricCenterGutter
-    let totalSpacing = IslandLayout.activityChartBarSpacing
+    let spacing = bucketCount > 30
+        ? IslandLayout.hourlyActivityChartBarSpacing
+        : IslandLayout.activityChartBarSpacing
+    let totalSpacing = spacing
         * CGFloat(max(0, bucketCount - 1))
-    let barWidth = max(0, (chartWidth - totalSpacing) / CGFloat(bucketCount))
+    let barWidth = max(0, (rowWidth - totalSpacing) / CGFloat(bucketCount))
     return barWidth / 2 - IslandLayout.activityIndicatorSlotWidth / 2
 }
 
@@ -71,6 +85,10 @@ private struct IslandTokenConsumptionEffectEnabledKey: EnvironmentKey {
 
 private struct IslandInterfaceLanguageKey: EnvironmentKey {
     static let defaultValue = IslandInterfaceLanguage.english
+}
+
+private struct IslandColorThemeKey: EnvironmentKey {
+    static let defaultValue = IslandColorTheme.ocean
 }
 
 private extension EnvironmentValues {
@@ -87,6 +105,11 @@ private extension EnvironmentValues {
     var islandInterfaceLanguage: IslandInterfaceLanguage {
         get { self[IslandInterfaceLanguageKey.self] }
         set { self[IslandInterfaceLanguageKey.self] = newValue }
+    }
+
+    var islandColorTheme: IslandColorTheme {
+        get { self[IslandColorThemeKey.self] }
+        set { self[IslandColorThemeKey.self] = newValue }
     }
 }
 
@@ -241,7 +264,9 @@ private func islandCursorTooltipPlacement(
 }
 
 private func islandDefaultTokenPopoverPointer(rank: Int, canvasSize: CGSize) -> CGPoint {
-    let rowsTop = canvasSize.height - 7 - IslandLayout.recentConversationsHeight
+    let rowsTop = canvasSize.height
+        - IslandLayout.expandedBottomPadding
+        - IslandLayout.recentConversationsHeight
     return CGPoint(
         x: canvasSize.width - 80,
         y: rowsTop + (CGFloat(rank) + 0.5) * IslandLayout.conversationRowHeight
@@ -302,15 +327,21 @@ struct IslandView: View {
     private var tokenConsumptionEffectEnabled = true
     @AppStorage("codexIsland.languagePreference")
     private var storedLanguagePreference = IslandLanguagePreference.automatic.rawValue
+    @AppStorage(IslandColorTheme.storageKey)
+    private var storedColorTheme = IslandColorTheme.ocean.rawValue
     @State private var launchAtLoginSetting: LaunchAtLoginSettingModel
     @State private var activePopover: IslandPopoverPresentation?
     @State private var isIslandSettingsPresented = false
     @State private var hoveredHeaderAction: IslandHeaderAction?
     @State private var headerTooltipPointer: CGPoint?
+    @State private var screenshotCopied = false
+    @State private var tokenChartRange: TokenChartRange
     private let initialPopover: IslandPopoverPresentation?
     private let initialTokenConsumptionPhase: Double?
     private let previewDisplayPickerPresentation: Bool?
     private let previewLanguagePreference: IslandLanguagePreference?
+    private let previewColorTheme: IslandColorTheme?
+    private let onCopyScreenshot: () -> Bool
     private let usesTimelineUpdates: Bool
 
     init(
@@ -323,8 +354,11 @@ struct IslandView: View {
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
+        initialTokenChartRange: TokenChartRange = .days30,
         previewLanguagePreference: IslandLanguagePreference? = nil,
+        previewColorTheme: IslandColorTheme? = nil,
         launchAtLoginBackend: LaunchAtLoginBackend = .live,
+        onCopyScreenshot: @escaping () -> Bool = { false },
         usesTimelineUpdates: Bool = true
     ) {
         self.viewModel = viewModel
@@ -332,7 +366,10 @@ struct IslandView: View {
         self.displaySelection = displaySelection
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
+        _tokenChartRange = State(initialValue: initialTokenChartRange)
         self.previewLanguagePreference = previewLanguagePreference
+        self.previewColorTheme = previewColorTheme
+        self.onCopyScreenshot = onCopyScreenshot
         self.usesTimelineUpdates = usesTimelineUpdates
         _launchAtLoginSetting = State(
             initialValue: LaunchAtLoginSettingModel(
@@ -340,11 +377,14 @@ struct IslandView: View {
             )
         )
 
+        let visibleThreads = CodexDisplayPolicy.visibleRecentThreads(
+            from: viewModel.snapshot.recentThreads
+        )
         if let threadID = initialHoveredTokenThreadID,
-           let rank = viewModel.snapshot.recentThreads.firstIndex(where: {
+           let rank = visibleThreads.firstIndex(where: {
                $0.id == threadID
            }),
-           let usage = viewModel.snapshot.recentThreads[rank].tokenUsage {
+           let usage = visibleThreads[rank].tokenUsage {
             self.initialPopover = IslandPopoverPresentation(
                 content: .token(threadID: threadID, rank: rank, usage: usage),
                 pointer: nil
@@ -402,6 +442,7 @@ struct IslandView: View {
                 usesTimelineUpdates && tokenConsumptionEffectEnabled
             )
             .environment(\.islandInterfaceLanguage, interfaceLanguage)
+            .environment(\.islandColorTheme, selectedColorTheme)
             .coordinateSpace(name: IslandCoordinateSpace.name)
             .clipShape(islandShape)
             .contentShape(islandShape)
@@ -429,7 +470,10 @@ struct IslandView: View {
     }
 
     private var islandShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 20, style: .continuous)
+        RoundedRectangle(
+            cornerRadius: viewModel.isExpanded ? 26 : 20,
+            style: .circular
+        )
     }
 
     private func islandPopoverLayer(canvasSize: CGSize) -> some View {
@@ -494,8 +538,8 @@ struct IslandView: View {
         switch action {
         case .islandSettings:
             return interfaceLanguage.text("灵动岛设置", "Island settings")
-        case .codexSettings:
-            return interfaceLanguage.text("Codex 设置", "Codex settings")
+        case .screenshot:
+            return interfaceLanguage.text("截图并复制", "Copy screenshot")
         case .quit:
             return interfaceLanguage.text("退出应用", "Quit app")
         }
@@ -507,7 +551,7 @@ struct IslandView: View {
     ) -> CGPoint {
         let buttonsToRight: CGFloat
         switch action {
-        case .codexSettings: buttonsToRight = 2
+        case .screenshot: buttonsToRight = 2
         case .islandSettings: buttonsToRight = 1
         case .quit: buttonsToRight = 0
         }
@@ -616,12 +660,11 @@ struct IslandView: View {
             Color.clear
                 .frame(width: 5)
 
-            Text(compactTodayTokenText)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            Text(compactIslandTodayTokenText)
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.92))
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
                 .offset(y: 0.5)
 
             if showsTokenConsumption {
@@ -652,11 +695,10 @@ struct IslandView: View {
             )
 
             Text(compactQuotaText)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.90))
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
                 .offset(y: 0.5)
         }
         .accessibilityElement(children: .combine)
@@ -697,6 +739,7 @@ struct IslandView: View {
                     languagePreference: languagePreferenceBinding,
                     displaySelection: displaySelection,
                     previewDisplayPickerPresentation: previewDisplayPickerPresentation,
+                    colorTheme: colorThemeBinding,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh
                 )
@@ -715,7 +758,7 @@ struct IslandView: View {
                     )
             }
         }
-        .padding(.bottom, 7)
+        .padding(.bottom, IslandLayout.expandedBottomPadding)
         .animation(
             usesTimelineUpdates ? .easeOut(duration: 0.18) : nil,
             value: isIslandSettingsPresented
@@ -723,23 +766,37 @@ struct IslandView: View {
     }
 
     private var dashboardContent: some View {
-        VStack(spacing: 0) {
-            metrics
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    CodexLauncher.openCodex()
-                }
+        ZStack(alignment: .bottomTrailing) {
+            if selectedColorTheme.watermarkResourceName != nil {
+                IslandThemeWatermark(theme: selectedColorTheme)
+                    .frame(
+                        width: selectedColorTheme.watermarkSize.width,
+                        height: selectedColorTheme.watermarkSize.height
+                    )
+                    .opacity(selectedColorTheme.watermarkOpacity)
+                    .padding(.trailing, 2)
+                    .offset(y: selectedColorTheme == .tsinghua ? 24 : 8)
+                    .accessibilityHidden(true)
+            }
 
-            Hairline()
-                .padding(.horizontal, IslandLayout.contentHorizontalInset)
+            VStack(spacing: 0) {
+                metrics
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        CodexLauncher.openCodex()
+                    }
 
-            recentConversations
-                .frame(
-                    height: IslandLayout.recentConversationsHeight,
-                    alignment: .topLeading
-                )
-                .padding(.horizontal, IslandLayout.contentHorizontalInset)
+                Hairline()
+                    .padding(.horizontal, IslandLayout.contentHorizontalInset)
+
+                recentConversations
+                    .frame(
+                        height: IslandLayout.recentConversationsHeight,
+                        alignment: .topLeading
+                    )
+                    .padding(.horizontal, IslandLayout.contentHorizontalInset)
+            }
         }
     }
 
@@ -752,7 +809,7 @@ struct IslandView: View {
                 }
 
             HStack(spacing: IslandLayout.headerActionSpacing) {
-                codexSettingsButton
+                screenshotButton
                 islandSettingsButton
                 quitButton
             }
@@ -775,10 +832,21 @@ struct IslandView: View {
         IslandLanguageResolver.resolve(preference: selectedLanguagePreference)
     }
 
+    private var selectedColorTheme: IslandColorTheme {
+        previewColorTheme ?? IslandColorTheme.stored(storedColorTheme)
+    }
+
     private var languagePreferenceBinding: Binding<IslandLanguagePreference> {
         Binding(
             get: { selectedLanguagePreference },
             set: { storedLanguagePreference = $0.rawValue }
+        )
+    }
+
+    private var colorThemeBinding: Binding<IslandColorTheme> {
+        Binding(
+            get: { selectedColorTheme },
+            set: { storedColorTheme = $0.rawValue }
         )
     }
 
@@ -803,8 +871,8 @@ struct IslandView: View {
         hoveredHeaderAction == .islandSettings
     }
 
-    private var isCodexSettingsButtonHovered: Bool {
-        hoveredHeaderAction == .codexSettings
+    private var isScreenshotButtonHovered: Bool {
+        hoveredHeaderAction == .screenshot
     }
 
     private var isQuitButtonHovered: Bool {
@@ -822,18 +890,18 @@ struct IslandView: View {
                 Circle()
                     .fill(
                         isIslandSettingsPresented
-                            ? Color.cyan.opacity(0.12)
+                            ? selectedColorTheme.accent.opacity(0.12)
                             : Color.white.opacity(
                                 isIslandSettingsButtonHovered ? 0.075 : 0
                             )
                     )
-                    .frame(width: 18, height: 18)
+                    .frame(width: 22, height: 22)
 
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(.system(size: IslandTypography.body, weight: .semibold))
                     .foregroundStyle(
                         isIslandSettingsPresented
-                            ? Color.cyan.opacity(0.88)
+                            ? selectedColorTheme.accent.opacity(0.88)
                             : Color.white.opacity(
                                 isIslandSettingsButtonHovered ? 0.72 : 0.38
                             )
@@ -859,25 +927,42 @@ struct IslandView: View {
         )
     }
 
-    private var codexSettingsButton: some View {
+    private var screenshotButton: some View {
         Button {
-            CodexLauncher.openSettings()
+            activePopover = nil
+            hoveredHeaderAction = nil
+            headerTooltipPointer = nil
+            Task { @MainActor in
+                await Task.yield()
+                guard onCopyScreenshot() else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    screenshotCopied = true
+                }
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                withAnimation(.easeOut(duration: 0.12)) {
+                    screenshotCopied = false
+                }
+            }
         } label: {
             ZStack {
                 Circle()
                     .fill(
-                        Color.white.opacity(
-                            isCodexSettingsButtonHovered ? 0.075 : 0
-                        )
+                        screenshotCopied
+                            ? Color.green.opacity(0.13)
+                            : Color.white.opacity(
+                                isScreenshotButtonHovered ? 0.075 : 0
+                            )
                     )
-                    .frame(width: 18, height: 18)
+                    .frame(width: 22, height: 22)
 
-                Image(systemName: "gearshape")
-                    .font(.system(size: 10, weight: .semibold))
+                Image(systemName: screenshotCopied ? "checkmark" : "camera")
+                    .font(.system(size: IslandTypography.body, weight: .semibold))
                     .foregroundStyle(
-                        Color.white.opacity(
-                            isCodexSettingsButtonHovered ? 0.72 : 0.38
-                        )
+                        screenshotCopied
+                            ? Color.green.opacity(0.88)
+                            : Color.white.opacity(
+                                isScreenshotButtonHovered ? 0.72 : 0.38
+                            )
                     )
             }
             .frame(
@@ -890,10 +975,15 @@ struct IslandView: View {
         .onContinuousHover(
             coordinateSpace: .named(IslandCoordinateSpace.name)
         ) { phase in
-            handleHeaderActionHover(.codexSettings, phase: phase)
+            handleHeaderActionHover(.screenshot, phase: phase)
         }
         .accessibilityLabel(
-            interfaceLanguage.text("打开 Codex 设置", "Open Codex settings")
+            screenshotCopied
+                ? interfaceLanguage.text("截图已复制", "Screenshot copied")
+                : interfaceLanguage.text(
+                    "将灵动岛截图复制到剪切板",
+                    "Copy Island screenshot to clipboard"
+                )
         )
     }
 
@@ -908,10 +998,10 @@ struct IslandView: View {
                             ? Color.red.opacity(0.10)
                             : Color.clear
                     )
-                    .frame(width: 18, height: 18)
+                    .frame(width: 22, height: 22)
 
                 Image(systemName: "power")
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(.system(size: IslandTypography.body, weight: .semibold))
                     .foregroundStyle(
                         isQuitButtonHovered
                             ? Color.red.opacity(0.76)
@@ -954,7 +1044,7 @@ struct IslandView: View {
             let sideWidth = max(0, (proxy.size.width - notchWidth) / 2)
 
             HStack(spacing: 0) {
-                headerIdentity(showsLifetimeToken: sideWidth >= 132)
+                headerIdentity(showsLifetimeToken: sideWidth >= 150)
                     .padding(.leading, IslandLayout.contentHorizontalInset)
                     .frame(width: sideWidth, alignment: .leading)
                     .clipped()
@@ -970,7 +1060,7 @@ struct IslandView: View {
     }
 
     private func headerIdentity(showsLifetimeToken: Bool) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             PulsingStatusDot(
                 color: sessionActivityColor,
                 size: 7,
@@ -980,14 +1070,14 @@ struct IslandView: View {
 
             headerTokenMetric(
                 value: compactTodayTokenText,
-                label: interfaceLanguage.text("今日 TOKEN", "TODAY TOKEN")
+                label: interfaceLanguage.text("今日", "TODAY")
             )
 
             if showsLifetimeToken {
-                PixelVerticalDivider(height: 17, opacity: 0.12)
+                PixelVerticalDivider(height: 16, opacity: 0.12)
                 headerTokenMetric(
                     value: headerLifetimeTokenText,
-                    label: interfaceLanguage.text("累计 TOKEN", "TOTAL TOKEN")
+                    label: interfaceLanguage.text("累计", "TOTAL")
                 )
             }
         }
@@ -997,82 +1087,47 @@ struct IslandView: View {
     }
 
     private func headerTokenMetric(value: String, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
             Text(value)
-                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(Color.cyan.opacity(0.88))
+                .foregroundStyle(selectedColorTheme.accent.opacity(0.88))
                 .lineLimit(1)
-                .minimumScaleFactor(0.76)
 
             Text(label)
-                .font(.system(size: 5.5, weight: .bold, design: .rounded))
-                .tracking(0.3)
+                .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.25))
+                .lineLimit(1)
         }
-        .frame(width: 43, alignment: .leading)
+        .fixedSize(horizontal: true, vertical: true)
     }
 
     @ViewBuilder
     private var metrics: some View {
-        GeometryReader { proxy in
-            let columnWidth = max(0, proxy.size.width / 2)
-            let pixelScale = max(1, displayScale)
-            let dividerWidth = 1 / pixelScale
-            let dividerOrigin = (columnWidth * pixelScale).rounded() / pixelScale
-
-            ZStack {
-                HStack(spacing: 0) {
-                    AccountActivityCard(
-                        identity: viewModel.snapshot.profileIdentity,
-                        usage: viewModel.snapshot.usage,
-                        planLabel: CodexDisplayPolicy.planBadgeLabel(
-                            accountPlanType: viewModel.snapshot.account.planType,
-                            rateLimitPlanType: viewModel.snapshot.rateLimit?.planType
-                        )
-                    )
-                    .frame(width: columnWidth, height: proxy.size.height)
-                    .clipped()
-
-                    QuotaMetric(
-                        title: windowLabel(
-                            viewModel.snapshot.rateLimit?.primary,
-                            fallback: interfaceLanguage.text(
-                                "主额度",
-                                "Primary limit"
-                            ),
-                            language: interfaceLanguage
-                        ),
-                        window: viewModel.snapshot.rateLimit?.primary,
-                        resetSummary: viewModel.snapshot.resetCredits,
-                        onResetHoverChange: { hovering, pointer in
-                            updateResetHover(hovering: hovering, pointer: pointer)
-                        }
-                    )
-                    .frame(width: columnWidth, height: proxy.size.height)
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-
-                HStack(spacing: 0) {
-                    Color.clear
-                        .frame(width: dividerOrigin)
-                    MetricDivider(width: dividerWidth)
-                    Spacer(minLength: 0)
-                }
-                .allowsHitTesting(false)
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-        }
+        AccountActivityCard(
+            identity: viewModel.snapshot.profileIdentity,
+            usage: viewModel.snapshot.usage,
+            todayTokens: viewModel.snapshot.todayThreadTokens,
+            hourlyUsage: viewModel.snapshot.hourlyThreadTokens,
+            window: viewModel.snapshot.rateLimit?.primary,
+            chartRange: $tokenChartRange,
+            planLabel: CodexDisplayPolicy.planBadgeLabel(
+                accountPlanType: viewModel.snapshot.account.planType,
+                rateLimitPlanType: viewModel.snapshot.rateLimit?.planType
+            )
+        )
     }
 
     @ViewBuilder
     private var recentConversations: some View {
-        let threads = Array(
-            viewModel.snapshot.recentThreads.prefix(CodexDisplayPolicy.recentThreadLimit)
+        let threads = CodexDisplayPolicy.visibleRecentThreads(
+            from: viewModel.snapshot.recentThreads
         )
-        let activityBucketCount = CodexUsageTimeline.lastCompletedDays(
-            from: viewModel.snapshot.usage.dailyUsageBuckets
-        ).count
+        let activityBucketCount = tokenChartRange == .hours48
+            ? viewModel.snapshot.hourlyThreadTokens.count
+            : CodexUsageTimeline.lastDaysIncludingToday(
+                from: viewModel.snapshot.usage.dailyUsageBuckets
+            ).count
         if threads.isEmpty {
             GeometryReader { proxy in
                 let indicatorOffset = activityIndicatorOffset(
@@ -1081,7 +1136,7 @@ struct IslandView: View {
                 )
                 HStack(spacing: 5) {
                     Image(systemName: "bubble.left")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(.system(size: IslandTypography.body, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.22))
                         .frame(width: IslandLayout.activityIndicatorSlotWidth)
                         .offset(x: indicatorOffset)
@@ -1091,7 +1146,7 @@ struct IslandView: View {
                             "No local sessions found"
                         )
                     )
-                        .font(.system(size: 8.8, weight: .medium, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.42))
                     Spacer()
                 }
@@ -1131,6 +1186,11 @@ struct IslandView: View {
     private var compactTodayTokenText: String {
         guard let tokens = viewModel.snapshot.todayThreadTokens else { return "--" }
         return compactTokenCount(tokens)
+    }
+
+    private var compactIslandTodayTokenText: String {
+        guard let tokens = viewModel.snapshot.todayThreadTokens else { return "--" }
+        return menuBarTokenCount(tokens)
     }
 
     private var headerLifetimeTokenText: String {
@@ -1198,7 +1258,7 @@ struct IslandView: View {
         }
         if remaining < 10 { return .red }
         if remaining < 20 { return .orange }
-        return .cyan
+        return selectedColorTheme.accent
     }
 
     private func updateTokenHover(
@@ -1255,9 +1315,9 @@ struct IslandView: View {
 }
 
 private struct IslandHeaderTooltip: View {
-    private static let fontSize: CGFloat = 6.5
-    private static let horizontalPadding: CGFloat = 5
-    private static let height: CGFloat = 14
+    private static let fontSize: CGFloat = IslandTypography.body
+    private static let horizontalPadding: CGFloat = 8
+    private static let height: CGFloat = 22
 
     let text: String
 
@@ -1309,18 +1369,20 @@ private struct IslandSettingsPanel: View {
     @Binding var languagePreference: IslandLanguagePreference
     @ObservedObject var displaySelection: IslandDisplaySelectionModel
     let previewDisplayPickerPresentation: Bool?
+    @Binding var colorTheme: IslandColorTheme
     let isRefreshing: Bool
     let onRefresh: () -> Void
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
     @State private var isRefreshHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(language.text("灵动岛设置", "Island settings"))
-                    .font(.system(size: 9.6, weight: .semibold, design: .rounded))
+                    .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.82))
 
                 Spacer(minLength: 8)
@@ -1331,10 +1393,10 @@ private struct IslandSettingsPanel: View {
                         "Preferences are saved automatically"
                     )
                 )
-                    .font(.system(size: 6.5, weight: .medium, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.26))
             }
-            .frame(height: 14)
+            .frame(height: 18)
 
             HStack(spacing: 8) {
                 IslandSettingToggleCard(
@@ -1350,12 +1412,12 @@ private struct IslandSettingsPanel: View {
 
                 IslandSettingToggleCard(
                     icon: "sparkles",
-                    title: language.text("TOKEN 消耗动效", "Token animation"),
+                    title: language.text("TOKEN 动效", "Token effects"),
                     detail: language.text(
                         "消耗时播放刘海粒子",
                         "Particles while tokens are used"
                     ),
-                    tint: .cyan,
+                    tint: theme.accent,
                     isOn: $tokenConsumptionEffectEnabled
                 )
 
@@ -1367,26 +1429,62 @@ private struct IslandSettingsPanel: View {
                     isOn: $launchAtLoginEnabled
                 )
             }
-            .frame(height: 58)
+            .frame(height: 72)
 
             HStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.cyan.opacity(0.08))
+                        .fill(theme.accent.opacity(0.09))
+
+                    Image(systemName: "paintpalette.fill")
+                        .font(.system(size: IslandTypography.body, weight: .semibold))
+                        .foregroundStyle(theme.accent.opacity(0.78))
+                }
+                .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(language.text("颜色风格", "Color theme"))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.72))
+
+                    Text(
+                        language.text(
+                            "当前：\(colorTheme.label(language: language)) · 黑底刘海适配",
+                            "\(colorTheme.label(language: language)) · black and notch safe"
+                        )
+                    )
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.28))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                IslandThemePicker(selection: $colorTheme)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 52)
+            .background(settingsCardBackground)
+            .overlay(settingsCardBorder)
+
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.accent.opacity(0.08))
 
                     Image(systemName: "globe")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Color.cyan.opacity(0.72))
+                        .font(.system(size: IslandTypography.body, weight: .semibold))
+                        .foregroundStyle(theme.accent.opacity(0.72))
                 }
-                .frame(width: 26, height: 26)
+                .frame(width: 30, height: 30)
 
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(language.text("语言", "Language"))
-                        .font(.system(size: 8.6, weight: .semibold, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.72))
 
                     Text(languageDetailText)
-                        .font(.system(size: 6.4, weight: .medium, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.28))
                         .lineLimit(1)
                 }
@@ -1407,24 +1505,24 @@ private struct IslandSettingsPanel: View {
                 Button(action: onRefresh) {
                     HStack(spacing: 3) {
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 7, weight: .semibold))
+                            .font(.system(size: IslandTypography.body, weight: .semibold))
 
                         Text(
                             isRefreshing
                                 ? language.text("同步中", "Syncing")
                                 : language.text("同步", "Sync")
                         )
-                            .font(.system(size: 7, weight: .semibold, design: .rounded))
+                            .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                     }
                     .foregroundStyle(
-                        Color.cyan.opacity(isRefreshing ? 0.40 : 0.82)
+                        theme.accent.opacity(isRefreshing ? 0.40 : 0.82)
                     )
-                        .padding(.horizontal, 7)
-                        .frame(height: 20)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(
-                                    Color.cyan.opacity(
+                                    theme.accent.opacity(
                                         isRefreshHovered && !isRefreshing ? 0.13 : 0.075
                                     )
                                 )
@@ -1432,7 +1530,7 @@ private struct IslandSettingsPanel: View {
                         .overlay(
                             Capsule(style: .continuous)
                                 .strokeBorder(
-                                    Color.cyan.opacity(0.12),
+                                    theme.accent.opacity(0.12),
                                     lineWidth: 1 / max(1, displayScale)
                                 )
                         )
@@ -1453,7 +1551,7 @@ private struct IslandSettingsPanel: View {
             }
             .padding(.horizontal, 9)
             .frame(maxWidth: .infinity)
-            .frame(height: 46)
+            .frame(height: 56)
             .background(settingsCardBackground)
             .overlay(settingsCardBorder)
         }
@@ -1737,47 +1835,43 @@ private struct IslandSettingToggleCard: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(tint.opacity(isOn ? 0.12 : 0.055))
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(tint.opacity(isOn ? 0.12 : 0.055))
 
-                        Image(systemName: icon)
-                            .font(.system(size: 7.4, weight: .semibold))
-                            .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
-                    }
-                    .frame(width: 20, height: 20)
-
-                    Text(title)
-                        .font(.system(size: 7.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.74))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
+                    Image(systemName: icon)
+                        .font(.system(size: IslandTypography.body, weight: .semibold))
+                        .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
                 }
+                .frame(width: 26, height: 26)
 
-                Text(detail)
-                    .font(.system(size: 6.1, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.27))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.80)
+                Spacer(minLength: 4)
+
+                Toggle(isOn: $isOn) {
+                    EmptyView()
+                }
+                .labelsHidden()
+                .toggleStyle(IslandToggleStyle(tint: tint))
+                .frame(width: 30, height: 17)
+                .fixedSize(horizontal: true, vertical: true)
+                .accessibilityLabel(Text(title))
             }
 
-            Spacer(minLength: 4)
+            Text(title)
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(1)
 
-            Toggle(isOn: $isOn) {
-                EmptyView()
-            }
-            .labelsHidden()
-            .toggleStyle(IslandToggleStyle(tint: tint))
-            .frame(width: 24, height: 13)
-            .fixedSize(horizontal: true, vertical: true)
-            .layoutPriority(2)
-            .accessibilityLabel(Text(title))
+            Text(detail)
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.27))
+                .lineLimit(1)
         }
         .disabled(!isInteractive)
         .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -1798,11 +1892,96 @@ private struct IslandSettingToggleCard: View {
     }
 }
 
+private struct IslandThemePicker: View {
+    @Binding var selection: IslandColorTheme
+
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandInterfaceLanguage) private var language
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(IslandColorTheme.allCases) { theme in
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        selection = theme
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [theme.accent, theme.secondaryAccent],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 14, height: 14)
+                            .shadow(
+                                color: theme.accent.opacity(
+                                    selection == theme ? 0.42 : 0
+                                ),
+                                radius: 3
+                            )
+
+                        if selection == theme {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 7, weight: .black))
+                                .foregroundStyle(.black.opacity(0.76))
+                        }
+                    }
+                    .frame(width: 25, height: 25)
+                    .background(
+                        Circle()
+                            .fill(
+                                selection == theme
+                                    ? theme.accent.opacity(0.13)
+                                    : Color.white.opacity(0.025)
+                            )
+                    )
+                    .overlay(
+                        Circle()
+                            .strokeBorder(
+                                selection == theme
+                                    ? theme.accent.opacity(0.42)
+                                    : Color.white.opacity(0.065),
+                                lineWidth: 1 / max(1, displayScale)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(theme.label(language: language))
+                .accessibilityLabel(
+                    language.text(
+                        "选择\(theme.label(language: language))配色",
+                        "Select \(theme.label(language: language)) theme"
+                    )
+                )
+                .accessibilityAddTraits(
+                    selection == theme ? .isSelected : []
+                )
+            }
+        }
+        .padding(2)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(0.065),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+    }
+}
+
 private struct IslandLanguagePicker: View {
     @Binding var selection: IslandLanguagePreference
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
         HStack(spacing: 1) {
@@ -1813,20 +1992,20 @@ private struct IslandLanguagePicker: View {
                     }
                 } label: {
                     Text(optionLabel(for: preference))
-                        .font(.system(size: 6.6, weight: .semibold, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .foregroundStyle(
                             preference == selection
-                                ? Color.cyan.opacity(0.90)
+                                ? theme.accent.opacity(0.90)
                                 : Color.white.opacity(0.34)
                         )
                         .lineLimit(1)
-                        .padding(.horizontal, 5)
-                        .frame(height: 18)
+                        .padding(.horizontal, 6)
+                        .frame(height: 26)
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .fill(
                                     preference == selection
-                                        ? Color.cyan.opacity(0.11)
+                                        ? theme.accent.opacity(0.11)
                                         : Color.clear
                                 )
                         )
@@ -1909,11 +2088,11 @@ private struct IslandToggleStyle: ToggleStyle {
                         ? Color.white.opacity(0.92)
                         : Color.white.opacity(0.42)
                 )
-                .frame(width: 9, height: 9)
-                .offset(x: configuration.isOn ? 5.2 : -5.2)
+                .frame(width: 13, height: 13)
+                .offset(x: configuration.isOn ? 6.5 : -6.5)
                 .shadow(color: .black.opacity(0.24), radius: 1, y: 0.5)
         }
-        .frame(width: 24, height: 13)
+        .frame(width: 30, height: 17)
         .opacity(isEnabled ? 1 : 0.48)
         .contentShape(Capsule(style: .continuous))
         .onTapGesture {
@@ -1936,15 +2115,6 @@ private struct ConversationRow: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let leadingHalfWidth = proxy.size.width / 2
-            let titleColumnWidth = max(
-                0,
-                leadingHalfWidth - IslandLayout.threadSourceColumnWidth
-            )
-            let trailingColumnWidth = proxy.size.width - leadingHalfWidth
-            let configurationDensity = ThreadConfigurationDensity(
-                availableRowWidth: proxy.size.width
-            )
             let indicatorOffset = activityIndicatorOffset(
                 rowWidth: proxy.size.width,
                 bucketCount: activityBucketCount
@@ -1957,7 +2127,7 @@ private struct ConversationRow: View {
                         .offset(x: indicatorOffset)
 
                     Text(thread.title)
-                        .font(.system(size: 8.8, weight: .medium, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .foregroundStyle(titleColor)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -1966,8 +2136,8 @@ private struct ConversationRow: View {
                 }
                 .padding(.trailing, 8)
                 .frame(
-                    width: titleColumnWidth,
-                    height: proxy.size.height,
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
                     alignment: .leading
                 )
 
@@ -1979,10 +2149,7 @@ private struct ConversationRow: View {
                     )
 
                 HStack(spacing: 4) {
-                    ThreadConfigurationView(
-                        thread: thread,
-                        density: configurationDensity
-                    )
+                    ThreadFastStatusView(thread: thread)
 
                     ThreadTokenUsageView(
                         usage: thread.tokenUsage,
@@ -1992,22 +2159,22 @@ private struct ConversationRow: View {
                     Spacer(minLength: 0)
 
                     Text(trailingLabel)
-                        .font(.system(size: 7.5, weight: .medium, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .foregroundStyle(trailingColor)
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
                         .frame(
-                            width: IslandLayout.threadStatusColumnWidth,
+                            width: IslandLayout.threadTrailingColumnWidth,
                             alignment: .trailing
                         )
                         .help(executionStateHelp)
                 }
                 .padding(.leading, IslandLayout.metricCenterGutter)
                 .frame(
-                    width: trailingColumnWidth,
                     height: proxy.size.height,
                     alignment: .trailing
                 )
+                .fixedSize(horizontal: true, vertical: false)
             }
         }
         .contentShape(Rectangle())
@@ -2100,7 +2267,7 @@ private struct ThreadSourceLabel: View {
 
     var body: some View {
         Text(source?.displayLabel ?? "")
-            .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
+            .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
             .foregroundStyle(.white.opacity(0.34))
             .lineLimit(1)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -2224,10 +2391,11 @@ private struct CompactTokenBlackHole: View {
 private struct TokenBlackHoleFrame: View {
     let phase: Double
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
         Canvas { context, size in
-            let cyan = Color(red: 0.02, green: 0.78, blue: 0.95)
+            let accent = theme.accent
             let pixel = 1 / max(displayScale, 1)
             let center = CGPoint(
                 x: snapped(size.width + 0.5, pixel: pixel),
@@ -2250,7 +2418,7 @@ private struct TokenBlackHoleFrame: View {
                 )
                 context.stroke(
                     lens,
-                    with: .color(cyan.opacity(opacity)),
+                    with: .color(accent.opacity(opacity)),
                     lineWidth: pixel
                 )
             }
@@ -2290,7 +2458,7 @@ private struct TokenBlackHoleFrame: View {
                             height: diameter
                         )
                     ),
-                    with: .color(cyan.opacity(opacity * 0.90))
+                    with: .color(accent.opacity(opacity * 0.90))
                 )
             }
         }
@@ -2391,83 +2559,15 @@ private struct PulsingStatusDot: View {
     }
 }
 
-private enum ThreadConfigurationDensity {
-    case full
-    case compact
-    case minimal
-
-    init(availableRowWidth: CGFloat) {
-        if availableRowWidth >= 450 {
-            self = .full
-        } else if availableRowWidth >= 370 {
-            self = .compact
-        } else {
-            self = .minimal
-        }
-    }
-
-    var showsModel: Bool { self == .full }
-    var showsReasoning: Bool { self != .minimal }
-
-    var width: CGFloat {
-        switch self {
-        case .full: return 143
-        case .compact: return 83
-        case .minimal: return 43
-        }
-    }
-}
-
-private struct ThreadConfigurationView: View {
+private struct ThreadFastStatusView: View {
     let thread: ThreadSummary
-    let density: ThreadConfigurationDensity
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 3) {
-            if density.showsModel {
-                modelSlot
-            }
-
-            if density.showsReasoning {
-                reasoningSlot
-            }
-
-            fastSlot
-        }
-        .frame(width: density.width, alignment: .leading)
-        .help(configurationHelp)
-    }
-
-    @ViewBuilder
-    private var modelSlot: some View {
-        if let model = thread.model {
-            Text(displayModelName(model))
-                .font(.system(size: 7.8, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.46))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(width: 57, alignment: .leading)
-        } else {
-            Color.clear.frame(width: 57, height: 1)
-        }
-    }
-
-    @ViewBuilder
-    private var reasoningSlot: some View {
-        if let effort = thread.reasoningEffort {
-            let isUltra = effort.trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() == "ultra"
-            ThreadSettingBadge(
-                text: effort.uppercased(),
-                color: isUltra
-                    ? Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.94)
-                    : .white.opacity(0.42)
-            )
-            .frame(width: 37, alignment: .leading)
-        } else {
-            Color.clear.frame(width: 37, height: 1)
-        }
+        fastSlot
+            .frame(width: 62, alignment: .leading)
+            .help(fastHelp)
     }
 
     @ViewBuilder
@@ -2479,24 +2579,20 @@ private struct ThreadConfigurationView: View {
             ThreadSettingBadge(
                 text: isFast ? "FAST ON" : "FAST OFF",
                 color: isFast
-                    ? .cyan.opacity(isInferred ? 0.58 : 0.90)
+                    ? theme.accent.opacity(isInferred ? 0.58 : 0.90)
                     : .white.opacity(isInferred ? 0.24 : 0.30)
             )
-            .frame(width: 43, alignment: .leading)
+            .frame(width: 62, alignment: .leading)
         } else {
             ThreadSettingBadge(
                 text: "FAST ?",
                 color: .white.opacity(0.24)
             )
-            .frame(width: 43, alignment: .leading)
+            .frame(width: 62, alignment: .leading)
         }
     }
 
-    private var configurationHelp: String {
-        let model = thread.model.map(displayModelName)
-            ?? language.text("模型未知", "Model unknown")
-        let reasoning = thread.reasoningEffort?.uppercased()
-            ?? language.text("推理强度未知", "Reasoning effort unknown")
+    private var fastHelp: String {
         let fast: String
         if let tier = thread.serviceTier?.lowercased() {
             fast = tier == "priority" || tier == "fast"
@@ -2511,10 +2607,7 @@ private struct ThreadConfigurationView: View {
                 ", Fast inferred from the current configuration"
             )
             : ""
-        return language.text(
-            "\(model)，\(reasoning)，\(fast)\(source)",
-            "\(model), \(reasoning), \(fast)\(source)"
-        )
+        return "\(fast)\(source)"
     }
 }
 
@@ -2529,11 +2622,10 @@ private struct ThreadTokenUsageView: View {
             Group {
                 if let usage {
                     Text(compactTokenCount(usage.totalTokens))
-                        .font(.system(size: 7.2, weight: .medium, design: .monospaced))
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.31))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.76)
                         .accessibilityLabel(
                             tokenUsageHelp(usage, language: language)
                         )
@@ -2566,33 +2658,34 @@ private struct ThreadTokenUsageView: View {
                 }
             }
         }
-        .frame(width: 34, height: 14)
+        .frame(width: 46, height: 20)
     }
 }
 
 private struct TokenUsageDetailPopover: View {
-    static let width: CGFloat = 205
-    static let height: CGFloat = 46
+    static let width: CGFloat = 270
+    static let height: CGFloat = 78
     static let size = CGSize(width: width, height: height)
 
     let usage: ThreadTokenUsage
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 6) {
             HStack(spacing: 4) {
                 Text(language.text("累计 TOKEN", "TOTAL TOKEN"))
-                    .font(.system(size: 6.8, weight: .bold, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .tracking(0.25)
                     .foregroundStyle(.white.opacity(0.38))
 
                 Spacer(minLength: 4)
 
                 Text(exactTokenCount(usage.totalTokens))
-                    .font(.system(size: 7.8, weight: .semibold, design: .monospaced))
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundStyle(.cyan.opacity(0.88))
+                    .foregroundStyle(theme.accent.opacity(0.88))
             }
 
             HStack(spacing: 7) {
@@ -2640,17 +2733,16 @@ private struct TokenUsageDetailPopover: View {
     ) -> some View {
         HStack(spacing: 3) {
             Text(label)
-                .font(.system(size: 6.6, weight: .medium, design: .rounded))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.32))
 
             Spacer(minLength: 3)
 
             Text(exactTokenCount(value))
-                .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(color)
                 .lineLimit(1)
-                .minimumScaleFactor(0.74)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2658,7 +2750,7 @@ private struct TokenUsageDetailPopover: View {
     private var divider: some View {
         Rectangle()
             .fill(Color.white.opacity(0.09))
-            .frame(width: 1, height: 8)
+            .frame(width: 1, height: 14)
     }
 }
 
@@ -2668,12 +2760,11 @@ private struct ThreadSettingBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 7, weight: .semibold, design: .monospaced))
+            .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
             .foregroundStyle(color)
             .lineLimit(1)
-            .minimumScaleFactor(0.72)
-            .padding(.horizontal, 3)
-            .padding(.vertical, 1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
             .background(
                 RoundedRectangle(cornerRadius: 3.5, style: .continuous)
                     .fill(color.opacity(0.11))
@@ -2684,89 +2775,145 @@ private struct ThreadSettingBadge: View {
 private struct AccountActivityCard: View {
     let identity: ProfileIdentitySummary
     let usage: UsageSummary
+    let todayTokens: Int64?
+    let hourlyUsage: [HourlyUsageBucket]
+    let window: RateLimitWindow?
     let planLabel: String?
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
     @State private var hoveredBucket: DailyUsageBucket?
+    @State private var hoveredHourlyBucket: HourlyUsageBucket?
+    @Binding private var chartRange: TokenChartRange
     @State private var avatarImage: NSImage?
 
     init(
         identity: ProfileIdentitySummary,
         usage: UsageSummary,
+        todayTokens: Int64?,
+        hourlyUsage: [HourlyUsageBucket],
+        window: RateLimitWindow?,
+        chartRange: Binding<TokenChartRange>,
         planLabel: String?
     ) {
         self.identity = identity
         self.usage = usage
+        self.todayTokens = todayTokens
+        self.hourlyUsage = hourlyUsage
+        self.window = window
         self.planLabel = planLabel
         _avatarImage = State(initialValue: identity.avatarData.flatMap(NSImage.init(data:)))
+        _chartRange = chartRange
     }
 
     private var recentUsage: [DailyUsageBucket] {
-        CodexUsageTimeline.lastCompletedDays(from: usage.dailyUsageBuckets)
+        CodexUsageTimeline.lastDaysIncludingToday(
+            from: usage.dailyUsageBuckets,
+            todayTokens: todayTokens
+        )
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 7) {
-                profileAvatar
+            HStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 10) {
+                    profileAvatar
 
-                HStack(alignment: .center, spacing: 5) {
-                    Text(displayName)
-                        .font(.system(size: 10.2, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(1)
-
-                    if let planLabel {
-                        Text(compactPlanBadgeLabel(planLabel))
-                            .font(.system(size: 6.5, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.cyan.opacity(0.88))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(displayName)
+                            .font(.system(size: IslandTypography.profileName, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.82))
                             .lineLimit(1)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1.5)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Color.cyan.opacity(0.09))
-                            )
-                            .overlay(
-                                Capsule(style: .continuous)
-                                    .strokeBorder(
-                                        Color.cyan.opacity(0.14),
-                                        lineWidth: 1 / max(1, displayScale)
-                                    )
-                            )
-                            .fixedSize(horizontal: true, vertical: true)
-                            .layoutPriority(2)
-                            .help(planLabel)
+                            .truncationMode(.tail)
+                            .layoutPriority(1)
+
+                        if let planLabel {
+                            Text(compactPlanBadgeLabel(planLabel))
+                                .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.accent.opacity(0.88))
+                                .lineLimit(1)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule(style: .continuous)
+                                        .fill(theme.accent.opacity(0.09))
+                                )
+                                .overlay(
+                                    Capsule(style: .continuous)
+                                        .strokeBorder(
+                                            theme.accent.opacity(0.14),
+                                            lineWidth: 1 / max(1, displayScale)
+                                        )
+                                )
+                                .fixedSize(horizontal: true, vertical: true)
+                                .help(planLabel)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: 178, alignment: .leading)
+
+                QuotaMetric(
+                    window: window,
+                    usage: usage,
+                    todayTokens: todayTokens
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(height: 28)
+            .padding(.horizontal, IslandLayout.contentHorizontalInset)
+            .frame(height: 76)
+            .padding(.top, 4)
 
-            Text(activitySubtitle)
-                .font(.system(size: 6.8, weight: .medium, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(activitySubtitleColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 1)
-                .frame(height: 15, alignment: .bottom)
+            Hairline()
+                .padding(.horizontal, IslandLayout.contentHorizontalInset)
 
-            DailyTokenActivityChart(
-                buckets: recentUsage,
-                hoveredBucket: hoveredBucket,
-                onHover: updateHoveredBucket
-            )
-            .frame(height: 28)
+            VStack(spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(activityTitle)
+                        .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.42))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: true)
+
+                    if let activityDetail {
+                        Text(activityDetail)
+                            .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.accent.opacity(0.72))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 4)
+                    chartRangePicker
+                }
+                .frame(height: 28)
+
+                if chartRange == .days30 {
+                    DailyTokenActivityChart(
+                        buckets: recentUsage,
+                        hoveredBucket: hoveredBucket,
+                        onHover: updateHoveredBucket
+                    )
+                    .frame(height: 82)
+                } else {
+                    HourlyTokenActivityChart(
+                        buckets: hourlyUsage,
+                        hoveredBucket: hoveredHourlyBucket,
+                        onHover: updateHoveredHourlyBucket
+                    )
+                    .frame(height: 82)
+                }
+
+                chartAxis
+                    .frame(height: 17, alignment: .top)
+            }
+            .padding(.horizontal, IslandLayout.contentHorizontalInset)
+            .padding(.top, 1)
+            .padding(.bottom, 1)
         }
-        .padding(.leading, IslandLayout.contentHorizontalInset)
-        .padding(.trailing, IslandLayout.metricCenterGutter)
-        .padding(.top, 2)
-        .padding(.bottom, 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: identity.avatarData) { data in
             avatarImage = data.flatMap(NSImage.init(data:))
@@ -2780,7 +2927,7 @@ private struct AccountActivityCard: View {
                 .resizable()
                 .interpolation(.high)
                 .scaledToFill()
-                .frame(width: 26, height: 26)
+                .frame(width: 44, height: 44)
                 .clipShape(Circle())
                 .overlay(avatarBorder)
         } else {
@@ -2788,16 +2935,16 @@ private struct AccountActivityCard: View {
                 Circle()
                     .fill(
                         LinearGradient(
-                            colors: [Color.cyan.opacity(0.58), Color.blue.opacity(0.36)],
+                            colors: [theme.accent.opacity(0.58), theme.secondaryAccent.opacity(0.36)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
                 Text(displayInitial)
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.88))
             }
-            .frame(width: 26, height: 26)
+            .frame(width: 44, height: 44)
             .overlay(avatarBorder)
         }
     }
@@ -2823,30 +2970,185 @@ private struct AccountActivityCard: View {
         displayName.first.map(String.init)?.uppercased() ?? "C"
     }
 
-    private var activitySubtitle: String {
-        if let hoveredBucket {
-            return "\(shortUsageDate(hoveredBucket.startDate, language: language)) · \(compactTokenCount(hoveredBucket.tokens)) Token"
+    private var activityTitle: String {
+        if chartRange == .hours48 {
+            if hourlyUsage.allSatisfy({ $0.tokens == 0 }) {
+                return language.text(
+                    "近48小时暂无 Token 使用",
+                    "No tokens in the last 48 hours"
+                )
+            }
+            return language.text(
+                "近48小时 Token",
+                "Hourly tokens · last 48 hours"
+            )
         }
-        if usage.lifetimeTokens == nil && usage.dailyUsageBuckets.isEmpty {
+        if usage.lifetimeTokens == nil
+            && usage.dailyUsageBuckets.isEmpty
+            && todayTokens == nil {
             return language.text(
                 "账户统计同步中",
                 "Account statistics are syncing"
             )
         }
-        if usage.dailyUsageBuckets.isEmpty {
+        if usage.dailyUsageBuckets.isEmpty && (todayTokens ?? 0) == 0 {
             return language.text(
                 "近30天暂无 Token 使用",
                 "No token usage in the last 30 days"
             )
         }
         return language.text(
-            "近30天每日 Token",
+            "近30天 Token",
             "Daily tokens · last 30 days"
         )
     }
 
-    private var activitySubtitleColor: Color {
-        hoveredBucket == nil ? .white.opacity(0.30) : .cyan.opacity(0.62)
+    private var activityDetail: String? {
+        if chartRange == .hours48,
+           let bucket = hoveredHourlyBucket ?? hourlyUsage.last {
+            return "\(hourlyUsageDateText(bucket.hourStart, language: language)) · \(compactTokenCount(bucket.tokens)) Token"
+        }
+        if chartRange == .days30,
+           let bucket = hoveredBucket ?? recentUsage.last {
+            return "\(shortUsageDate(bucket.startDate, language: language)) · \(compactTokenCount(bucket.tokens)) Token"
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private var chartAxis: some View {
+        let labels = chartRange == .hours48
+            ? hourlyAxisLabels
+            : dailyAxisLabels
+        HStack(spacing: 0) {
+            ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
+                Text(label)
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.25))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
+
+                if index < labels.count - 1 {
+                    Spacer(minLength: 2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private var hourlyAxisLabels: [String] {
+        guard !hourlyUsage.isEmpty else { return [] }
+        let lastIndex = hourlyUsage.count - 1
+        let indices = Array(Set([0, 12, 24, 36, lastIndex]))
+            .filter { $0 >= 0 && $0 <= lastIndex }
+            .sorted()
+        return indices.map { index in
+            hourlyAxisLabel(
+                hourlyUsage[index].hourStart,
+                isCurrent: index == lastIndex
+            )
+        }
+    }
+
+    private var dailyAxisLabels: [String] {
+        guard !recentUsage.isEmpty else { return [] }
+        let lastIndex = recentUsage.count - 1
+        let indices = Array(Set([0, lastIndex / 2, lastIndex])).sorted()
+        return indices.map { index in
+            if index == lastIndex {
+                return language.text("今天", "Today")
+            }
+            return shortUsageDate(recentUsage[index].startDate, language: language)
+        }
+    }
+
+    private func hourlyAxisLabel(_ date: Date, isCurrent: Bool) -> String {
+        if isCurrent { return language.text("现在", "Now") }
+        let calendar = Calendar.autoupdatingCurrent
+        let targetDay = calendar.startOfDay(for: date)
+        let today = calendar.startOfDay(for: Date())
+        let daysAgo = calendar.dateComponents(
+            [.day],
+            from: targetDay,
+            to: today
+        ).day ?? 0
+        let hour = calendar.component(.hour, from: date)
+        let time = String(format: "%02d:00", hour)
+        if language == .chinese {
+            switch daysAgo {
+            case 0: return "今天 \(time)"
+            case 1: return "昨天 \(time)"
+            case 2: return "前天 \(time)"
+            default:
+                let month = calendar.component(.month, from: date)
+                let day = calendar.component(.day, from: date)
+                return "\(month)/\(day) \(time)"
+            }
+        }
+        switch daysAgo {
+        case 0: return "Today \(hour)h"
+        case 1: return "-1d \(hour)h"
+        case 2: return "-2d \(hour)h"
+        default: return "-\(daysAgo)d \(hour)h"
+        }
+    }
+
+    private var chartRangePicker: some View {
+        HStack(spacing: 0) {
+            chartRangeButton(
+                .days30,
+                label: language.text("30日", "30D")
+            )
+            chartRangeButton(
+                .hours48,
+                label: language.text("48时", "48H")
+            )
+        }
+        .padding(2)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(0.07),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private func chartRangeButton(
+        _ range: TokenChartRange,
+        label: String
+    ) -> some View {
+        Button {
+            chartRange = range
+            hoveredBucket = nil
+            hoveredHourlyBucket = nil
+        } label: {
+            Text(label)
+                .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                .foregroundStyle(
+                    chartRange == range
+                        ? theme.accent.opacity(0.88)
+                        : Color.white.opacity(0.28)
+                )
+                .padding(.horizontal, 5)
+                .frame(height: 17)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(
+                            chartRange == range
+                                ? theme.accent.opacity(0.11)
+                                : Color.clear
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .help(range.helpText(language: language))
     }
 
     private func updateHoveredBucket(_ bucket: DailyUsageBucket?, hovering: Bool) {
@@ -2854,6 +3156,57 @@ private struct AccountActivityCard: View {
             hoveredBucket = bucket
         } else if hoveredBucket?.id == bucket?.id {
             hoveredBucket = nil
+        }
+    }
+
+    private func updateHoveredHourlyBucket(
+        _ bucket: HourlyUsageBucket?,
+        hovering: Bool
+    ) {
+        if hovering {
+            hoveredHourlyBucket = bucket
+        } else if hoveredHourlyBucket?.id == bucket?.id {
+            hoveredHourlyBucket = nil
+        }
+    }
+}
+
+enum TokenChartRange {
+    case days30
+    case hours48
+
+    func helpText(language: IslandInterfaceLanguage) -> String {
+        switch self {
+        case .days30:
+            return language.text("查看近30天每日用量", "Show daily usage for 30 days")
+        case .hours48:
+            return language.text("查看近48小时分时用量", "Show hourly usage for 48 hours")
+        }
+    }
+}
+
+private struct TokenChartSlimBar: View {
+    let height: CGFloat
+    let width: CGFloat
+    let color: Color
+    let isEmpty: Bool
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if !isEmpty {
+                RoundedRectangle(
+                    cornerRadius: width / 2,
+                    style: .continuous
+                )
+                .fill(
+                    LinearGradient(
+                        colors: [color, color.opacity(0.58)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: width, height: height)
+            }
         }
     }
 }
@@ -2864,6 +3217,7 @@ private struct DailyTokenActivityChart: View {
     let onHover: (DailyUsageBucket?, Bool) -> Void
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
         GeometryReader { proxy in
@@ -2871,7 +3225,7 @@ private struct DailyTokenActivityChart: View {
 
             ZStack(alignment: .bottom) {
                 Rectangle()
-                    .fill(Color.white.opacity(0.045))
+                    .fill(Color.white.opacity(0.035))
                     .frame(height: 1 / max(1, displayScale))
 
                 HStack(
@@ -2879,20 +3233,25 @@ private struct DailyTokenActivityChart: View {
                     spacing: IslandLayout.activityChartBarSpacing
                 ) {
                     ForEach(buckets) { bucket in
-                        let intensity = sqrt(
-                            Double(max(0, bucket.tokens)) / Double(maximum)
-                        )
+                        let intensity = Double(max(0, bucket.tokens))
+                            / Double(maximum)
                         let barHeight = bucket.tokens == 0
-                            ? 1
-                            : max(2, proxy.size.height * CGFloat(intensity))
+                            ? 0
+                            : max(6, proxy.size.height * CGFloat(intensity))
                         let isHovered = hoveredBucket?.id == bucket.id
 
                         ZStack(alignment: .bottom) {
                             Color.clear
 
-                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                                .fill(barColor(intensity: intensity, isHovered: isHovered))
-                                .frame(height: barHeight)
+                            TokenChartSlimBar(
+                                height: barHeight,
+                                width: isHovered ? 7 : 5,
+                                color: barColor(
+                                    intensity: intensity,
+                                    isHovered: isHovered
+                                ),
+                                isEmpty: bucket.tokens == 0
+                            )
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -2910,53 +3269,154 @@ private struct DailyTokenActivityChart: View {
 
     private func barColor(intensity: Double, isHovered: Bool) -> Color {
         guard intensity > 0 else { return .white.opacity(0.075) }
-        if isHovered { return .cyan.opacity(0.98) }
-        return .cyan.opacity(0.22 + 0.68 * intensity)
+        if isHovered { return theme.accent.opacity(0.88) }
+        return theme.accent.opacity(0.34 + 0.38 * intensity)
+    }
+}
+
+private struct HourlyTokenActivityChart: View {
+    let buckets: [HourlyUsageBucket]
+    let hoveredBucket: HourlyUsageBucket?
+    let onHover: (HourlyUsageBucket?, Bool) -> Void
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
+
+    var body: some View {
+        GeometryReader { proxy in
+            let maximum = max(1, buckets.map(\.tokens).max() ?? 0)
+
+            ZStack(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.035))
+                    .frame(height: 1 / max(1, displayScale))
+
+                HStack(
+                    alignment: .bottom,
+                    spacing: IslandLayout.hourlyActivityChartBarSpacing
+                ) {
+                    ForEach(buckets) { bucket in
+                        let intensity = Double(max(0, bucket.tokens))
+                            / Double(maximum)
+                        let barHeight = bucket.tokens == 0
+                            ? 0
+                            : max(5, proxy.size.height * CGFloat(intensity))
+                        let isHovered = hoveredBucket?.id == bucket.id
+                        let isCurrentHour = Calendar.autoupdatingCurrent.isDate(
+                            bucket.hourStart,
+                            equalTo: Date(),
+                            toGranularity: .hour
+                        )
+                        let isMidnight = Calendar.autoupdatingCurrent.component(
+                            .hour,
+                            from: bucket.hourStart
+                        ) == 0
+
+                        ZStack(alignment: .bottom) {
+                            if isMidnight {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.055))
+                                    .frame(width: 1 / max(1, displayScale))
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            }
+
+                            TokenChartSlimBar(
+                                height: barHeight,
+                                width: isHovered
+                                    ? 5.5
+                                    : (isCurrentHour ? 4.5 : 3),
+                                color: barColor(
+                                    intensity: intensity,
+                                    isHovered: isHovered,
+                                    isCurrentHour: isCurrentHour
+                                ),
+                                isEmpty: bucket.tokens == 0
+                            )
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .contentShape(Rectangle())
+                        .onHover { hovering in
+                            onHover(bucket, hovering)
+                        }
+                        .help(hourlyBucketHelp(bucket, isCurrentHour: isCurrentHour))
+                    }
+                }
+            }
+        }
+    }
+
+    private func barColor(
+        intensity: Double,
+        isHovered: Bool,
+        isCurrentHour: Bool
+    ) -> Color {
+        guard intensity > 0 else { return .white.opacity(0.075) }
+        if isHovered { return theme.accent.opacity(0.88) }
+        if isCurrentHour { return theme.accent.opacity(0.80) }
+        return theme.accent.opacity(0.30 + 0.36 * intensity)
+    }
+
+    private func hourlyBucketHelp(
+        _ bucket: HourlyUsageBucket,
+        isCurrentHour: Bool
+    ) -> String {
+        let suffix = isCurrentHour
+            ? language.text("（本小时进行中）", " (current hour)")
+            : ""
+        return "\(hourlyUsageDateText(bucket.hourStart, language: language)): \(exactTokenCount(bucket.tokens)) Token\(suffix)"
     }
 }
 
 private struct QuotaMetric: View {
-    let title: String
     let window: RateLimitWindow?
-    let resetSummary: ResetCreditSummary?
-    let onResetHoverChange: (Bool, CGPoint?) -> Void
+    let usage: UsageSummary
+    let todayTokens: Int64?
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 2) {
-                Text(title.uppercased())
-                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                    .tracking(0.5)
-                    .foregroundStyle(.white.opacity(0.32))
-
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if let resetTimestamp {
                     Text(
                         language.text(
-                            "（\(resetTimestamp)重置）",
-                            "(resets \(resetTimestamp))"
+                            "\(resetTimestamp) 重置",
+                            "Resets \(resetTimestamp)"
                         )
                     )
-                        .font(.system(size: 7.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.25))
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.30))
+                }
+
+                Spacer(minLength: 4)
+
+                if let paceAssessment {
+                    Text(paceLabel(for: paceAssessment.pace))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                        .foregroundStyle(paceColor(for: paceAssessment.pace))
+                        .lineLimit(1)
+                        .help(paceHelp(for: paceAssessment))
+                        .accessibilityLabel(paceHelp(for: paceAssessment))
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .lineLimit(1)
-            .minimumScaleFactor(0.76)
 
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(remainingText)
-                    .font(.system(size: 23, weight: .semibold, design: .rounded))
+                    .font(.system(size: IslandTypography.display, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.94))
                     .fixedSize(horizontal: true, vertical: true)
 
-                if let resetSummary {
-                    ResetSummaryLine(
-                        summary: resetSummary,
-                        onHoverChange: onResetHoverChange
-                    )
-                    .layoutPriority(1)
+                if let estimatedRemainingTokenText {
+                    Text(estimatedRemainingTokenText)
+                        .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(theme.accent.opacity(0.78))
+                        .lineLimit(1)
+                        .help(estimatedRemainingTokenHelp)
+                        .accessibilityLabel(estimatedRemainingTokenHelp)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2969,11 +3429,11 @@ private struct QuotaMetric: View {
                         .frame(width: proxy.size.width * remainingFraction)
                 }
             }
-            .frame(height: 5)
+            .frame(height: 7)
         }
         .padding(.leading, IslandLayout.metricCenterGutter)
         .padding(.trailing, IslandLayout.contentHorizontalInset)
-        .padding(.vertical, 2)
+        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -2990,12 +3450,79 @@ private struct QuotaMetric: View {
         guard let remaining = window?.remainingPercent else {
             return .white.opacity(0.18)
         }
-        return remaining <= 10 ? .red : .green
+        if remaining <= 10 { return .red }
+        if remaining <= 20 { return .yellow }
+        return theme.accent
     }
 
     private var resetTimestamp: String? {
         guard let date = window?.resetsAt else { return nil }
         return quotaResetDateText(date, language: language)
+    }
+
+    private var estimatedRemainingTokens: Int64? {
+        CodexDisplayPolicy.estimatedRemainingTokens(
+            window: window,
+            dailyUsageBuckets: usage.dailyUsageBuckets,
+            todayTokens: todayTokens
+        )
+    }
+
+    private var estimatedRemainingTokenText: String? {
+        guard let estimatedRemainingTokens else { return nil }
+        return "≈\(compactTokenCount(estimatedRemainingTokens)) Token"
+    }
+
+    private var estimatedRemainingTokenHelp: String {
+        language.text(
+            "根据本额度周期的实际 Token 消耗与剩余比例估算",
+            "Estimated from Token usage and the remaining quota in this cycle"
+        )
+    }
+
+    private var paceAssessment: QuotaConsumptionPaceAssessment? {
+        CodexDisplayPolicy.quotaConsumptionPace(window: window)
+    }
+
+    private func paceLabel(for pace: QuotaConsumptionPace) -> String {
+        switch pace {
+        case .slow:
+            return language.text("消耗偏慢", "Below pace")
+        case .normal:
+            return language.text("节奏正常", "On pace")
+        case .warning:
+            return language.text("轻度告急", "Caution")
+        case .critical:
+            return language.text("严重告急", "Critical")
+        }
+    }
+
+    private func paceColor(for pace: QuotaConsumptionPace) -> Color {
+        switch pace {
+        case .slow:
+            return .purple
+        case .normal:
+            return .green
+        case .warning:
+            return .yellow
+        case .critical:
+            return .red
+        }
+    }
+
+    private func paceHelp(for assessment: QuotaConsumptionPaceAssessment) -> String {
+        let used = Int(assessment.usedPercent.rounded())
+        let elapsed = Int(assessment.elapsedPercent.rounded())
+        let relativeDifference = Int(
+            abs(assessment.relativeDifferencePercent).rounded()
+        )
+        let direction = assessment.relativeDifferencePercent >= 0
+            ? language.text("快", "ahead")
+            : language.text("慢", "behind")
+        return language.text(
+            "本周期已过 \(elapsed)%，额度已用 \(used)%，相对均匀节奏\(direction) \(relativeDifference)%",
+            "\(elapsed)% of this cycle elapsed; \(used)% used; \(relativeDifference)% \(direction) of pace"
+        )
     }
 }
 
@@ -3029,42 +3556,42 @@ private struct ResetSummaryLine: View {
                         }
                 }
             }
-            .frame(height: 10, alignment: .leading)
+            .frame(height: 18, alignment: .leading)
     }
 
     private var summaryContent: some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(language.text("（", "("))
-                .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.28))
 
             if summary.availableCount <= 0 {
                 Text(language.text("暂无可用重置", "No resets available"))
-                    .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.30))
             } else {
                 Text(String(summary.availableCount))
-                    .font(.system(size: 7.8, weight: .bold, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(Color.green.opacity(0.82))
 
                 Text(
                     language.text(
-                        "次可用重置，最近一次将于",
-                        " resets available, next expires "
+                        "次重置 · ",
+                        " resets · "
                     )
                 )
-                    .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.34))
 
                 if let date = summary.earliestExpiration {
                     Text(resetExpirationDateText(date, language: language))
-                        .font(.system(size: 7.2, weight: .semibold, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(Color.red.opacity(0.78))
 
-                    Text(language.text("到期", ""))
-                        .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                    Text(language.text("到期", " expiry"))
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.28))
                 } else {
                     Text(
@@ -3073,19 +3600,18 @@ private struct ResetSummaryLine: View {
                             "expiration unknown"
                         )
                     )
-                        .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.28))
                 }
             }
 
             Text(language.text("）", ")"))
-                .font(.system(size: 7.2, weight: .medium, design: .rounded))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.28))
         }
         .lineLimit(1)
-        .minimumScaleFactor(0.76)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 10, alignment: .leading)
+        .frame(height: 18, alignment: .leading)
     }
 }
 
@@ -3093,6 +3619,7 @@ private struct ResetExpirationPopover: View {
     let summary: ResetCreditSummary
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     static func size(
         for summary: ResetCreditSummary,
@@ -3102,16 +3629,16 @@ private struct ResetExpirationPopover: View {
         let missingDateCount = max(0, summary.availableCount - dateCount)
         let height: CGFloat
         if dateCount == 0 {
-            height = 35
+            height = 54
         } else {
-            height = 24 + CGFloat(dateCount) * 11
-                + (missingDateCount > 0 ? 13 : 0)
+            height = 34 + CGFloat(dateCount) * 21
+                + (missingDateCount > 0 ? 21 : 0)
         }
         return CGSize(width: width(for: language), height: height)
     }
 
     static func width(for language: IslandInterfaceLanguage) -> CGFloat {
-        language == .chinese ? 84 : 80
+        language == .chinese ? 160 : 175
     }
 
     private var expirationDates: [Date] {
@@ -3133,10 +3660,10 @@ private struct ResetExpirationPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(language.text("重置到期时间", "Reset expirations"))
-                .font(.system(size: 7.2, weight: .bold, design: .rounded))
+                .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.64))
                 .padding(.leading, language == .chinese ? 3 : 0)
-                .frame(height: 9, alignment: .leading)
+                .frame(height: 16, alignment: .leading)
 
             if expirationDates.isEmpty {
                 Text(
@@ -3145,22 +3672,21 @@ private struct ResetExpirationPopover: View {
                         "Dates unavailable"
                     )
                 )
-                    .font(.system(size: 7, weight: .medium, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.34))
-                    .frame(height: 9, alignment: .leading)
+                    .frame(height: 16, alignment: .leading)
             } else {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(expirationDates.enumerated()), id: \.offset) { index, date in
                         HStack(spacing: 3) {
                             Text(String(index + 1))
-                                .font(.system(size: 6.2, weight: .bold, design: .rounded))
+                                .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                                 .monospacedDigit()
                                 .foregroundStyle(.white.opacity(0.58))
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.5)
-                                .frame(width: 9, height: 9)
+                                .frame(width: 16, height: 16)
                                 .background(
-                                    Circle().fill(Color.cyan.opacity(0.12))
+                                    Circle().fill(theme.accent.opacity(0.12))
                                 )
 
                             Text(
@@ -3169,7 +3695,7 @@ private struct ResetExpirationPopover: View {
                                     language: language
                                 )
                             )
-                                .font(.system(size: 6.6, weight: .medium, design: .monospaced))
+                                .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(
                                     index == 0
@@ -3177,10 +3703,10 @@ private struct ResetExpirationPopover: View {
                                         : Color.white.opacity(0.52)
                                 )
                                 .lineLimit(1)
-                                .frame(width: 31, alignment: .leading)
+                                .frame(width: 58, alignment: .leading)
 
                             Text(resetExpirationTimeText(date))
-                                .font(.system(size: 6.6, weight: .medium, design: .monospaced))
+                                .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(
                                     index == 0
@@ -3194,22 +3720,21 @@ private struct ResetExpirationPopover: View {
                             maxWidth: .infinity,
                             alignment: language == .chinese ? .center : .leading
                         )
-                        .frame(height: 9)
+                        .frame(height: 18)
                     }
                 }
             }
 
             if !expirationDates.isEmpty, missingDateCount > 0 {
                 Text(missingDateText)
-                    .font(.system(size: 6.3, weight: .medium, design: .rounded))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                     .foregroundStyle(.orange.opacity(0.48))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.68)
-                    .frame(height: 8, alignment: .leading)
+                    .frame(height: 16, alignment: .leading)
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
         .frame(
             width: Self.width(for: language),
             height: Self.size(for: summary, language: language).height,
@@ -3237,7 +3762,7 @@ private struct MetricDivider: View {
     var body: some View {
         Rectangle()
             .fill(Color.white.opacity(0.075))
-            .frame(width: width, height: 52)
+            .frame(width: width, height: 70)
     }
 }
 
@@ -3250,6 +3775,25 @@ private struct PixelVerticalDivider: View {
         Rectangle()
             .fill(Color.white.opacity(opacity))
             .frame(width: 1 / max(1, displayScale), height: height)
+    }
+}
+
+private struct IslandThemeWatermark: View {
+    let theme: IslandColorTheme
+
+    var body: some View {
+        if let resourceName = theme.watermarkResourceName,
+           let image = Bundle.module.url(
+               forResource: resourceName,
+               withExtension: "png"
+           ).flatMap(NSImage.init(contentsOf:)) {
+            Image(nsImage: image)
+                .resizable()
+                .renderingMode(theme.usesOriginalWatermarkColors ? .original : .template)
+                .interpolation(.high)
+                .scaledToFit()
+                .foregroundStyle(theme.accent)
+        }
     }
 }
 
@@ -3393,6 +3937,24 @@ private func compactTokenCount(_ value: Int64) -> String {
     return String(value)
 }
 
+private func menuBarTokenCount(_ value: Int64) -> String {
+    let value = max(0, value)
+    let count = Double(value)
+    if value >= 1_000_000_000_000 {
+        return String(format: "%.0fT", count / 1_000_000_000_000)
+    }
+    if value >= 1_000_000_000 {
+        return String(format: "%.0fB", count / 1_000_000_000)
+    }
+    if value >= 1_000_000 {
+        return String(format: "%.0fM", count / 1_000_000)
+    }
+    if value >= 1_000 {
+        return String(format: "%.0fK", count / 1_000)
+    }
+    return String(value)
+}
+
 private func compactScaledTokenCount(_ count: Double, unit: String) -> String {
     if count >= 100 { return String(format: "%.0f%@", count, unit) }
     if count >= 10 { return String(format: "%.1f%@", count, unit) }
@@ -3416,6 +3978,13 @@ private func shortUsageDate(
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
     ]
     return "\(monthNames[month - 1]) \(day)"
+}
+
+private func hourlyUsageDateText(
+    _ date: Date,
+    language: IslandInterfaceLanguage
+) -> String {
+    DateFormatter.codexIslandHourlyUsage(for: language).string(from: date)
 }
 
 private func tokenUsageHelp(
@@ -3482,6 +4051,14 @@ private extension RelativeDateTimeFormatter {
 }
 
 private extension DateFormatter {
+    static func codexIslandHourlyUsage(
+        for language: IslandInterfaceLanguage
+    ) -> DateFormatter {
+        language == .chinese
+            ? codexIslandHourlyUsageChinese
+            : codexIslandHourlyUsageEnglish
+    }
+
     static func codexIslandQuotaReset(
         for language: IslandInterfaceLanguage
     ) -> DateFormatter {
@@ -3503,6 +4080,22 @@ private extension DateFormatter {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateFormat = "M月d日 HH:mm"
+        return formatter
+    }()
+
+    static let codexIslandHourlyUsageChinese: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "M月d日 HH:00"
+        return formatter
+    }()
+
+    static let codexIslandHourlyUsageEnglish: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "MMM d, HH:00"
         return formatter
     }()
 

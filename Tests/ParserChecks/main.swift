@@ -9,6 +9,9 @@ struct ParserChecks {
         checkRateLimitsAndResetCredits()
         checkCodexBucketPreference()
         checkTokenConsumptionPolicy()
+        checkQuotaConsumptionPace()
+        checkEstimatedRemainingTokens()
+        checkVisibleThreadPriority()
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
         checkLanguageResolution()
@@ -33,6 +36,46 @@ struct ParserChecks {
         guard !condition() else { return }
         failures += 1
         fputs("FAIL: \(message)\n", stderr)
+    }
+
+    private static func checkVisibleThreadPriority() {
+        func thread(_ id: String, _ state: ThreadExecutionState) -> ThreadSummary {
+            ThreadSummary(
+                id: id,
+                title: id,
+                status: "notLoaded",
+                clientSource: .app,
+                model: nil,
+                reasoningEffort: nil,
+                serviceTier: nil,
+                serviceTierSource: nil,
+                tokenUsage: nil,
+                executionState: state,
+                cwd: nil,
+                rolloutPath: nil,
+                updatedAt: nil
+            )
+        }
+
+        let visible = CodexDisplayPolicy.visibleRecentThreads(
+            from: [
+                thread("recent-1", .idle),
+                thread("active-1", .running),
+                thread("recent-2", .failed),
+                thread("active-2", .running),
+                thread("recent-3", .unknown)
+            ]
+        )
+        expect(visible.count == 3, "dashboard displays exactly three recent tasks")
+        expect(
+            visible.map(\.id) == ["active-1", "active-2", "recent-1"],
+            "running tasks are shown first while preserving recency within groups"
+        )
+        expect(
+            CodexDisplayPolicy.recentThreadFetchLimit
+                > CodexDisplayPolicy.recentThreadLimit,
+            "thread query keeps a wider candidate set than the visible dashboard"
+        )
     }
 
     private static func checkPlanBadgeLabels() {
@@ -574,6 +617,118 @@ struct ParserChecks {
         )
     }
 
+    private static func checkQuotaConsumptionPace() {
+        let lastReset = Date(timeIntervalSince1970: 2_000_000_000)
+        let nextReset = lastReset.addingTimeInterval(100 * 60)
+        let halfway = lastReset.addingTimeInterval(50 * 60)
+
+        func assessment(usedPercent: Double) -> QuotaConsumptionPaceAssessment? {
+            CodexDisplayPolicy.quotaConsumptionPace(
+                window: RateLimitWindow(
+                    usedPercent: usedPercent,
+                    windowDurationMinutes: 100,
+                    resetsAt: nextReset
+                ),
+                now: halfway
+            )
+        }
+
+        expect(
+            assessment(usedPercent: 40)?.pace == .slow,
+            "quota use more than 10 percent behind the expected pace is slow"
+        )
+        expect(
+            assessment(usedPercent: 50)?.pace == .normal,
+            "quota use close to the elapsed cycle is normal"
+        )
+        expect(
+            assessment(usedPercent: 57.5)?.pace == .warning,
+            "quota use 10 to 25 percent ahead of the expected pace warns"
+        )
+        expect(
+            assessment(usedPercent: 70)?.pace == .critical,
+            "quota use more than 25 percent ahead of the expected pace is critical"
+        )
+        expect(
+            assessment(usedPercent: 57.5)?.elapsedPercent == 50,
+            "pace assessment derives the last reset from duration and next reset"
+        )
+        expect(
+            abs(
+                (assessment(usedPercent: 57.5)?.relativeDifferencePercent ?? 0)
+                    - 15
+            ) < 0.000_001,
+            "pace assessment reports the difference relative to expected use"
+        )
+        expect(
+            CodexDisplayPolicy.quotaConsumptionPace(
+                window: RateLimitWindow(
+                    usedPercent: 50,
+                    windowDurationMinutes: nil,
+                    resetsAt: nextReset
+                ),
+                now: halfway
+            ) == nil,
+            "pace hint stays hidden when the reset window duration is unavailable"
+        )
+        expect(
+            CodexDisplayPolicy.quotaConsumptionPace(
+                window: RateLimitWindow(
+                    usedPercent: 50,
+                    windowDurationMinutes: 100,
+                    resetsAt: nextReset
+                ),
+                now: nextReset
+            ) == nil,
+            "stale quota windows do not show a pace hint"
+        )
+    }
+
+    private static func checkEstimatedRemainingTokens() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let resetDay = calendar.date(from: DateComponents(
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 12
+        ))!
+        let nextReset = calendar.date(byAdding: .day, value: 7, to: resetDay)!
+        let now = calendar.date(byAdding: .day, value: 5, to: resetDay)!
+        let buckets = [
+            DailyUsageBucket(startDate: "2026-01-01", tokens: 240),
+            DailyUsageBucket(startDate: "2026-01-02", tokens: 100),
+            DailyUsageBucket(startDate: "2026-01-03", tokens: 100),
+            DailyUsageBucket(startDate: "2026-01-04", tokens: 100),
+            DailyUsageBucket(startDate: "2026-01-05", tokens: 100)
+        ]
+        let estimate = CodexDisplayPolicy.estimatedRemainingTokens(
+            window: RateLimitWindow(
+                usedPercent: 50,
+                windowDurationMinutes: 7 * 24 * 60,
+                resetsAt: nextReset
+            ),
+            dailyUsageBuckets: buckets,
+            todayTokens: 50,
+            now: now,
+            calendar: calendar
+        )
+        expect(
+            estimate == 570,
+            "remaining Token estimate prorates the first reset day"
+        )
+        expect(
+            CodexDisplayPolicy.estimatedRemainingTokens(
+                window: nil,
+                dailyUsageBuckets: buckets,
+                todayTokens: 50,
+                now: now,
+                calendar: calendar
+            ) == nil,
+            "remaining Token estimate stays hidden without quota metadata"
+        )
+    }
+
     private static func checkThreadDeepLinks() {
         let threadID = "019f1234-5678-7abc-8def-0123456789ab"
         expect(
@@ -734,29 +889,35 @@ struct ParserChecks {
         let now = calendar.date(
             from: DateComponents(year: 2026, month: 7, day: 15, hour: 12)
         )!
-        let timeline = CodexUsageTimeline.lastCompletedDays(
+        let timeline = CodexUsageTimeline.lastDaysIncludingToday(
             from: [
+                DailyUsageBucket(startDate: "2026-07-15", tokens: 5),
                 DailyUsageBucket(startDate: "2026-07-14", tokens: 140),
                 DailyUsageBucket(startDate: "2026-07-12", tokens: 120),
                 DailyUsageBucket(startDate: "2026-07-12", tokens: 3)
             ],
+            todayTokens: 150,
             count: 5,
             now: now,
             calendar: calendar
         )
 
         expect(timeline.count == 5, "usage timeline has one entry per calendar day")
-        expect(timeline.first?.startDate == "2026-07-10", "usage timeline starts four days ago")
-        expect(timeline.last?.startDate == "2026-07-14", "usage timeline ends yesterday")
-        expect(timeline[1].tokens == 0, "missing usage date is filled with zero")
-        expect(timeline[2].tokens == 123, "duplicate usage dates are combined")
+        expect(timeline.first?.startDate == "2026-07-11", "usage timeline starts four days ago")
+        expect(timeline.last?.startDate == "2026-07-15", "usage timeline ends today")
+        expect(timeline[2].tokens == 0, "missing usage date is filled with zero")
+        expect(timeline[1].tokens == 123, "duplicate usage dates are combined")
+        expect(
+            timeline.last?.tokens == 150,
+            "local real-time usage replaces a delayed account bucket for today"
+        )
 
         var shanghaiCalendar = Calendar(identifier: .gregorian)
         shanghaiCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
         let newYearNow = shanghaiCalendar.date(
             from: DateComponents(year: 2026, month: 1, day: 2, hour: 12)
         )!
-        let newYearTimeline = CodexUsageTimeline.lastCompletedDays(
+        let newYearTimeline = CodexUsageTimeline.lastDaysIncludingToday(
             from: [],
             count: 3,
             now: newYearNow,
@@ -764,7 +925,7 @@ struct ParserChecks {
         )
         expect(
             newYearTimeline.map(\.startDate)
-                == ["2025-12-30", "2025-12-31", "2026-01-01"],
+                == ["2025-12-31", "2026-01-01", "2026-01-02"],
             "usage timeline crosses month and year boundaries"
         )
 
@@ -773,7 +934,7 @@ struct ParserChecks {
         let daylightSavingNow = losAngelesCalendar.date(
             from: DateComponents(year: 2026, month: 3, day: 10, hour: 12)
         )!
-        let daylightSavingTimeline = CodexUsageTimeline.lastCompletedDays(
+        let daylightSavingTimeline = CodexUsageTimeline.lastDaysIncludingToday(
             from: [],
             count: 5,
             now: daylightSavingNow,
@@ -781,7 +942,7 @@ struct ParserChecks {
         )
         expect(
             daylightSavingTimeline.map(\.startDate)
-                == ["2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09"],
+                == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"],
             "usage timeline keeps calendar-day continuity across daylight saving time"
         )
     }
@@ -1098,9 +1259,16 @@ struct ParserChecks {
         )
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        func sessionMeta(forked: Bool = false) -> String {
+        func sessionMeta(
+            forked: Bool = false,
+            startedAt: Date? = nil,
+            subagent: Bool = false
+        ) -> String {
             let forkField = forked ? ",\"forked_from_id\":\"parent\"" : ""
-            return "{\"timestamp\":\"\(formatter.string(from: afterMidnight))\",\"type\":\"session_meta\",\"payload\":{\"id\":\"test\",\"source\":\"cli\",\"thread_source\":\"user\"\(forkField)}}"
+            let sourceFields = subagent
+                ? "\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"parent\"}}},\"thread_source\":\"subagent\""
+                : "\"source\":\"cli\",\"thread_source\":\"user\""
+            return "{\"timestamp\":\"\(formatter.string(from: startedAt ?? afterMidnight))\",\"type\":\"session_meta\",\"payload\":{\"id\":\"test\",\(sourceFields)\(forkField)}}"
         }
 
         func token(_ date: Date, total: Int64, last: Int64?) -> String {
@@ -1108,6 +1276,10 @@ struct ParserChecks {
                 ",\"last_token_usage\":{\"total_tokens\":\($0)}"
             } ?? ""
             return "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":\(total)}\(lastField)}}}"
+        }
+
+        func subagentBoundary(_ date: Date) -> String {
+            "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"inter_agent_communication_metadata\",\"payload\":{}}"
         }
 
         func write(_ lines: [String], name: String) -> URL {
@@ -1169,8 +1341,57 @@ struct ParserChecks {
             expect(firstValue == 100, "first daily absolute counter uses last usage as its baseline")
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
+            let currentHourStart = calendar.dateInterval(of: .hour, for: now)!.start
+            let firstHourlyStart = calendar.date(
+                byAdding: .hour,
+                value: -(CodexDailyTokenUsageReader.recentHourCount - 1),
+                to: currentHourStart
+            )!
+            let hourlyWindow = write(
+                [
+                    sessionMeta(
+                        startedAt: calendar.date(
+                            byAdding: .hour,
+                            value: -60,
+                            to: now
+                        )
+                    ),
+                    token(firstHourlyStart.addingTimeInterval(-60), total: 100, last: 100),
+                    token(firstHourlyStart.addingTimeInterval(60), total: 160, last: 60),
+                    token(currentHourStart.addingTimeInterval(60), total: 220, last: 60)
+                ],
+                name: "hourly-window.jsonl"
+            )
+            let hourlyValue = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [hourlyWindow.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                hourlyValue.hourlyBuckets.count
+                    == CodexDailyTokenUsageReader.recentHourCount,
+                "hourly timeline always contains exactly 48 clock-hour buckets"
+            )
+            expect(
+                hourlyValue.hourlyBuckets.first?.tokens == 60,
+                "hourly timeline uses the event before its window as a cumulative baseline"
+            )
+            expect(
+                hourlyValue.hourlyBuckets.last?.tokens == 60,
+                "hourly timeline includes the current partial hour"
+            )
+            expect(
+                hourlyValue.hourlyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 120,
+                "hourly timeline excludes activity older than 48 clock hours"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
             let forked = write(
-                [sessionMeta(forked: true), token(afterMidnight, total: 9_999, last: 99)],
+                [
+                    sessionMeta(forked: true, startedAt: laterToday),
+                    token(afterMidnight, total: 9_900, last: 9_900),
+                    token(laterToday.addingTimeInterval(1), total: 9_999, last: 99)
+                ],
                 name: "forked.jsonl"
             )
             let forkValue = try CodexDailyTokenUsageReader.readToday(
@@ -1178,7 +1399,77 @@ struct ParserChecks {
                 now: now,
                 calendar: calendar
             )
-            expect(forkValue == 0, "forked rollout history is excluded from daily aggregation")
+            expect(
+                forkValue == 99,
+                "forked rollout counts new model calls but skips copied history"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let subagent = write(
+                [
+                    sessionMeta(startedAt: laterToday, subagent: true),
+                    token(laterToday, total: 500, last: 500),
+                    token(laterToday, total: 570, last: 70),
+                    subagentBoundary(laterToday.addingTimeInterval(1)),
+                    token(laterToday.addingTimeInterval(2), total: 640, last: 70)
+                ],
+                name: "subagent.jsonl"
+            )
+            let subagentValue = try CodexDailyTokenUsageReader.readToday(
+                from: [subagent.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                subagentValue == 70,
+                "subagent rollout treats timestamp-rewritten parent history as a baseline"
+            )
+            let subagentHourlyValue = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [subagent.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                subagentHourlyValue.hourlyBuckets.reduce(Int64(0)) {
+                    $0 + $1.tokens
+                } == 70,
+                "hourly timeline also excludes subagent parent-history replay"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let pendingSubagent = write(
+                [
+                    sessionMeta(startedAt: laterToday, subagent: true),
+                    token(laterToday, total: 9_000, last: 9_000)
+                ],
+                name: "pending-subagent.jsonl"
+            )
+            let pendingValue = try CodexDailyTokenUsageReader.readToday(
+                from: [pendingSubagent.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                pendingValue == 0,
+                "subagent history stays hidden until its activity boundary is committed"
+            )
+
+            let pendingHandle = try FileHandle(forWritingTo: pendingSubagent)
+            try pendingHandle.seekToEnd()
+            try pendingHandle.write(contentsOf: Data(([
+                subagentBoundary(laterToday.addingTimeInterval(1)),
+                token(laterToday.addingTimeInterval(2), total: 9_080, last: 80)
+            ].joined(separator: "\n") + "\n").utf8))
+            try pendingHandle.close()
+            let readyValue = try CodexDailyTokenUsageReader.readToday(
+                from: [pendingSubagent.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                readyValue == 80,
+                "subagent cache rebuilds when the activity boundary is appended"
+            )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
             let partial = directory.appendingPathComponent("partial.jsonl")
@@ -1281,8 +1572,10 @@ struct ParserChecks {
             )
             let rootRollout = sessions.appendingPathComponent("root.jsonl")
             let forkRollout = sessions.appendingPathComponent("fork.jsonl")
+            let subagentRollout = sessions.appendingPathComponent("subagent.jsonl")
             try Data((sessionMeta() + "\n").utf8).write(to: rootRollout)
             try Data((sessionMeta(forked: true) + "\n").utf8).write(to: forkRollout)
+            try Data((sessionMeta(subagent: true) + "\n").utf8).write(to: subagentRollout)
             try FileManager.default.setAttributes(
                 [.modificationDate: now],
                 ofItemAtPath: rootRollout.path
@@ -1291,19 +1584,27 @@ struct ParserChecks {
                 [.modificationDate: now],
                 ofItemAtPath: forkRollout.path
             )
+            try FileManager.default.setAttributes(
+                [.modificationDate: now],
+                ofItemAtPath: subagentRollout.path
+            )
 
             let originalCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
             setenv("CODEX_HOME", codexHome.path, 1)
             let discovered = try CodexDailyTokenUsageReader
-                .discoverRootConversationRollouts(now: now, calendar: calendar)
+                .discoverLocalUsageRollouts(now: now, calendar: calendar)
             if let originalCodexHome {
                 setenv("CODEX_HOME", originalCodexHome, 1)
             } else {
                 unsetenv("CODEX_HOME")
             }
             expect(
-                discovered == [rootRollout.path],
-                "local rollout discovery includes root CLI/App sessions and excludes forks"
+                discovered == [
+                    forkRollout.path,
+                    rootRollout.path,
+                    subagentRollout.path
+                ].sorted(),
+                "local rollout discovery includes roots, forks, and subagents"
             )
         } catch {
             expect(false, "daily token usage reader: \(error.localizedDescription)")

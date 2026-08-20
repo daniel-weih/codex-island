@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Codex Island is a floating status island for the top of macOS. It stays compact by default and expands on hover to show Codex account limits, profile identity, lifetime and recent token activity, plus each recent thread's model, reasoning effort, Fast status, and cumulative token usage.
+Codex Island is a floating status island for the top of macOS. It stays compact by default and expands on hover to show Codex account limits, profile identity, lifetime and recent token activity, plus the source, Fast status, and cumulative token usage of the three most recent threads.
 
 Account details, usage, and the thread index come from read-only endpoints exposed by the local `codex app-server`. Per-thread configuration comes from the latest `thread_settings_applied` event in that thread's local rollout. The profile name and avatar are fetched on demand from the Profile endpoint used by the Codex App; the authentication token is retained only in memory for the duration of the request and is never written to disk or logs. Codex Island does not parse message bodies or call endpoints that consume reset credits.
 
@@ -118,15 +118,15 @@ swift run CodexIsland --render-preview dist/previews
 
 - A centered, borderless floating panel visible across all Spaces, adapted for both notched Mac displays and standard external displays
 - Automatic expansion when the pointer enters the physical notch area, followed by automatic collapse after the pointer leaves both the notch and expanded panel
-- Today's token increase across local root threads in the left side of the compact island; while tokens are being consumed continuously, particles flow from the notch toward the daily-token total; the status dot is green while any thread is running and gray otherwise
-- Remaining primary rate-limit percentage and the next reset time
+- Today's token increase across all locally triggered model calls in the left side of the compact island; while tokens are being consumed continuously, particles flow from the notch toward the daily-token total; the status dot is green while any thread is running and gray otherwise
+- Remaining primary rate-limit percentage, estimated available tokens, next reset time, and reset-relative usage pace
 - Available reset credits from `rateLimitResetCredits.availableCount`, with all expiration times available on hover
-- Profile avatar and name, lifetime account tokens, and a daily token chart covering the latest 30 complete calendar days
-- Activation of the Codex App by clicking any non-thread area in the expanded island, plus the official settings deep link from the top-right gear button
-- Settings for status animation, token-consumption animation, interface language, target display, and launch at login; target display defaults to automatic and can be pinned to the built-in display or any connected external display, with temporary fallback after disconnection and automatic restoration after reconnection; launch at login is disabled by default
-- Codex account plan plus each of the five most recent CLI/App threads' model, reasoning effort, and Fast status
-- Near-real-time execution state for the five most recent threads: running, idle, interrupted, or failed
-- Cumulative token usage for the five most recent threads, with input, cached-input, output, and reasoning-output details on hover
+- Profile avatar and name, lifetime account tokens, and switchable charts for the latest 30 calendar days or previous 48 hours
+- Activation of the Codex App by clicking any non-thread area in the expanded island, plus a top-right screenshot action that copies a transparent rounded PNG to the clipboard
+- Settings for status animation, token-consumption animation, color theme, interface language, target display, and launch at login; target display defaults to automatic and can be pinned to the built-in display or any connected external display, with temporary fallback after disconnection and automatic restoration after reconnection; launch at login is disabled by default
+- Codex account plan plus the source and Fast status of the three most recent CLI/App threads, with running threads prioritized
+- Near-real-time execution state for the three most recent threads: running, idle, interrupted, or failed
+- Cumulative token usage for the three most recent threads, with input, cached-input, output, and reasoning-output details on hover
 - Opening a thread in the Codex App by clicking its row through the official `codex://threads/<thread-id>` deep link
 - Thread list and execution state refresh every second, limits every 30 seconds, and account statistics every 5 minutes; there is no menu bar icon or manual-show entry point
 
@@ -143,4 +143,4 @@ The app launches a local `codex app-server` child process over stdio. After `ini
 
 All business-data calls are read-only. To obtain the Codex App profile name and avatar, Codex Island temporarily requests the current token from the local App Server through `getAuthStatus`, then calls the `/wham/profiles/me` endpoint used by the Codex App. The network session uses an ephemeral configuration with no cookies or disk cache; after a 401 response, the token is refreshed and the request is retried at most once. This Profile endpoint is not a public contract. If it fails, the UI falls back to **Codex User** and an initial-letter placeholder without reading the local account name or system avatar, and limits, usage, and thread status remain unaffected.
 
-Codex Island also discovers local root CLI/App threads read-only under `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions`, then scans the corresponding `.jsonl` files. Recent threads are labeled `TUI` or `APP` using the `source` returned by `thread/list`; only model settings, timestamped cumulative `token_count` values, and the `task_started`, `task_complete`, `turn_aborted`, and `error` lifecycle events are extracted. Daily usage is calculated from positive deltas between cumulative values, so repeated notifications are not double-counted. Forks and sub-agent threads copy their parent's history and are currently excluded from this total. The recent-thread list, execution state, and cumulative tokens refresh every second; the complete local thread index refreshes every 15 seconds; limits refresh every 30 seconds; account statistics use a 5-minute cache; and profile identity uses a 15-minute cache. The child process exits together with the app.
+Codex Island also discovers local CLI/App threads, forks, and sub-agents read-only under `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions`, then scans the corresponding `.jsonl` files. Recent threads are labeled `TUI` or `APP` using the `source` returned by `thread/list`; only model settings, timestamped cumulative `token_count` values, and the `task_started`, `task_complete`, `turn_aborted`, and `error` lifecycle events are extracted. Today's and hourly 48-hour usage is calculated from positive deltas after each model call, so repeated notifications are not double-counted. Forks begin contributing at their own `session_meta` creation time, while sub-agents begin at their first `inter_agent_communication_metadata` activity boundary, avoiding parent history copied with rewritten timestamps. Today's bar and compact total use this live local result, while earlier days continue to use the account daily summary. The recent-thread list, execution state, cumulative tokens, and hourly usage refresh every second; the complete local thread index refreshes every 15 seconds; limits refresh every 30 seconds; account statistics use a 5-minute cache; and profile identity uses a 15-minute cache. The child process exits together with the app.

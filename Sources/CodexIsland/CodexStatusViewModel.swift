@@ -55,6 +55,7 @@ final class CodexStatusViewModel: ObservableObject {
                     self.snapshot.usage = .empty
                     self.snapshot.profileIdentity = .empty
                     self.snapshot.todayThreadTokens = nil
+                    self.snapshot.hourlyThreadTokens = []
                     self.tokenConsumptionHighWater = nil
                     self.tokenConsumptionDayStart = nil
                     self.localActivityRolloutPaths = []
@@ -259,6 +260,7 @@ final class CodexStatusViewModel: ObservableObject {
             updated.recentThreads = snapshot.recentThreads
         }
         updated.todayThreadTokens = snapshot.todayThreadTokens
+        updated.hourlyThreadTokens = snapshot.hourlyThreadTokens
         updated.hasRunningSession = snapshot.hasRunningSession
             || updated.recentThreads.contains { $0.executionState == .running }
         if case .disconnected = snapshot.connection {
@@ -373,7 +375,7 @@ final class CodexStatusViewModel: ObservableObject {
 
     private func requestRecentThreads(timeout: TimeInterval = 12) async throws -> [ThreadSummary] {
         try await requestThreads(
-            limit: CodexDisplayPolicy.recentThreadLimit,
+            limit: CodexDisplayPolicy.recentThreadFetchLimit,
             archived: false,
             timeout: timeout
         )
@@ -399,9 +401,11 @@ final class CodexStatusViewModel: ObservableObject {
         return CodexStatusPayloadParser.parseRecentThreads(result, limit: limit)
     }
 
-    /// Discovers every local root CLI/App rollout periodically, then reduces
-    /// cumulative counters and lifecycle events every second. The visible five
-    /// rows remain an immediate fallback while a new rollout awaits discovery.
+    /// Discovers local CLI/App and subagent rollouts periodically, then reduces
+    /// cumulative counters every second. Each subagent starts after its explicit
+    /// activity boundary, so timestamp-rewritten parent history is skipped.
+    /// The recent candidate rows remain an immediate fallback while a new rollout
+    /// awaits discovery.
     private func refreshDailyThreadTokens() async {
         let now = Date()
         let dayStart = Calendar.autoupdatingCurrent.startOfDay(for: now)
@@ -411,7 +415,7 @@ final class CodexStatusViewModel: ObservableObject {
         }
         if isRefreshDue(nextRefreshAt: nextDailyThreadDiscoveryAt, now: now) {
             let discovered = await Task.detached(priority: .utility) {
-                try? CodexDailyTokenUsageReader.discoverRootConversationRollouts(
+                try? CodexDailyTokenUsageReader.discoverLocalUsageRollouts(
                     now: now
                 )
             }.value
@@ -437,7 +441,7 @@ final class CodexStatusViewModel: ObservableObject {
             $0.executionState == .running
         }
         let localActivity = await Task.detached(priority: .utility) {
-            let total = try? CodexDailyTokenUsageReader.readToday(
+            let usage = try? CodexDailyTokenUsageReader.readRecentHours(
                 from: tokenPaths,
                 now: now
             )
@@ -451,11 +455,15 @@ final class CodexStatusViewModel: ObservableObject {
                 (try? CodexThreadActivityReader.readLatest(from: path))?
                     .executionState == .running
             }
-            return (total, hasRunningSession)
+            return (usage, hasRunningSession)
         }.value
-        if let total = localActivity.0 {
+        if let usage = localActivity.0 {
+            let total = usage.todayTokens
             if total != snapshot.todayThreadTokens {
                 snapshot.todayThreadTokens = total
+            }
+            if usage.hourlyBuckets != snapshot.hourlyThreadTokens {
+                snapshot.hourlyThreadTokens = usage.hourlyBuckets
             }
             if CodexDisplayPolicy.shouldAnimateTokenConsumption(
                 previous: tokenConsumptionHighWater,

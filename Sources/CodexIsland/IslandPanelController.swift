@@ -55,7 +55,13 @@ final class IslandPanelController: NSObject {
             rootView: IslandView(
                 viewModel: viewModel,
                 displayGeometry: displayGeometry,
-                displaySelection: displaySelection
+                displaySelection: displaySelection,
+                onCopyScreenshot: { [weak self] in
+                    guard let contentView = self?.panel.contentView else {
+                        return false
+                    }
+                    return IslandScreenshotService.copyPNG(from: contentView)
+                }
             )
         )
         hostingView.sizingOptions = []
