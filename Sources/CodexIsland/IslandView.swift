@@ -3735,7 +3735,7 @@ private struct DailyTokenActivityChart: View {
 
                             TokenChartSlimBar(
                                 height: barHeight,
-                                width: isHovered ? 7 : 5,
+                                width: isHovered ? 9 : 7,
                                 color: barColor(
                                     intensity: intensity,
                                     isHovered: isHovered
@@ -3943,7 +3943,7 @@ private struct QuotaMetric: View {
                         .frame(width: proxy.size.width * remainingFraction)
                 }
             }
-            .frame(height: 7)
+            .frame(height: 9)
         }
         .padding(.leading, IslandLayout.metricCenterGutter)
         .padding(.trailing, IslandLayout.contentHorizontalInset)
