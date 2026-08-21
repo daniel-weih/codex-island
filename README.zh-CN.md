@@ -123,7 +123,7 @@ swift run CodexIsland --render-preview dist/previews
 - `rateLimitResetCredits.availableCount` 显示可用 reset 次数；悬停可查看全部可用次数的到期时间
 - Profile 头像、昵称、账户累计 Token，以及可切换的近 30 日每日 / 过去 48 小时每小时 Token 柱图
 - 点击展开态的非会话区域可激活 Codex App；右上角依次提供截图复制、打开 Codex 设置、打开灵动岛设置和退出按钮
-- 灵动岛设置支持状态动效、Token 消耗动效、品牌配色、界面语言、显示器选择与开机启动；显示位置默认自动，也可固定到内建屏或任一已连接外接屏，目标屏断开时临时回退并在重连后自动恢复；开机启动默认关闭，主动开启后随 macOS 用户登录自动运行
+- 灵动岛设置支持状态动效、Token 消耗动效、任务完成音效、品牌配色、界面语言、显示器选择与开机启动；任务完成音效与开机启动默认关闭；显示位置默认自动，也可固定到内建屏或任一已连接外接屏，目标屏断开时临时回退并在重连后自动恢复
 - Codex 账户套餐，以及最近三条 CLI/App 会话各自的来源、精简模型名（如 `5.6-Sol`）、推理强度和 Fast 状态；执行中的任务优先展示
 - 最近三条会话的近实时执行状态：执行中、空闲、已中断或失败
 - 最近三条会话的累计 Token；悬停数值可查看输入、缓存输入、输出与推理输出明细
@@ -144,3 +144,7 @@ swift run CodexIsland --render-preview dist/previews
 所有业务调用均为只读。为取得 App Profile 昵称和头像，程序通过本地 App Server 的 `getAuthStatus` 临时取得当前 token，然后请求 Codex App 当前使用的 `/wham/profiles/me`；网络会话使用无 Cookie、无磁盘缓存的临时配置，401 时最多刷新 token 并重试一次。该 Profile 路径不是公开契约，失败时自动回退为“Codex 用户”和昵称首字母占位，不会读取本机账户名或系统头像，也不影响额度、用量和会话状态。
 
 程序还会在 `$CODEX_HOME/sessions` 与 `$CODEX_HOME/archived_sessions` 中只读发现本机 CLI/App 会话、Fork 与子代理，并扫描对应 `.jsonl`；最近会话通过 `thread/list` 的 `source` 标记为 `TUI` 或 `APP`，同时只提取模型设置、带时间戳的 `token_count` 累计用量及 `task_started`、`task_complete`、`turn_aborted`、`error` 生命周期事件。当日和近 48 小时分时用量按每次模型调用后累计值的正向增量计算，重复通知不会重复计数；Fork 从自己的 `session_meta` 创建时间开始计入，子代理则从首个 `inter_agent_communication_metadata` 活动边界开始计入，因此不会重复统计时间戳被重写的父会话历史。今日柱与收起态今日数值都使用该本地实时结果，之前日期仍来自账户日汇总。最近会话列表、执行状态、累计 Token 和分时用量每秒刷新，本地全量会话索引每 15 秒刷新，额度保持 30 秒刷新，账户统计使用 5 分钟缓存，Profile 身份使用 15 分钟缓存。退出应用时子进程会一并结束。
+
+## 第三方素材
+
+任务完成音效为 Pixabay 用户 EdR 创作的 “8-bit Jump 001”。素材来源及许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

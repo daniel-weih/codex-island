@@ -12,6 +12,9 @@ struct ParserChecks {
         checkQuotaConsumptionPace()
         checkEstimatedRemainingTokens()
         checkDisplayModelNames()
+        checkReasoningEffortLabels()
+        checkHeaderTokenCounts()
+        checkTaskCompletionTransitions()
         checkVisibleThreadPriority()
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
@@ -76,6 +79,48 @@ struct ParserChecks {
             CodexDisplayPolicy.recentThreadFetchLimit
                 > CodexDisplayPolicy.recentThreadLimit,
             "thread query keeps a wider candidate set than the visible dashboard"
+        )
+    }
+
+    private static func checkTaskCompletionTransitions() {
+        func thread(_ id: String, _ state: ThreadExecutionState) -> ThreadSummary {
+            ThreadSummary(
+                id: id,
+                title: id,
+                status: "notLoaded",
+                clientSource: .app,
+                model: nil,
+                reasoningEffort: nil,
+                serviceTier: nil,
+                serviceTierSource: nil,
+                tokenUsage: nil,
+                executionState: state,
+                cwd: nil,
+                rolloutPath: nil,
+                updatedAt: nil
+            )
+        }
+
+        let previous: [String: ThreadExecutionState] = [
+            "completed": .running,
+            "interrupted": .running,
+            "failed": .running,
+            "already-idle": .idle,
+            "removed": .running
+        ]
+        let completed = CodexDisplayPolicy.completedThreadIDs(
+            previousStates: previous,
+            currentThreads: [
+                thread("completed", .idle),
+                thread("interrupted", .interrupted),
+                thread("failed", .failed),
+                thread("already-idle", .idle),
+                thread("new-history", .idle)
+            ]
+        )
+        expect(
+            completed == ["completed"],
+            "completion sound only observes a running-to-idle transition"
         )
     }
 
@@ -758,6 +803,80 @@ struct ParserChecks {
         )
     }
 
+    private static func checkReasoningEffortLabels() {
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("low") == "LIGHT",
+            "low reasoning uses the Codex App Light label"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("minimal") == "LIGHT",
+            "legacy minimal reasoning is folded into Light"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("medium") == "MEDIUM",
+            "medium reasoning keeps its full label"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("high") == "HIGH",
+            "high reasoning keeps its full label"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("extra high") == "XHIGH",
+            "Extra High is the only abbreviated effort label"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("max") == "MAX",
+            "max reasoning keeps its full label"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("ultra") == "ULTRA",
+            "ultra reasoning keeps its full label"
+        )
+    }
+
+    private static func checkHeaderTokenCounts() {
+        expect(
+            CodexDisplayPolicy.headerTokenCount(51_850) == "51.9K",
+            "expanded header keeps one decimal for two-digit thousands"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(123_456) == "123K",
+            "expanded header omits decimals for three-digit thousands"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(14_123_000_000) == "14.1B",
+            "expanded header keeps one decimal for two-digit billions"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(123_456_789) == "123M",
+            "expanded header omits decimals for three-digit millions"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(987_654_321_000) == "988B",
+            "expanded header omits decimals for three-digit billions"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(123_456_789_012_345) == "123T",
+            "expanded header omits decimals for three-digit trillions"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(99_960_000) == "100M",
+            "expanded header avoids rendering a rounded three-digit million with a decimal"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(999_500_000) == "1.0B",
+            "expanded header promotes three-digit millions that round into billions"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(999_950) == "1.0M",
+            "expanded header promotes values that round into the next unit"
+        )
+        expect(
+            CodexDisplayPolicy.headerTokenCount(999) == "999",
+            "expanded header keeps unscaled values exact"
+        )
+    }
+
     private static func checkThreadDeepLinks() {
         let threadID = "019f1234-5678-7abc-8def-0123456789ab"
         expect(
@@ -1126,7 +1245,7 @@ struct ParserChecks {
             try append(start1)
             try expectState(.running, "task_started becomes running")
 
-            let token1 = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2929630,"cached_input_tokens":2806528,"output_tokens":19878,"reasoning_output_tokens":2428,"total_tokens":2949508}}}}"# + "\n"
+            let token1 = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2929630,"cached_input_tokens":2806528,"output_tokens":19878,"reasoning_output_tokens":2428,"total_tokens":2949508},"last_token_usage":{"input_tokens":93600,"cached_input_tokens":90000,"output_tokens":1400,"reasoning_output_tokens":300,"total_tokens":95000},"model_context_window":258400}}}"# + "\n"
             try append(token1)
             let usage1 = try snapshot().tokenUsage
             expect(usage1?.inputTokens == 2_929_630, "cumulative input token count")
@@ -1134,6 +1253,8 @@ struct ParserChecks {
             expect(usage1?.outputTokens == 19_878, "cumulative output token count")
             expect(usage1?.reasoningOutputTokens == 2_428, "cumulative reasoning token count")
             expect(usage1?.totalTokens == 2_949_508, "cumulative total token count")
+            expect(usage1?.contextTokensUsed == 95_000, "current context token count")
+            expect(usage1?.contextWindowTokens == 258_400, "model context window")
 
             let filler = "{\"type\":\"response_item\",\"payload\":{\"text\":\"\(String(repeating: "x", count: 70_000))\"}}\n"
             try append(filler)

@@ -65,7 +65,9 @@ enum CodexPreviewRenderer {
                         cachedInputTokens: 2_806_528,
                         outputTokens: 19_878,
                         reasoningOutputTokens: 2_428,
-                        totalTokens: 2_949_508
+                        totalTokens: 2_949_508,
+                        contextTokensUsed: 94_000,
+                        contextWindowTokens: 258_400
                     ),
                     executionState: .idle,
                     cwd: nil,
@@ -86,7 +88,9 @@ enum CodexPreviewRenderer {
                         cachedInputTokens: 145_716_480,
                         outputTokens: 502_748,
                         reasoningOutputTokens: 240_625,
-                        totalTokens: 152_927_611
+                        totalTokens: 152_927_611,
+                        contextTokensUsed: 188_432,
+                        contextWindowTokens: 258_400
                     ),
                     executionState: .running,
                     cwd: nil,
@@ -107,7 +111,9 @@ enum CodexPreviewRenderer {
                         cachedInputTokens: 202_752,
                         outputTokens: 6_625,
                         reasoningOutputTokens: 4_288,
-                        totalTokens: 241_776
+                        totalTokens: 241_776,
+                        contextTokensUsed: 18_600,
+                        contextWindowTokens: 200_000
                     ),
                     executionState: .interrupted,
                     cwd: nil,
@@ -128,7 +134,9 @@ enum CodexPreviewRenderer {
                         cachedInputTokens: 30_249_472,
                         outputTokens: 131_261,
                         reasoningOutputTokens: 36_596,
-                        totalTokens: 31_001_538
+                        totalTokens: 31_001_538,
+                        contextTokensUsed: 231_000,
+                        contextWindowTokens: 258_400
                     ),
                     executionState: .failed,
                     cwd: nil,
@@ -225,6 +233,12 @@ enum CodexPreviewRenderer {
         let hoverBottomURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-bottom.png"
         )
+        let contextHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-context-hover.png"
+        )
+        let contextHoverEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-context-hover-english.png"
+        )
         let resetHoverURL = directory.appendingPathComponent(
             "codex-island-expanded-reset-hover.png"
         )
@@ -249,6 +263,8 @@ enum CodexPreviewRenderer {
             hoverTopURL,
             hoverTopEnglishURL,
             hoverBottomURL,
+            contextHoverURL,
+            contextHoverEnglishURL,
             resetHoverURL
         ]
         outputURLs.append(contentsOf: companyThemePreviews.map(\.url))
@@ -449,6 +465,23 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
+            initialHoveredContextThreadID: "preview-2",
+            size: expandedSize,
+            to: contextHoverURL
+        )
+        try render(
+            snapshot: englishSnapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredContextThreadID: "preview-2",
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: contextHoverEnglishURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
             initialHoveredTokenThreadID: "preview-2",
             size: expandedSize,
             to: hoverTopURL
@@ -457,7 +490,7 @@ enum CodexPreviewRenderer {
             snapshot: englishSnapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredTokenThreadID: "preview-1",
+            initialHoveredTokenThreadID: "preview-2",
             previewLanguagePreference: .english,
             size: expandedSize,
             to: hoverTopEnglishURL
@@ -489,6 +522,7 @@ enum CodexPreviewRenderer {
             height: CGFloat? = nil,
             scale: CGFloat = 2,
             initialHoveredTokenThreadID: String? = nil,
+            initialHoveredContextThreadID: String? = nil,
             initialResetSummaryHover: Bool = false,
             initialIslandSettingsPresented: Bool = false,
             previewLanguagePreference: IslandLanguagePreference? = nil
@@ -507,6 +541,7 @@ enum CodexPreviewRenderer {
                 displayGeometry: previewGeometry,
                 expanded: expanded,
                 initialHoveredTokenThreadID: initialHoveredTokenThreadID,
+                initialHoveredContextThreadID: initialHoveredContextThreadID,
                 initialResetSummaryHover: initialResetSummaryHover,
                 initialIslandSettingsPresented: initialIslandSettingsPresented,
                 previewLanguagePreference: previewLanguagePreference,
@@ -558,11 +593,20 @@ enum CodexPreviewRenderer {
             snapshot: noResetSnapshot
         )
 
-        var minimalReasoningSnapshot = snapshot
-        minimalReasoningSnapshot.recentThreads[0].reasoningEffort = "minimal"
+        var lightReasoningSnapshot = snapshot
+        lightReasoningSnapshot.recentThreads[0].reasoningEffort = "low"
         try renderMatrixPreview(
-            named: "matrix-expanded-notch-reasoning-minimal-scale-2x.png",
-            snapshot: minimalReasoningSnapshot
+            named: "matrix-expanded-notch-reasoning-light-scale-2x.png",
+            snapshot: lightReasoningSnapshot
+        )
+
+        var maxReasoningSnapshot = snapshot
+        for index in maxReasoningSnapshot.recentThreads.indices {
+            maxReasoningSnapshot.recentThreads[index].reasoningEffort = "max"
+        }
+        try renderMatrixPreview(
+            named: "matrix-expanded-notch-reasoning-max-scale-2x.png",
+            snapshot: maxReasoningSnapshot
         )
 
         var longIdentitySnapshot = snapshot
@@ -612,6 +656,22 @@ enum CodexPreviewRenderer {
             snapshot: hugeTokenSnapshot,
             expanded: false,
             width: IslandLayout.compactWidth(forNotchWidth: geometry.notchWidth)
+        )
+
+        var headerWidthBoundarySnapshot = englishSnapshot
+        headerWidthBoundarySnapshot.todayThreadTokens = 17_200_000
+        headerWidthBoundarySnapshot.usage.lifetimeTokens = 14_100_000_000
+        try renderMatrixPreview(
+            named: "matrix-expanded-notch-header-width-english-scale-2x.png",
+            snapshot: headerWidthBoundarySnapshot,
+            initialIslandSettingsPresented: true,
+            previewLanguagePreference: .english
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-notch-header-width-chinese-scale-2x.png",
+            snapshot: headerWidthBoundarySnapshot,
+            initialIslandSettingsPresented: true,
+            previewLanguagePreference: .chinese
         )
 
         try renderMatrixPreview(
@@ -705,6 +765,7 @@ enum CodexPreviewRenderer {
         displayGeometry: IslandDisplayGeometry,
         expanded: Bool,
         initialHoveredTokenThreadID: String? = nil,
+        initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
@@ -741,6 +802,7 @@ enum CodexPreviewRenderer {
             displayGeometry: displayGeometry,
             displaySelection: displaySelection,
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
+            initialHoveredContextThreadID: initialHoveredContextThreadID,
             initialResetSummaryHover: initialResetSummaryHover,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,

@@ -15,6 +15,7 @@ enum IslandLayout {
     static let activityIndicatorSlotWidth: CGFloat = 10
     static let threadSourceColumnWidth: CGFloat = 28
     static let threadTrailingColumnWidth: CGFloat = 70
+    static let compactThreadTrailingColumnWidth: CGFloat = 46
     static let compactTokenEffectWidth: CGFloat = 9.5
     static let headerActionButtonSize: CGFloat = 28
     static let headerActionSpacing: CGFloat = 4
@@ -122,11 +123,13 @@ private struct IslandPopoverPlacement {
 
 private enum IslandPopoverContent: Equatable {
     case token(threadID: String, rank: Int, usage: ThreadTokenUsage)
+    case context(threadID: String, rank: Int, usage: ThreadTokenUsage?)
     case reset(ResetCreditSummary)
 
     var identity: String {
         switch self {
         case .token(let threadID, _, _): return "token-\(threadID)"
+        case .context(let threadID, _, _): return "context-\(threadID)"
         case .reset: return "reset"
         }
     }
@@ -134,6 +137,7 @@ private enum IslandPopoverContent: Equatable {
     func size(for language: IslandInterfaceLanguage) -> CGSize {
         switch self {
         case .token: return TokenUsageDetailPopover.size
+        case .context: return ContextWindowPopover.size
         case .reset(let summary):
             return ResetExpirationPopover.size(
                 for: summary,
@@ -275,6 +279,19 @@ private func islandDefaultTokenPopoverPointer(rank: Int, canvasSize: CGSize) -> 
     )
 }
 
+private func islandDefaultContextPopoverPointer(
+    rank: Int,
+    canvasSize: CGSize
+) -> CGPoint {
+    let rowsTop = canvasSize.height
+        - IslandLayout.expandedBottomPadding
+        - IslandLayout.recentConversationsHeight
+    return CGPoint(
+        x: canvasSize.width * 0.57,
+        y: rowsTop + (CGFloat(rank) + 0.5) * IslandLayout.conversationRowHeight
+    )
+}
+
 private func islandDefaultResetPopoverPointer(
     topRegionHeight: CGFloat,
     canvasSize: CGSize
@@ -318,6 +335,26 @@ final class IslandDisplayGeometry: ObservableObject {
 
 }
 
+@MainActor
+private enum TaskCompletionSoundPlayer {
+    private static let sound: NSSound? = {
+        guard let url = Bundle.module.url(
+            forResource: "TaskCompletion",
+            withExtension: "mp3"
+        ) else {
+            return nil
+        }
+        return NSSound(contentsOf: url, byReference: false)
+    }()
+
+    static func play() {
+        sound?.stop()
+        if sound?.play() != true {
+            NSSound.beep()
+        }
+    }
+}
+
 struct IslandView: View {
     @ObservedObject var viewModel: CodexStatusViewModel
     @ObservedObject var displayGeometry: IslandDisplayGeometry
@@ -327,6 +364,8 @@ struct IslandView: View {
     private var statusAnimationsEnabled = true
     @AppStorage("codexIsland.tokenConsumptionEffectEnabled")
     private var tokenConsumptionEffectEnabled = true
+    @AppStorage("codexIsland.completionSoundEnabled")
+    private var completionSoundEnabled = false
     @AppStorage("codexIsland.languagePreference")
     private var storedLanguagePreference = IslandLanguagePreference.automatic.rawValue
     @AppStorage(IslandColorTheme.storageKey)
@@ -338,6 +377,7 @@ struct IslandView: View {
     @State private var headerTooltipPointer: CGPoint?
     @State private var screenshotCopied = false
     @State private var tokenChartRange: TokenChartRange
+    @State private var previousThreadStates: [String: ThreadExecutionState]
     private let initialPopover: IslandPopoverPresentation?
     private let initialTokenConsumptionPhase: Double?
     private let previewDisplayPickerPresentation: Bool?
@@ -351,6 +391,7 @@ struct IslandView: View {
         displayGeometry: IslandDisplayGeometry,
         displaySelection: IslandDisplaySelectionModel,
         initialHoveredTokenThreadID: String? = nil,
+        initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
@@ -369,6 +410,11 @@ struct IslandView: View {
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
         _tokenChartRange = State(initialValue: initialTokenChartRange)
+        _previousThreadStates = State(
+            initialValue: Self.threadStates(
+                from: viewModel.snapshot.recentThreads
+            )
+        )
         self.previewLanguagePreference = previewLanguagePreference
         self.previewColorTheme = previewColorTheme
         self.onCopyScreenshot = onCopyScreenshot
@@ -382,7 +428,19 @@ struct IslandView: View {
         let visibleThreads = CodexDisplayPolicy.visibleRecentThreads(
             from: viewModel.snapshot.recentThreads
         )
-        if let threadID = initialHoveredTokenThreadID,
+        if let threadID = initialHoveredContextThreadID,
+           let rank = visibleThreads.firstIndex(where: {
+               $0.id == threadID
+           }) {
+            self.initialPopover = IslandPopoverPresentation(
+                content: .context(
+                    threadID: threadID,
+                    rank: rank,
+                    usage: visibleThreads[rank].tokenUsage
+                ),
+                pointer: nil
+            )
+        } else if let threadID = initialHoveredTokenThreadID,
            let rank = visibleThreads.firstIndex(where: {
                $0.id == threadID
            }),
@@ -469,6 +527,32 @@ struct IslandView: View {
                 headerTooltipPointer = nil
             }
         }
+        .onChange(of: viewModel.snapshot.recentThreads) { threads in
+            handleThreadStateChanges(threads)
+        }
+    }
+
+    private static func threadStates(
+        from threads: [ThreadSummary]
+    ) -> [String: ThreadExecutionState] {
+        Dictionary(uniqueKeysWithValues: threads.map {
+            ($0.id, $0.executionState)
+        })
+    }
+
+    private func handleThreadStateChanges(_ threads: [ThreadSummary]) {
+        let completedThreadIDs = CodexDisplayPolicy.completedThreadIDs(
+            previousStates: previousThreadStates,
+            currentThreads: threads
+        )
+        previousThreadStates = Self.threadStates(from: threads)
+
+        guard usesTimelineUpdates,
+              completionSoundEnabled,
+              !completedThreadIDs.isEmpty else {
+            return
+        }
+        TaskCompletionSoundPlayer.play()
     }
 
     private var islandShape: RoundedRectangle {
@@ -597,6 +681,8 @@ struct IslandView: View {
         switch content {
         case .token(_, _, let usage):
             TokenUsageDetailPopover(usage: usage)
+        case .context(_, _, let usage):
+            ContextWindowPopover(usage: usage)
         case .reset(let summary):
             ResetExpirationPopover(summary: summary)
         }
@@ -609,6 +695,11 @@ struct IslandView: View {
         switch content {
         case .token(_, let rank, _):
             return islandDefaultTokenPopoverPointer(
+                rank: rank,
+                canvasSize: canvasSize
+            )
+        case .context(_, let rank, _):
+            return islandDefaultContextPopoverPointer(
                 rank: rank,
                 canvasSize: canvasSize
             )
@@ -739,6 +830,7 @@ struct IslandView: View {
                 IslandSettingsPanel(
                     statusAnimationsEnabled: $statusAnimationsEnabled,
                     tokenConsumptionEffectEnabled: $tokenConsumptionEffectEnabled,
+                    completionSoundEnabled: $completionSoundEnabled,
                     launchAtLoginState: launchAtLoginSetting.state,
                     launchAtLoginEnabled: launchAtLoginBinding,
                     languagePreference: languagePreferenceBinding,
@@ -1118,14 +1210,14 @@ struct IslandView: View {
 
             headerTokenMetric(
                 value: compactTodayTokenText,
-                label: interfaceLanguage.text("今日", "TODAY")
+                label: interfaceLanguage.text("今日", "DAY")
             )
 
             if showsLifetimeToken {
                 PixelVerticalDivider(height: 16, opacity: 0.12)
                 headerTokenMetric(
                     value: headerLifetimeTokenText,
-                    label: interfaceLanguage.text("累计", "TOTAL")
+                    label: interfaceLanguage.text("累计", "ALL")
                 )
             }
         }
@@ -1139,11 +1231,13 @@ struct IslandView: View {
             Text(value)
                 .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
                 .monospacedDigit()
+                .tracking(-0.5)
                 .foregroundStyle(selectedColorTheme.accent.opacity(0.88))
                 .lineLimit(1)
 
             Text(label)
                 .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
+                .tracking(-0.35)
                 .foregroundStyle(.white.opacity(0.25))
                 .lineLimit(1)
         }
@@ -1176,6 +1270,9 @@ struct IslandView: View {
             : CodexUsageTimeline.lastDaysIncludingToday(
                 from: viewModel.snapshot.usage.dailyUsageBuckets
             ).count
+        let reasoningColumnWidth = ThreadConfigurationView.reasoningColumnWidth(
+            for: threads
+        )
         if threads.isEmpty {
             GeometryReader { proxy in
                 let indicatorOffset = activityIndicatorOffset(
@@ -1207,6 +1304,15 @@ struct IslandView: View {
                         thread: thread,
                         rank: index,
                         activityBucketCount: activityBucketCount,
+                        reasoningColumnWidth: reasoningColumnWidth,
+                        onContextHover: { hovering, pointer in
+                            updateContextHover(
+                                thread: thread,
+                                rank: index,
+                                hovering: hovering,
+                                pointer: pointer
+                            )
+                        },
                         onTokenHover: { hovering, pointer in
                             updateTokenHover(
                                 thread: thread,
@@ -1233,7 +1339,7 @@ struct IslandView: View {
 
     private var compactTodayTokenText: String {
         guard let tokens = viewModel.snapshot.todayThreadTokens else { return "--" }
-        return compactTokenCount(tokens)
+        return CodexDisplayPolicy.headerTokenCount(tokens)
     }
 
     private var compactIslandTodayTokenText: String {
@@ -1242,7 +1348,9 @@ struct IslandView: View {
     }
 
     private var headerLifetimeTokenText: String {
-        viewModel.snapshot.usage.lifetimeTokens.map(compactTokenCount) ?? "--"
+        viewModel.snapshot.usage.lifetimeTokens.map(
+            CodexDisplayPolicy.headerTokenCount
+        ) ?? "--"
     }
 
     private var expandedHeaderAccessibilityLabel: String {
@@ -1323,6 +1431,29 @@ struct IslandView: View {
                 )
             )
         } else if case .token(let threadID, _, _) = activePopover?.content,
+                  threadID == thread.id {
+            hidePopover()
+        }
+    }
+
+    private func updateContextHover(
+        thread: ThreadSummary,
+        rank: Int,
+        hovering: Bool,
+        pointer: CGPoint?
+    ) {
+        if hovering, let pointer {
+            showPopover(
+                IslandPopoverPresentation(
+                    content: .context(
+                        threadID: thread.id,
+                        rank: rank,
+                        usage: thread.tokenUsage
+                    ),
+                    pointer: pointer
+                )
+            )
+        } else if case .context(let threadID, _, _) = activePopover?.content,
                   threadID == thread.id {
             hidePopover()
         }
@@ -1412,6 +1543,7 @@ private struct IslandHeaderTooltip: View {
 private struct IslandSettingsPanel: View {
     @Binding var statusAnimationsEnabled: Bool
     @Binding var tokenConsumptionEffectEnabled: Bool
+    @Binding var completionSoundEnabled: Bool
     let launchAtLoginState: LaunchAtLoginPresentationState
     @Binding var launchAtLoginEnabled: Bool
     @Binding var languagePreference: IslandLanguagePreference
@@ -1446,13 +1578,19 @@ private struct IslandSettingsPanel: View {
             }
             .frame(height: 18)
 
-            HStack(spacing: 8) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 0)
+                ],
+                spacing: 8
+            ) {
                 IslandSettingToggleCard(
                     icon: "dot.radiowaves.left.and.right",
                     title: language.text("状态动效", "Status animation"),
                     detail: language.text(
                         "运行会话的呼吸提示",
-                        "Pulse while sessions run"
+                        "Pulse while running"
                     ),
                     tint: .green,
                     isOn: $statusAnimationsEnabled
@@ -1463,10 +1601,21 @@ private struct IslandSettingsPanel: View {
                     title: language.text("TOKEN 动效", "Token effects"),
                     detail: language.text(
                         "消耗时播放刘海粒子",
-                        "Particles while tokens are used"
+                        "Particles on token use"
                     ),
                     tint: theme.accent,
                     isOn: $tokenConsumptionEffectEnabled
+                )
+
+                IslandSettingToggleCard(
+                    icon: "speaker.wave.2.fill",
+                    title: language.text("完成音效", "Completion sound"),
+                    detail: language.text(
+                        "任务完成后播放",
+                        "Plays when tasks finish"
+                    ),
+                    tint: .orange,
+                    isOn: $completionSoundEnabled
                 )
 
                 IslandSettingToggleCard(
@@ -1477,7 +1626,6 @@ private struct IslandSettingsPanel: View {
                     isOn: $launchAtLoginEnabled
                 )
             }
-            .frame(height: 72)
 
             HStack(spacing: 8) {
                 ZStack {
@@ -1882,44 +2030,44 @@ private struct IslandSettingToggleCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(tint.opacity(isOn ? 0.12 : 0.055))
+        HStack(spacing: 7) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(tint.opacity(isOn ? 0.12 : 0.055))
 
-                    Image(systemName: icon)
-                        .font(.system(size: IslandTypography.body, weight: .semibold))
-                        .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
-                }
-                .frame(width: 26, height: 26)
+                Image(systemName: icon)
+                    .font(.system(size: IslandTypography.body, weight: .semibold))
+                    .foregroundStyle(tint.opacity(isOn ? 0.82 : 0.38))
+            }
+            .frame(width: 28, height: 28)
 
-                Spacer(minLength: 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.74))
+                    .lineLimit(1)
 
-                Toggle(isOn: $isOn) {
-                    EmptyView()
-                }
-                .labelsHidden()
-                .toggleStyle(IslandToggleStyle(tint: tint))
-                .frame(width: 30, height: 17)
-                .fixedSize(horizontal: true, vertical: true)
-                .accessibilityLabel(Text(title))
+                Text(detail)
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.27))
+                    .lineLimit(1)
             }
 
-            Text(title)
-                .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.74))
-                .lineLimit(1)
+            Spacer(minLength: 4)
 
-            Text(detail)
-                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.27))
-                .lineLimit(1)
+            Toggle(isOn: $isOn) {
+                EmptyView()
+            }
+            .labelsHidden()
+            .toggleStyle(IslandToggleStyle(tint: tint))
+            .frame(width: 30, height: 17)
+            .fixedSize(horizontal: true, vertical: true)
+            .accessibilityLabel(Text(title))
         }
         .disabled(!isInteractive)
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
+        .frame(height: 52)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Color.white.opacity(isHovered ? 0.045 : 0.028))
@@ -1946,7 +2094,7 @@ private struct IslandThemePicker: View {
     @Environment(\.islandInterfaceLanguage) private var language
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 0) {
             ForEach(IslandColorTheme.allCases) { theme in
                 Button {
                     withAnimation(.easeOut(duration: 0.12)) {
@@ -2168,6 +2316,8 @@ private struct ConversationRow: View {
     let thread: ThreadSummary
     let rank: Int
     let activityBucketCount: Int
+    let reasoningColumnWidth: CGFloat
+    let onContextHover: (Bool, CGPoint?) -> Void
     let onTokenHover: (Bool, CGPoint?) -> Void
     let onOpen: () -> Void
     @Environment(\.islandInterfaceLanguage) private var language
@@ -2214,7 +2364,9 @@ private struct ConversationRow: View {
                 HStack(spacing: 4) {
                     ThreadConfigurationView(
                         thread: thread,
-                        density: configurationDensity
+                        density: configurationDensity,
+                        reasoningWidth: reasoningColumnWidth,
+                        onContextHover: onContextHover
                     )
 
                     ThreadTokenUsageView(
@@ -2230,7 +2382,7 @@ private struct ConversationRow: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
                         .frame(
-                            width: IslandLayout.threadTrailingColumnWidth,
+                            width: trailingColumnWidth,
                             alignment: .trailing
                         )
                         .help(executionStateHelp)
@@ -2284,6 +2436,15 @@ private struct ConversationRow: View {
         case .failed: return language.text("失败", "Failed")
         case .idle, .unknown:
             return conversationUpdatedLabel(thread.updatedAt, language: language)
+        }
+    }
+
+    private var trailingColumnWidth: CGFloat {
+        switch language {
+        case .chinese:
+            return IslandLayout.compactThreadTrailingColumnWidth
+        case .english:
+            return IslandLayout.threadTrailingColumnWidth
         }
     }
 
@@ -2645,37 +2806,45 @@ private enum ThreadConfigurationDensity {
 }
 
 private struct ThreadConfigurationView: View {
+    private static let contextWidth: CGFloat = 16
+    private static let fastWidth: CGFloat = 16
     private static let modelWidth: CGFloat = 58
-    private static let reasoningWidth: CGFloat = 56
-    private static let fastWidth: CGFloat = 62
-    private static let spacing: CGFloat = 4
+    private static let spacing: CGFloat = 3
     let thread: ThreadSummary
     let density: ThreadConfigurationDensity
+    let reasoningWidth: CGFloat
+    let onContextHover: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
 
     var body: some View {
         HStack(spacing: Self.spacing) {
+            ThreadContextWindowStatusView(
+                usage: thread.tokenUsage,
+                onHoverChange: onContextHover
+            )
+
+            ThreadFastStatusIconView(thread: thread)
+
             if density.showsModel {
                 modelSlot
             }
             if density.showsReasoning {
                 reasoningSlot
             }
-            ThreadFastStatusView(thread: thread)
         }
         .frame(width: configurationWidth, alignment: .leading)
-        .help(configurationHelp)
     }
 
     private var configurationWidth: CGFloat {
         switch density {
         case .full:
-            return Self.modelWidth + Self.reasoningWidth + Self.fastWidth
-                + Self.spacing * 2
+            return Self.contextWidth + Self.fastWidth + Self.modelWidth
+                + reasoningWidth + Self.spacing * 3
         case .compact:
-            return Self.reasoningWidth + Self.fastWidth + Self.spacing
+            return Self.contextWidth + Self.fastWidth + reasoningWidth
+                + Self.spacing * 2
         case .minimal:
-            return Self.fastWidth
+            return Self.contextWidth + Self.fastWidth + Self.spacing
         }
     }
 
@@ -2688,6 +2857,7 @@ private struct ThreadConfigurationView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: Self.modelWidth, alignment: .leading)
+                .help(displayModelName(model))
         } else {
             Color.clear.frame(width: Self.modelWidth, height: 1)
         }
@@ -2695,78 +2865,136 @@ private struct ThreadConfigurationView: View {
 
     @ViewBuilder
     private var reasoningSlot: some View {
-        if let effort = thread.reasoningEffort {
-            let normalized = effort.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isUltra = normalized.lowercased() == "ultra"
+        if let effort = thread.reasoningEffort,
+           !effort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let displayLabel = CodexDisplayPolicy.reasoningEffortLabel(effort)
+            let isUltra = displayLabel == "ULTRA"
             ThreadSettingBadge(
-                text: normalized.uppercased(),
+                text: displayLabel,
                 color: isUltra
                     ? Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.94)
                     : .white.opacity(0.42)
             )
-            .frame(width: Self.reasoningWidth, alignment: .leading)
+            .frame(width: reasoningWidth, alignment: .leading)
+            .help(
+                language.text(
+                    "推理强度：\(displayLabel)",
+                    "Reasoning effort: \(displayLabel)"
+                )
+            )
         } else {
-            Color.clear.frame(width: Self.reasoningWidth, height: 1)
+            Color.clear.frame(width: reasoningWidth, height: 1)
         }
     }
 
-    private var configurationHelp: String {
-        let model = thread.model.map(displayModelName)
-            ?? language.text("模型未知", "Model unknown")
-        let reasoning = thread.reasoningEffort?.uppercased()
-            ?? language.text("推理强度未知", "Reasoning effort unknown")
-        let fast: String
-        if let tier = thread.serviceTier?.lowercased() {
-            fast = tier == "priority" || tier == "fast"
-                ? language.text("Fast 开启", "Fast on")
-                : language.text("Fast 关闭", "Fast off")
-        } else {
-            fast = language.text("Fast 状态未知", "Fast status unknown")
-        }
-        let source = thread.serviceTierSource == .effectiveConfig
-            ? language.text(
-                "，Fast 按当前配置推断",
-                ", Fast inferred from the current configuration"
+    static func reasoningColumnWidth(
+        for threads: [ThreadSummary]
+    ) -> CGFloat {
+        threads.compactMap { thread -> CGFloat? in
+            guard let effort = thread.reasoningEffort?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !effort.isEmpty else {
+                return nil
+            }
+            let font = NSFont.monospacedSystemFont(
+                ofSize: IslandTypography.settingBadge,
+                weight: .semibold
             )
-            : ""
-        return language.text(
-            "\(model)，\(reasoning)，\(fast)\(source)",
-            "\(model), \(reasoning), \(fast)\(source)"
-        )
+            let displayLabel = CodexDisplayPolicy.reasoningEffortLabel(effort)
+            let textWidth = (displayLabel as NSString).size(
+                withAttributes: [.font: font]
+            ).width
+            return ceil(textWidth) + 11
+        }.max() ?? 0
+    }
+
+}
+
+private struct ThreadContextWindowStatusView: View {
+    let usage: ThreadTokenUsage?
+    let onHoverChange: (Bool, CGPoint?) -> Void
+    @Environment(\.islandInterfaceLanguage) private var language
+    @State private var isPointerInside = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            contextRing
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        let localFrame = proxy.frame(
+                            in: .named(IslandCoordinateSpace.name)
+                        )
+                        isPointerInside = true
+                        onHoverChange(
+                            true,
+                            CGPoint(
+                                x: localFrame.minX + location.x,
+                                y: localFrame.minY + location.y
+                            )
+                        )
+                    case .ended:
+                        guard isPointerInside else { return }
+                        isPointerInside = false
+                        onHoverChange(false, nil)
+                    }
+                }
+                .help(contextWindowHelp(usage, language: language))
+        }
+        .frame(width: 16, height: 20)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(contextWindowHelp(usage, language: language))
+    }
+
+    private var contextRing: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.13), lineWidth: 2.2)
+
+            if let fraction = contextWindowFraction(usage) {
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(
+                        Color.white.opacity(0.58),
+                        style: StrokeStyle(
+                            lineWidth: 2.2,
+                            lineCap: .round
+                        )
+                    )
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: 11, height: 11)
     }
 }
 
-private struct ThreadFastStatusView: View {
+private struct ThreadFastStatusIconView: View {
     let thread: ThreadSummary
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
-        fastSlot
-            .frame(width: 62, alignment: .leading)
+        Image(systemName: "bolt.fill")
+            .font(.system(size: 9.5, weight: .bold))
+            .foregroundStyle(fastColor)
+            .frame(width: 16, height: 20)
+            .contentShape(Rectangle())
             .help(fastHelp)
+            .accessibilityLabel(fastHelp)
     }
 
-    @ViewBuilder
-    private var fastSlot: some View {
-        if let tier = thread.serviceTier {
-            let normalizedTier = tier.lowercased()
-            let isFast = normalizedTier == "priority" || normalizedTier == "fast"
-            let isInferred = thread.serviceTierSource == .effectiveConfig
-            ThreadSettingBadge(
-                text: isFast ? "FAST ON" : "FAST OFF",
-                color: isFast
-                    ? theme.accent.opacity(isInferred ? 0.58 : 0.90)
-                    : .white.opacity(isInferred ? 0.24 : 0.30)
-            )
-            .frame(width: 62, alignment: .leading)
-        } else {
-            ThreadSettingBadge(
-                text: "FAST ?",
-                color: .white.opacity(0.24)
-            )
-            .frame(width: 62, alignment: .leading)
+    private var fastColor: Color {
+        guard let tier = thread.serviceTier?.lowercased() else {
+            return .white.opacity(0.17)
         }
+        let isFast = tier == "priority" || tier == "fast"
+        let isInferred = thread.serviceTierSource == .effectiveConfig
+        if isFast {
+            return theme.accent.opacity(isInferred ? 0.62 : 0.94)
+        }
+        return .white.opacity(isInferred ? 0.20 : 0.28)
     }
 
     private var fastHelp: String {
@@ -2840,7 +3068,7 @@ private struct ThreadTokenUsageView: View {
 }
 
 private struct TokenUsageDetailPopover: View {
-    static let width: CGFloat = 270
+    static let width: CGFloat = 278
     static let height: CGFloat = 78
     static let size = CGSize(width: width, height: height)
 
@@ -2862,14 +3090,17 @@ private struct TokenUsageDetailPopover: View {
                 Text(exactTokenCount(usage.totalTokens))
                     .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
+                    .tracking(-0.45)
                     .foregroundStyle(theme.accent.opacity(0.88))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
             }
 
             HStack(spacing: 7) {
                 detail(language.text("输入", "Input"), usage.inputTokens)
                 divider
                 detail(
-                    language.text("其中缓存", "Cached"),
+                    language.text("缓存", "Cache"),
                     usage.cachedInputTokens
                 )
             }
@@ -2878,7 +3109,7 @@ private struct TokenUsageDetailPopover: View {
                 detail(language.text("输出", "Output"), usage.outputTokens)
                 divider
                 detail(
-                    language.text("其中推理", "Reasoning"),
+                    language.text("推理", "Reasoning"),
                     usage.reasoningOutputTokens,
                     color: Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.82)
                 )
@@ -2912,14 +3143,17 @@ private struct TokenUsageDetailPopover: View {
             Text(label)
                 .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.32))
+                .lineLimit(1)
 
-            Spacer(minLength: 3)
+            Spacer(minLength: 4)
 
             Text(exactTokenCount(value))
                 .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
+                .tracking(-0.45)
                 .foregroundStyle(color)
                 .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2928,6 +3162,86 @@ private struct TokenUsageDetailPopover: View {
         Rectangle()
             .fill(Color.white.opacity(0.09))
             .frame(width: 1, height: 14)
+    }
+}
+
+private struct ContextWindowPopover: View {
+    static let width: CGFloat = 210
+    static let height: CGFloat = 72
+    static let size = CGSize(width: width, height: height)
+
+    let usage: ThreadTokenUsage?
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(language.text("上下文窗口", "Context window"))
+                .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
+                .tracking(0.2)
+                .foregroundStyle(.white.opacity(0.42))
+
+            if let values = contextWindowValues(usage) {
+                Text(usageSummary(values))
+                    .font(.system(size: IslandTypography.emphasized, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .lineLimit(1)
+
+                Text(tokenSummary(values))
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.accent.opacity(0.84))
+                    .lineLimit(1)
+            } else {
+                Text(
+                    language.text(
+                        "当前会话暂未记录上下文用量",
+                        "Context usage is unavailable for this session"
+                    )
+                )
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.56))
+                .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(width: Self.width, height: Self.height, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color(red: 0.018, green: 0.020, blue: 0.026))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(0.11),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+        .shadow(color: .black.opacity(0.48), radius: 8, y: 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(contextWindowHelp(usage, language: language))
+    }
+
+    private func usageSummary(
+        _ values: (used: Int64, window: Int64)
+    ) -> String {
+        let usedPercent = contextWindowUsedPercent(values)
+        let remainingPercent = max(0, 100 - usedPercent)
+        return language.text(
+            "已使用 \(usedPercent)%（剩余 \(remainingPercent)%）",
+            "\(usedPercent)% used (\(remainingPercent)% left)"
+        )
+    }
+
+    private func tokenSummary(
+        _ values: (used: Int64, window: Int64)
+    ) -> String {
+        language.text(
+            "已使用 \(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) Token",
+            "\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) tokens used"
+        )
     }
 }
 
@@ -4193,6 +4507,56 @@ private func tokenUsageHelp(
         Input: \(exactTokenCount(usage.inputTokens)) (cached: \(exactTokenCount(usage.cachedInputTokens)))
         Output: \(exactTokenCount(usage.outputTokens)) (reasoning: \(exactTokenCount(usage.reasoningOutputTokens)))
         """
+    )
+}
+
+private func contextWindowValues(
+    _ usage: ThreadTokenUsage?
+) -> (used: Int64, window: Int64)? {
+    guard let used = usage?.contextTokensUsed,
+          let window = usage?.contextWindowTokens,
+          used >= 0,
+          window > 0 else {
+        return nil
+    }
+    return (used, window)
+}
+
+private func contextWindowUsedPercent(
+    _ values: (used: Int64, window: Int64)
+) -> Int {
+    min(
+        100,
+        max(
+            0,
+            Int(
+                (Double(values.used) / Double(values.window) * 100)
+                    .rounded()
+            )
+        )
+    )
+}
+
+private func contextWindowFraction(_ usage: ThreadTokenUsage?) -> CGFloat? {
+    guard let values = contextWindowValues(usage) else { return nil }
+    return CGFloat(contextWindowUsedPercent(values)) / 100
+}
+
+private func contextWindowHelp(
+    _ usage: ThreadTokenUsage?,
+    language: IslandInterfaceLanguage
+) -> String {
+    guard let values = contextWindowValues(usage) else {
+        return language.text(
+            "上下文窗口：当前会话暂未记录上下文用量",
+            "Context window: usage unavailable for this session"
+        )
+    }
+    let usedPercent = contextWindowUsedPercent(values)
+    let remainingPercent = max(0, 100 - usedPercent)
+    return language.text(
+        "上下文窗口：已使用 \(usedPercent)%（剩余 \(remainingPercent)%），\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) Token",
+        "Context window: \(usedPercent)% used (\(remainingPercent)% left), \(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) tokens used"
     )
 }
 

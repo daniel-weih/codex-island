@@ -156,6 +156,80 @@ enum CodexDisplayPolicy {
         .joined(separator: "-")
     }
 
+    /// Returns tasks that have genuinely moved from running to completed.
+    /// Missing, interrupted, failed, and already-idle tasks are intentionally
+    /// excluded so startup and list reordering cannot trigger notifications.
+    static func completedThreadIDs(
+        previousStates: [String: ThreadExecutionState],
+        currentThreads: [ThreadSummary]
+    ) -> [String] {
+        currentThreads.compactMap { thread in
+            guard previousStates[thread.id] == .running,
+                  thread.executionState == .idle else {
+                return nil
+            }
+            return thread.id
+        }
+    }
+
+    /// Matches the effort names shown by Codex App. Historical `minimal`
+    /// records are folded into Light; Extra High is the only abbreviated
+    /// label so the row remains compact.
+    static func reasoningEffortLabel(_ rawValue: String) -> String {
+        let normalized = rawValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        switch normalized {
+        case "minimal", "low", "light": return "LIGHT"
+        case "medium": return "MEDIUM"
+        case "high": return "HIGH"
+        case "xhigh", "extra-high", "extra_high", "extra high": return "XHIGH"
+        case "max": return "MAX"
+        case "ultra": return "ULTRA"
+        default: return normalized.uppercased()
+        }
+    }
+
+    /// Keeps the expanded-header counters predictable and narrow. Scaled
+    /// values omit the decimal once their displayed integer part is three
+    /// digits; one- and two-digit values retain one decimal place.
+    static func headerTokenCount(_ value: Int64) -> String {
+        let clampedValue = max(0, value)
+        let units: [(suffix: String, divisor: Double)] = [
+            ("K", 1_000),
+            ("M", 1_000_000),
+            ("B", 1_000_000_000),
+            ("T", 1_000_000_000_000),
+            ("P", 1_000_000_000_000_000),
+            ("E", 1_000_000_000_000_000_000)
+        ]
+        guard var unitIndex = units.lastIndex(where: {
+            Double(clampedValue) >= $0.divisor
+        }) else {
+            return String(clampedValue)
+        }
+
+        var scaledValue = Double(clampedValue) / units[unitIndex].divisor
+        var hidesFraction = headerTokenCountHidesFraction(scaledValue)
+        let promotionThreshold = hidesFraction ? 999.5 : 999.95
+        if scaledValue >= promotionThreshold, unitIndex < units.count - 1 {
+            unitIndex += 1
+            scaledValue = Double(clampedValue) / units[unitIndex].divisor
+            hidesFraction = headerTokenCountHidesFraction(scaledValue)
+        }
+        return String(
+            format: hidesFraction ? "%.0f%@" : "%.1f%@",
+            scaledValue,
+            units[unitIndex].suffix
+        )
+    }
+
+    private static func headerTokenCountHidesFraction(
+        _ scaledValue: Double
+    ) -> Bool {
+        scaledValue >= 99.95
+    }
+
     private static func usageDay(
         from value: String,
         calendar: Calendar
@@ -341,6 +415,12 @@ struct ThreadTokenUsage: Equatable, Sendable {
     var outputTokens: Int64
     var reasoningOutputTokens: Int64
     var totalTokens: Int64
+    /// Tokens currently occupying the model context, as reported by the
+    /// latest `last_token_usage` event. This is distinct from the cumulative
+    /// task total above.
+    var contextTokensUsed: Int64? = nil
+    /// The model context capacity reported alongside the latest token count.
+    var contextWindowTokens: Int64? = nil
 }
 
 enum ThreadExecutionState: Equatable, Sendable {

@@ -297,18 +297,21 @@ enum CodexThreadActivityReader {
     }
 
     private static func parseTokenUsage(_ payload: JSONObject) -> ThreadTokenUsage? {
-        guard let totalUsage = payload.dictionary("info")?
-            .dictionary("total_token_usage"),
-            let totalTokens = totalUsage.int64("total_tokens") else {
+        guard let info = payload.dictionary("info"),
+              let totalUsage = info.dictionary("total_token_usage"),
+              let totalTokens = totalUsage.int64("total_tokens") else {
             return nil
         }
+        let lastUsage = info.dictionary("last_token_usage")
 
         return ThreadTokenUsage(
             inputTokens: totalUsage.int64("input_tokens") ?? 0,
             cachedInputTokens: totalUsage.int64("cached_input_tokens") ?? 0,
             outputTokens: totalUsage.int64("output_tokens") ?? 0,
             reasoningOutputTokens: totalUsage.int64("reasoning_output_tokens") ?? 0,
-            totalTokens: totalTokens
+            totalTokens: totalTokens,
+            contextTokensUsed: lastUsage?.int64("total_tokens"),
+            contextWindowTokens: info.int64("model_context_window")
         )
     }
 
