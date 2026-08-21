@@ -1598,7 +1598,7 @@ private struct IslandSettingsPanel: View {
 
                 IslandSettingToggleCard(
                     icon: "sparkles",
-                    title: language.text("TOKEN 动效", "Token effects"),
+                    title: language.text("词元动效", "Token effects"),
                     detail: language.text(
                         "消耗时播放刘海粒子",
                         "Particles on token use"
