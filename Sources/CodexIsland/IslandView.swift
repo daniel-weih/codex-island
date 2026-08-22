@@ -1252,6 +1252,10 @@ struct IslandView: View {
             todayTokens: viewModel.snapshot.todayThreadTokens,
             hourlyUsage: viewModel.snapshot.hourlyThreadTokens,
             window: viewModel.snapshot.rateLimit?.primary,
+            resetSummary: viewModel.snapshot.resetCredits,
+            onResetHoverChange: { hovering, pointer in
+                updateResetHover(hovering: hovering, pointer: pointer)
+            },
             chartRange: $tokenChartRange,
             planLabel: CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: viewModel.snapshot.account.planType,
@@ -3269,6 +3273,8 @@ private struct AccountActivityCard: View {
     let todayTokens: Int64?
     let hourlyUsage: [HourlyUsageBucket]
     let window: RateLimitWindow?
+    let resetSummary: ResetCreditSummary?
+    let onResetHoverChange: (Bool, CGPoint?) -> Void
     let planLabel: String?
 
     @Environment(\.displayScale) private var displayScale
@@ -3285,6 +3291,8 @@ private struct AccountActivityCard: View {
         todayTokens: Int64?,
         hourlyUsage: [HourlyUsageBucket],
         window: RateLimitWindow?,
+        resetSummary: ResetCreditSummary?,
+        onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
         chartRange: Binding<TokenChartRange>,
         planLabel: String?
     ) {
@@ -3293,6 +3301,8 @@ private struct AccountActivityCard: View {
         self.todayTokens = todayTokens
         self.hourlyUsage = hourlyUsage
         self.window = window
+        self.resetSummary = resetSummary
+        self.onResetHoverChange = onResetHoverChange
         self.planLabel = planLabel
         _avatarImage = State(initialValue: identity.avatarData.flatMap(NSImage.init(data:)))
         _chartRange = chartRange
@@ -3347,7 +3357,9 @@ private struct AccountActivityCard: View {
 
                 QuotaMetric(
                     window: window,
-                    usage: usage
+                    usage: usage,
+                    resetSummary: resetSummary,
+                    onResetHoverChange: onResetHoverChange
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -3860,6 +3872,8 @@ private struct HourlyTokenActivityChart: View {
 private struct QuotaMetric: View {
     let window: RateLimitWindow?
     let usage: UsageSummary
+    let resetSummary: ResetCreditSummary?
+    let onResetHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
 
@@ -3875,6 +3889,16 @@ private struct QuotaMetric: View {
                     )
                     .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.30))
+                }
+
+                if let resetSummary,
+                   resetSummary.availableCount > 0 {
+                    ResetSummaryLine(
+                        summary: resetSummary,
+                        onHoverChange: onResetHoverChange
+                    )
+                    .fixedSize(horizontal: true, vertical: true)
+                    .layoutPriority(1)
                 }
 
                 Spacer(minLength: 4)
@@ -4053,6 +4077,50 @@ private struct ResetSummaryLine: View {
 
     var body: some View {
         summaryContent
+            .frame(height: 18, alignment: .leading)
+    }
+
+    private var summaryContent: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(language.text("（", "("))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.34))
+
+            if summary.availableCount <= 0 {
+                Text(language.text("暂无可用重置", "No resets available"))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.30))
+            } else {
+                Text(language.text("剩余 ", ""))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.34))
+
+                resetCount
+
+                Text(
+                    language.text(
+                        " 次重置",
+                        " resets left"
+                    )
+                )
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.34))
+            }
+
+            Text(language.text("）", ")"))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.34))
+        }
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: true)
+        .frame(height: 18, alignment: .leading)
+    }
+
+    private var resetCount: some View {
+        Text(String(summary.availableCount))
+            .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(resetCountColor)
             .overlay {
                 GeometryReader { proxy in
                     Color.clear
@@ -4076,62 +4144,12 @@ private struct ResetSummaryLine: View {
                         }
                 }
             }
-            .frame(height: 18, alignment: .leading)
     }
 
-    private var summaryContent: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text(language.text("（", "("))
-                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.28))
-
-            if summary.availableCount <= 0 {
-                Text(language.text("暂无可用重置", "No resets available"))
-                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.30))
-            } else {
-                Text(String(summary.availableCount))
-                    .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(Color.green.opacity(0.82))
-
-                Text(
-                    language.text(
-                        "次重置 · ",
-                        " resets · "
-                    )
-                )
-                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.34))
-
-                if let date = summary.earliestExpiration {
-                    Text(resetExpirationDateText(date, language: language))
-                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(Color.red.opacity(0.78))
-
-                    Text(language.text("到期", " expiry"))
-                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.28))
-                } else {
-                    Text(
-                        language.text(
-                            "到期时间未知",
-                            "expiration unknown"
-                        )
-                    )
-                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.28))
-                }
-            }
-
-            Text(language.text("）", ")"))
-                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.28))
-        }
-        .lineLimit(1)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 18, alignment: .leading)
+    private var resetCountColor: Color {
+        CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(summary)
+            ? Color.red.opacity(0.88)
+            : Color.green.opacity(0.82)
     }
 }
 
@@ -4198,6 +4216,8 @@ private struct ResetExpirationPopover: View {
             } else {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(expirationDates.enumerated()), id: \.offset) { index, date in
+                        let isExpiringSoon = CodexDisplayPolicy
+                            .isResetCreditExpiringWithinWeek(date)
                         HStack(spacing: 3) {
                             Text(String(index + 1))
                                 .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
@@ -4218,7 +4238,7 @@ private struct ResetExpirationPopover: View {
                                 .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(
-                                    index == 0
+                                    isExpiringSoon
                                         ? Color.red.opacity(0.78)
                                         : Color.white.opacity(0.52)
                                 )
@@ -4229,7 +4249,7 @@ private struct ResetExpirationPopover: View {
                                 .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundStyle(
-                                    index == 0
+                                    isExpiringSoon
                                         ? Color.red.opacity(0.78)
                                         : Color.white.opacity(0.52)
                                 )

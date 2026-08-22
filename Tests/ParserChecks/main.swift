@@ -7,6 +7,7 @@ struct ParserChecks {
 
     static func main() {
         checkRateLimitsAndResetCredits()
+        checkResetCreditExpiryWarning()
         checkCodexBucketPreference()
         checkTokenConsumptionPolicy()
         checkQuotaConsumptionPace()
@@ -968,6 +969,69 @@ struct ParserChecks {
             "rateLimitResetCredits": ["availableCount": -4, "credits": []]
         ]).resetCredits
         expect(invalidCount?.availableCount == 0, "negative reset count is clamped to zero")
+    }
+
+    private static func checkResetCreditExpiryWarning() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let week = CodexDisplayPolicy.resetCreditExpiryWarningInterval
+
+        func summary(
+            availableCount: Int = 1,
+            expirations: [TimeInterval]
+        ) -> ResetCreditSummary {
+            ResetCreditSummary(
+                availableCount: availableCount,
+                earliestExpiration: expirations.min().map {
+                    Date(timeIntervalSince1970: $0)
+                },
+                expirationDates: expirations.map {
+                    Date(timeIntervalSince1970: $0)
+                }
+            )
+        }
+
+        expect(
+            CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(expirations: [now.timeIntervalSince1970 + week]),
+                now: now
+            ),
+            "reset credit expiring exactly seven days out warns"
+        )
+        expect(
+            CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(expirations: [now.timeIntervalSince1970]),
+                now: now
+            ),
+            "reset credit expiring now warns"
+        )
+        expect(
+            !CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(expirations: [now.timeIntervalSince1970 + week + 1]),
+                now: now
+            ),
+            "reset credit beyond seven days stays normal"
+        )
+        expect(
+            !CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(expirations: [now.timeIntervalSince1970 - 1]),
+                now: now
+            ),
+            "expired reset credit does not warn"
+        )
+        expect(
+            !CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(availableCount: 0, expirations: [now.timeIntervalSince1970 + 60]),
+                now: now
+            ),
+            "zero available reset credits do not warn"
+        )
+        expect(
+            !CodexDisplayPolicy.hasResetCreditExpiringWithinWeek(
+                summary(expirations: []),
+                now: now
+            ),
+            "missing reset expiration dates stay normal"
+        )
     }
 
     private static func checkCodexBucketPreference() {

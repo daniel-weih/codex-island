@@ -6,6 +6,7 @@ enum CodexDisplayPolicy {
     static let recentThreadLimit = 3
     static let recentThreadFetchLimit = 12
     static let usageHabitDayCount = 7
+    static let resetCreditExpiryWarningInterval: TimeInterval = 7 * 24 * 60 * 60
 
     /// Keeps active work visible when the compact dashboard has fewer rows than
     /// the backing thread query. The input is already ordered by recency, so a
@@ -31,6 +32,24 @@ enum CodexDisplayPolicy {
         guard let current else { return previous }
         guard let previous else { return current }
         return max(previous, current)
+    }
+
+    static func hasResetCreditExpiringWithinWeek(
+        _ summary: ResetCreditSummary,
+        now: Date = Date()
+    ) -> Bool {
+        guard summary.availableCount > 0 else { return false }
+        return summary.expirationDates.contains { expiration in
+            isResetCreditExpiringWithinWeek(expiration, now: now)
+        }
+    }
+
+    static func isResetCreditExpiringWithinWeek(
+        _ expiration: Date,
+        now: Date = Date()
+    ) -> Bool {
+        let interval = expiration.timeIntervalSince(now)
+        return interval >= 0 && interval <= resetCreditExpiryWarningInterval
     }
 
     /// Compares actual quota use with a perfectly even burn through the current
