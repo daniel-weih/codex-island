@@ -56,6 +56,10 @@ final class CodexStatusViewModel: ObservableObject {
                     self.snapshot.profileIdentity = .empty
                     self.snapshot.todayThreadTokens = nil
                     self.snapshot.hourlyThreadTokens = []
+                    self.snapshot.dailyThreadTokens = []
+                    self.snapshot.billedTodayThreadTokens = nil
+                    self.snapshot.billedHourlyThreadTokens = []
+                    self.snapshot.billedDailyThreadTokens = []
                     self.tokenConsumptionHighWater = nil
                     self.tokenConsumptionDayStart = nil
                     self.localActivityRolloutPaths = []
@@ -261,6 +265,10 @@ final class CodexStatusViewModel: ObservableObject {
         }
         updated.todayThreadTokens = snapshot.todayThreadTokens
         updated.hourlyThreadTokens = snapshot.hourlyThreadTokens
+        updated.dailyThreadTokens = snapshot.dailyThreadTokens
+        updated.billedTodayThreadTokens = snapshot.billedTodayThreadTokens
+        updated.billedHourlyThreadTokens = snapshot.billedHourlyThreadTokens
+        updated.billedDailyThreadTokens = snapshot.billedDailyThreadTokens
         updated.hasRunningSession = snapshot.hasRunningSession
             || updated.recentThreads.contains { $0.executionState == .running }
         if case .disconnected = snapshot.connection {
@@ -464,6 +472,18 @@ final class CodexStatusViewModel: ObservableObject {
             }
             if usage.hourlyBuckets != snapshot.hourlyThreadTokens {
                 snapshot.hourlyThreadTokens = usage.hourlyBuckets
+            }
+            if usage.dailyBuckets != snapshot.dailyThreadTokens {
+                snapshot.dailyThreadTokens = usage.dailyBuckets
+            }
+            if usage.billedTodayTokens != snapshot.billedTodayThreadTokens {
+                snapshot.billedTodayThreadTokens = usage.billedTodayTokens
+            }
+            if usage.billedHourlyBuckets != snapshot.billedHourlyThreadTokens {
+                snapshot.billedHourlyThreadTokens = usage.billedHourlyBuckets
+            }
+            if usage.billedDailyBuckets != snapshot.billedDailyThreadTokens {
+                snapshot.billedDailyThreadTokens = usage.billedDailyBuckets
             }
             if CodexDisplayPolicy.shouldAnimateTokenConsumption(
                 previous: tokenConsumptionHighWater,

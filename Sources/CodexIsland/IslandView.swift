@@ -1280,6 +1280,10 @@ struct IslandView: View {
             usage: viewModel.snapshot.usage,
             todayTokens: viewModel.snapshot.todayThreadTokens,
             hourlyUsage: viewModel.snapshot.hourlyThreadTokens,
+            dailyUsage: viewModel.snapshot.dailyThreadTokens,
+            billedTodayTokens: viewModel.snapshot.billedTodayThreadTokens,
+            billedHourlyUsage: viewModel.snapshot.billedHourlyThreadTokens,
+            billedDailyUsage: viewModel.snapshot.billedDailyThreadTokens,
             window: viewModel.snapshot.rateLimit?.primary,
             resetSummary: viewModel.snapshot.resetCredits,
             onResetHoverChange: { hovering, pointer in
@@ -1301,7 +1305,8 @@ struct IslandView: View {
         let activityBucketCount = tokenChartRange == .hours48
             ? viewModel.snapshot.hourlyThreadTokens.count
             : CodexUsageTimeline.lastDaysIncludingToday(
-                from: viewModel.snapshot.usage.dailyUsageBuckets
+                from: viewModel.snapshot.usage.dailyUsageBuckets,
+                localDailyBuckets: viewModel.snapshot.dailyThreadTokens
             ).count
         let reasoningColumnWidth = ThreadConfigurationView.reasoningColumnWidth(
             for: threads
@@ -3318,6 +3323,10 @@ private struct AccountActivityCard: View {
     let usage: UsageSummary
     let todayTokens: Int64?
     let hourlyUsage: [HourlyUsageBucket]
+    let dailyUsage: [DailyUsageBucket]
+    let billedTodayTokens: Int64?
+    let billedHourlyUsage: [HourlyUsageBucket]
+    let billedDailyUsage: [DailyUsageBucket]
     let window: RateLimitWindow?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
@@ -3326,6 +3335,10 @@ private struct AccountActivityCard: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
+    @AppStorage("codexIsland.tokenChartShowsActual")
+    private var showsActual = true
+    @AppStorage("codexIsland.tokenChartShowsBilled")
+    private var showsBilled = true
     @State private var hoveredBucket: DailyUsageBucket?
     @State private var hoveredHourlyBucket: HourlyUsageBucket?
     @Binding private var chartRange: TokenChartRange
@@ -3336,6 +3349,10 @@ private struct AccountActivityCard: View {
         usage: UsageSummary,
         todayTokens: Int64?,
         hourlyUsage: [HourlyUsageBucket],
+        dailyUsage: [DailyUsageBucket],
+        billedTodayTokens: Int64?,
+        billedHourlyUsage: [HourlyUsageBucket],
+        billedDailyUsage: [DailyUsageBucket],
         window: RateLimitWindow?,
         resetSummary: ResetCreditSummary?,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
@@ -3346,6 +3363,10 @@ private struct AccountActivityCard: View {
         self.usage = usage
         self.todayTokens = todayTokens
         self.hourlyUsage = hourlyUsage
+        self.dailyUsage = dailyUsage
+        self.billedTodayTokens = billedTodayTokens
+        self.billedHourlyUsage = billedHourlyUsage
+        self.billedDailyUsage = billedDailyUsage
         self.window = window
         self.resetSummary = resetSummary
         self.onResetHoverChange = onResetHoverChange
@@ -3357,7 +3378,16 @@ private struct AccountActivityCard: View {
     private var recentUsage: [DailyUsageBucket] {
         CodexUsageTimeline.lastDaysIncludingToday(
             from: usage.dailyUsageBuckets,
-            todayTokens: todayTokens
+            todayTokens: todayTokens,
+            localDailyBuckets: dailyUsage
+        )
+    }
+
+    private var billedRecentUsage: [DailyUsageBucket] {
+        CodexUsageTimeline.lastDaysIncludingToday(
+            from: usage.dailyUsageBuckets,
+            todayTokens: billedTodayTokens,
+            localDailyBuckets: billedDailyUsage
         )
     }
 
@@ -3403,7 +3433,7 @@ private struct AccountActivityCard: View {
 
                 QuotaMetric(
                     window: window,
-                    usage: usage,
+                    billedDailyUsageBuckets: billedRecentUsage,
                     resetSummary: resetSummary,
                     onResetHoverChange: onResetHoverChange
                 )
@@ -3435,20 +3465,29 @@ private struct AccountActivityCard: View {
                     }
 
                     Spacer(minLength: 4)
+                    chartLegend
+                        .layoutPriority(2)
                     chartRangePicker
+                        .layoutPriority(3)
                 }
                 .frame(height: 28)
 
                 if chartRange == .days30 {
                     DailyTokenActivityChart(
-                        buckets: recentUsage,
+                        actualBuckets: recentUsage,
+                        billedBuckets: billedRecentUsage,
+                        showsActual: showsActual,
+                        showsBilled: showsBilled,
                         hoveredBucket: hoveredBucket,
                         onHover: updateHoveredBucket
                     )
                     .frame(height: 82)
                 } else {
                     HourlyTokenActivityChart(
-                        buckets: hourlyUsage,
+                        actualBuckets: hourlyUsage,
+                        billedBuckets: billedHourlyUsage,
+                        showsActual: showsActual,
+                        showsBilled: showsBilled,
                         hoveredBucket: hoveredHourlyBucket,
                         onHover: updateHoveredHourlyBucket
                     )
@@ -3465,6 +3504,11 @@ private struct AccountActivityCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: identity.avatarData) { data in
             avatarImage = data.flatMap(NSImage.init(data:))
+        }
+        .onAppear {
+            if !showsActual && !showsBilled {
+                showsBilled = true
+            }
         }
     }
 
@@ -3554,13 +3598,106 @@ private struct AccountActivityCard: View {
     private var activityDetail: String? {
         if chartRange == .hours48,
            let bucket = hoveredHourlyBucket ?? hourlyUsage.last {
-            return "\(hourlyUsageDateText(bucket.hourStart, language: language)) · \(compactTokenCount(bucket.tokens)) Token"
+            let billed = billedHourlyUsage.first {
+                $0.hourStart == bucket.hourStart
+            }?.tokens ?? bucket.tokens
+            return chartDetail(
+                dateText: hourlyUsageDateText(bucket.hourStart, language: language),
+                actualTokens: bucket.tokens,
+                billedTokens: billed
+            )
         }
         if chartRange == .days30,
            let bucket = hoveredBucket ?? recentUsage.last {
-            return "\(shortUsageDate(bucket.startDate, language: language)) · \(compactTokenCount(bucket.tokens)) Token"
+            let billed = billedRecentUsage.first {
+                $0.startDate == bucket.startDate
+            }?.tokens ?? bucket.tokens
+            return chartDetail(
+                dateText: shortUsageDate(bucket.startDate, language: language),
+                actualTokens: bucket.tokens,
+                billedTokens: billed
+            )
         }
         return nil
+    }
+
+    private func chartDetail(
+        dateText: String,
+        actualTokens: Int64,
+        billedTokens: Int64
+    ) -> String {
+        if showsActual && showsBilled {
+            return "\(dateText) · \(compactTokenCount(actualTokens)) / \(compactTokenCount(billedTokens))"
+        }
+        let tokens = showsActual ? actualTokens : billedTokens
+        return "\(dateText) · \(compactTokenCount(tokens))"
+    }
+
+    private var chartLegend: some View {
+        HStack(spacing: 7) {
+            chartLegendItem(
+                color: .white.opacity(0.42),
+                text: language.text("实际", "Actual"),
+                isVisible: showsActual
+            ) {
+                toggleActualSeries()
+            }
+            chartLegendItem(
+                color: theme.accent.opacity(0.86),
+                text: language.text("计费", "Billed"),
+                isVisible: showsBilled
+            ) {
+                toggleBilledSeries()
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private func chartLegendItem(
+        color: Color,
+        text: String,
+        isVisible: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(isVisible ? color : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .strokeBorder(color.opacity(isVisible ? 0 : 0.46), lineWidth: 1)
+                    )
+                    .frame(width: 5, height: 8)
+                Text(text)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(isVisible ? 0.38 : 0.18))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(
+            isVisible
+                ? language.text("隐藏\(text) Token", "Hide \(text.lowercased()) tokens")
+                : language.text("显示\(text) Token", "Show \(text.lowercased()) tokens")
+        )
+    }
+
+    private func toggleActualSeries() {
+        if showsActual && !showsBilled {
+            showsActual = false
+            showsBilled = true
+        } else {
+            showsActual.toggle()
+        }
+    }
+
+    private func toggleBilledSeries() {
+        if showsBilled && !showsActual {
+            showsBilled = false
+            showsActual = true
+        } else {
+            showsBilled.toggle()
+        }
     }
 
     @ViewBuilder
@@ -3760,7 +3897,10 @@ private struct TokenChartSlimBar: View {
 }
 
 private struct DailyTokenActivityChart: View {
-    let buckets: [DailyUsageBucket]
+    let actualBuckets: [DailyUsageBucket]
+    let billedBuckets: [DailyUsageBucket]
+    let showsActual: Bool
+    let showsBilled: Bool
     let hoveredBucket: DailyUsageBucket?
     let onHover: (DailyUsageBucket?, Bool) -> Void
     @Environment(\.displayScale) private var displayScale
@@ -3769,7 +3909,13 @@ private struct DailyTokenActivityChart: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let maximum = max(1, buckets.map(\.tokens).max() ?? 0)
+            let billedByDate = billedBuckets.reduce(into: [String: Int64]()) {
+                $0[$1.startDate] = $1.tokens
+            }
+            let maximum = max(1, max(
+                showsActual ? actualBuckets.map(\.tokens).max() ?? 0 : 0,
+                showsBilled ? billedBuckets.map(\.tokens).max() ?? 0 : 0
+            ))
 
             ZStack(alignment: .bottom) {
                 Rectangle()
@@ -3780,26 +3926,46 @@ private struct DailyTokenActivityChart: View {
                     alignment: .bottom,
                     spacing: IslandLayout.activityChartBarSpacing
                 ) {
-                    ForEach(buckets) { bucket in
-                        let intensity = Double(max(0, bucket.tokens))
+                    ForEach(actualBuckets) { bucket in
+                        let billedTokens = billedByDate[bucket.startDate]
+                            ?? bucket.tokens
+                        let actualIntensity = Double(max(0, bucket.tokens))
                             / Double(maximum)
-                        let barHeight = bucket.tokens == 0
+                        let billedIntensity = Double(max(0, billedTokens))
+                            / Double(maximum)
+                        let actualHeight = bucket.tokens == 0
                             ? 0
-                            : max(6, proxy.size.height * CGFloat(intensity))
+                            : max(6, proxy.size.height * CGFloat(actualIntensity))
+                        let billedHeight = billedTokens == 0
+                            ? 0
+                            : max(6, proxy.size.height * CGFloat(billedIntensity))
                         let isHovered = hoveredBucket?.id == bucket.id
 
                         ZStack(alignment: .bottom) {
                             Color.clear
 
-                            TokenChartSlimBar(
-                                height: barHeight,
-                                width: isHovered ? 9 : 7,
-                                color: barColor(
-                                    intensity: intensity,
-                                    isHovered: isHovered
-                                ),
-                                isEmpty: bucket.tokens == 0
-                            )
+                            HStack(alignment: .bottom, spacing: 1) {
+                                if showsActual {
+                                    TokenChartSlimBar(
+                                        height: actualHeight,
+                                        width: showsBilled
+                                            ? (isHovered ? 4.5 : 3.5)
+                                            : (isHovered ? 6.5 : 5.5),
+                                        color: .white.opacity(isHovered ? 0.62 : 0.38),
+                                        isEmpty: bucket.tokens == 0
+                                    )
+                                }
+                                if showsBilled {
+                                    TokenChartSlimBar(
+                                        height: billedHeight,
+                                        width: showsActual
+                                            ? (isHovered ? 5.5 : 4.5)
+                                            : (isHovered ? 6.5 : 5.5),
+                                        color: theme.accent.opacity(isHovered ? 0.92 : 0.72),
+                                        isEmpty: billedTokens == 0
+                                    )
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -3807,7 +3973,7 @@ private struct DailyTokenActivityChart: View {
                             onHover(bucket, hovering)
                         }
                         .help(
-                            "\(shortUsageDate(bucket.startDate, language: language)): \(exactTokenCount(bucket.tokens)) Token"
+                            bucketHelp(bucket, billedTokens: billedTokens)
                         )
                     }
                 }
@@ -3815,15 +3981,36 @@ private struct DailyTokenActivityChart: View {
         }
     }
 
-    private func barColor(intensity: Double, isHovered: Bool) -> Color {
-        guard intensity > 0 else { return .white.opacity(0.075) }
-        if isHovered { return theme.accent.opacity(0.88) }
-        return theme.accent.opacity(0.34 + 0.38 * intensity)
+    private func bucketHelp(
+        _ bucket: DailyUsageBucket,
+        billedTokens: Int64
+    ) -> String {
+        let date = shortUsageDate(bucket.startDate, language: language)
+        if showsActual && showsBilled {
+            return language.text(
+                "\(date)：实际 \(exactTokenCount(bucket.tokens)) Token；计费 \(exactTokenCount(billedTokens)) Token",
+                "\(date): Actual \(exactTokenCount(bucket.tokens)) Token; billed \(exactTokenCount(billedTokens)) Token"
+            )
+        }
+        if showsActual {
+            return language.text(
+                "\(date)：实际 \(exactTokenCount(bucket.tokens)) Token",
+                "\(date): Actual \(exactTokenCount(bucket.tokens)) Token"
+            )
+        }
+        return language.text(
+            "\(date)：计费 \(exactTokenCount(billedTokens)) Token",
+            "\(date): Billed \(exactTokenCount(billedTokens)) Token"
+        )
     }
+
 }
 
 private struct HourlyTokenActivityChart: View {
-    let buckets: [HourlyUsageBucket]
+    let actualBuckets: [HourlyUsageBucket]
+    let billedBuckets: [HourlyUsageBucket]
+    let showsActual: Bool
+    let showsBilled: Bool
     let hoveredBucket: HourlyUsageBucket?
     let onHover: (HourlyUsageBucket?, Bool) -> Void
     @Environment(\.displayScale) private var displayScale
@@ -3832,7 +4019,13 @@ private struct HourlyTokenActivityChart: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let maximum = max(1, buckets.map(\.tokens).max() ?? 0)
+            let billedByHour = billedBuckets.reduce(into: [Date: Int64]()) {
+                $0[$1.hourStart] = $1.tokens
+            }
+            let maximum = max(1, max(
+                showsActual ? actualBuckets.map(\.tokens).max() ?? 0 : 0,
+                showsBilled ? billedBuckets.map(\.tokens).max() ?? 0 : 0
+            ))
 
             ZStack(alignment: .bottom) {
                 Rectangle()
@@ -3843,12 +4036,19 @@ private struct HourlyTokenActivityChart: View {
                     alignment: .bottom,
                     spacing: IslandLayout.hourlyActivityChartBarSpacing
                 ) {
-                    ForEach(buckets) { bucket in
-                        let intensity = Double(max(0, bucket.tokens))
+                    ForEach(actualBuckets) { bucket in
+                        let billedTokens = billedByHour[bucket.hourStart]
+                            ?? bucket.tokens
+                        let actualIntensity = Double(max(0, bucket.tokens))
                             / Double(maximum)
-                        let barHeight = bucket.tokens == 0
+                        let billedIntensity = Double(max(0, billedTokens))
+                            / Double(maximum)
+                        let actualHeight = bucket.tokens == 0
                             ? 0
-                            : max(5, proxy.size.height * CGFloat(intensity))
+                            : max(5, proxy.size.height * CGFloat(actualIntensity))
+                        let billedHeight = billedTokens == 0
+                            ? 0
+                            : max(5, proxy.size.height * CGFloat(billedIntensity))
                         let isHovered = hoveredBucket?.id == bucket.id
                         let isCurrentHour = Calendar.autoupdatingCurrent.isDate(
                             bucket.hourStart,
@@ -3868,56 +4068,81 @@ private struct HourlyTokenActivityChart: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                             }
 
-                            TokenChartSlimBar(
-                                height: barHeight,
-                                width: isHovered
-                                    ? 5.5
-                                    : (isCurrentHour ? 4.5 : 3),
-                                color: barColor(
-                                    intensity: intensity,
-                                    isHovered: isHovered,
-                                    isCurrentHour: isCurrentHour
-                                ),
-                                isEmpty: bucket.tokens == 0
-                            )
+                            HStack(alignment: .bottom, spacing: 0.75) {
+                                if showsActual {
+                                    TokenChartSlimBar(
+                                        height: actualHeight,
+                                        width: showsBilled
+                                            ? (isHovered ? 2.75 : 1.75)
+                                            : (isHovered ? 3.75 : 3),
+                                        color: .white.opacity(isHovered ? 0.62 : 0.38),
+                                        isEmpty: bucket.tokens == 0
+                                    )
+                                }
+                                if showsBilled {
+                                    TokenChartSlimBar(
+                                        height: billedHeight,
+                                        width: showsActual
+                                            ? (isHovered
+                                                ? 3.25
+                                                : (isCurrentHour ? 2.75 : 2.25))
+                                            : (isHovered ? 3.75 : (isCurrentHour ? 3.5 : 3)),
+                                        color: theme.accent.opacity(
+                                            isHovered ? 0.92 : (isCurrentHour ? 0.86 : 0.72)
+                                        ),
+                                        isEmpty: billedTokens == 0
+                                    )
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
                         .onHover { hovering in
                             onHover(bucket, hovering)
                         }
-                        .help(hourlyBucketHelp(bucket, isCurrentHour: isCurrentHour))
+                        .help(
+                            hourlyBucketHelp(
+                                bucket,
+                                billedTokens: billedTokens,
+                                isCurrentHour: isCurrentHour
+                            )
+                        )
                     }
                 }
             }
         }
     }
 
-    private func barColor(
-        intensity: Double,
-        isHovered: Bool,
-        isCurrentHour: Bool
-    ) -> Color {
-        guard intensity > 0 else { return .white.opacity(0.075) }
-        if isHovered { return theme.accent.opacity(0.88) }
-        if isCurrentHour { return theme.accent.opacity(0.80) }
-        return theme.accent.opacity(0.30 + 0.36 * intensity)
-    }
-
     private func hourlyBucketHelp(
         _ bucket: HourlyUsageBucket,
+        billedTokens: Int64,
         isCurrentHour: Bool
     ) -> String {
         let suffix = isCurrentHour
             ? language.text("（本小时进行中）", " (current hour)")
             : ""
-        return "\(hourlyUsageDateText(bucket.hourStart, language: language)): \(exactTokenCount(bucket.tokens)) Token\(suffix)"
+        if showsActual && showsBilled {
+            return language.text(
+                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际 \(exactTokenCount(bucket.tokens)) Token；计费 \(exactTokenCount(billedTokens)) Token\(suffix)",
+                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual \(exactTokenCount(bucket.tokens)) Token; billed \(exactTokenCount(billedTokens)) Token\(suffix)"
+            )
+        }
+        if showsActual {
+            return language.text(
+                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际 \(exactTokenCount(bucket.tokens)) Token\(suffix)",
+                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual \(exactTokenCount(bucket.tokens)) Token\(suffix)"
+            )
+        }
+        return language.text(
+            "\(hourlyUsageDateText(bucket.hourStart, language: language))：计费 \(exactTokenCount(billedTokens)) Token\(suffix)",
+            "\(hourlyUsageDateText(bucket.hourStart, language: language)): Billed \(exactTokenCount(billedTokens)) Token\(suffix)"
+        )
     }
 }
 
 private struct QuotaMetric: View {
     let window: RateLimitWindow?
-    let usage: UsageSummary
+    let billedDailyUsageBuckets: [DailyUsageBucket]
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
@@ -4047,7 +4272,7 @@ private struct QuotaMetric: View {
     private var estimatedRemainingTokens: Int64? {
         CodexDisplayPolicy.estimatedRemainingTokens(
             window: window,
-            dailyUsageBuckets: usage.dailyUsageBuckets
+            dailyUsageBuckets: billedDailyUsageBuckets
         )
     }
 
@@ -4058,15 +4283,15 @@ private struct QuotaMetric: View {
 
     private var estimatedRemainingTokenAnnotation: String {
         language.text(
-            "（根据最近一周使用情况估算）",
-            "(estimated from last 7 days)"
+            "（标准模式 · 近7日计费历史）",
+            "(standard mode · 7-day billed history)"
         )
     }
 
     private var estimatedRemainingTokenHelp: String {
-        language.text(
-            "根据最近 7 个完整自然日的日均 Token、额度周期长度与剩余比例估算",
-            "Estimated from your average daily Token use over the previous 7 complete days, the quota window, and its remaining percentage"
+        return language.text(
+            "根据最近 7 个完整自然日的计费 Token、额度周期长度与剩余比例估算；假设后续全部使用标准模式",
+            "Estimated from billed Tokens over the previous 7 complete days, the quota window, and remaining percentage; assumes standard mode for future use"
         )
     }
 
@@ -4102,17 +4327,37 @@ private struct QuotaMetric: View {
 
     private func paceHelp(for assessment: QuotaConsumptionPaceAssessment) -> String {
         let used = Int(assessment.usedPercent.rounded())
+        let remaining = Int(assessment.remainingPercent.rounded())
         let elapsed = Int(assessment.elapsedPercent.rounded())
-        let relativeDifference = Int(
-            abs(assessment.relativeDifferencePercent).rounded()
+        let projectedRemaining = Int(
+            assessment.projectedRemainingPercentAtReset.rounded()
         )
-        let direction = assessment.relativeDifferencePercent >= 0
-            ? language.text("快", "ahead")
-            : language.text("慢", "behind")
-        return language.text(
-            "本周期已过 \(elapsed)%，额度已用 \(used)%，相对均匀节奏\(direction) \(relativeDifference)%",
-            "\(elapsed)% of this cycle elapsed; \(used)% used; \(relativeDifference)% \(direction) of pace"
+        let coverage = Int(
+            min(999, max(0, assessment.runwayCoverageRatio * 100)).rounded()
         )
+
+        switch assessment.pace {
+        case .slow:
+            return language.text(
+                "本周期已过 \(elapsed)%，已用 \(used)%；按当前平均速度，重置时预计仍余 \(projectedRemaining)%",
+                "\(elapsed)% elapsed and \(used)% used; about \(projectedRemaining)% is projected to remain at reset"
+            )
+        case .normal where remaining >= 50:
+            return language.text(
+                "当前剩余 \(remaining)%：余量充足，短时集中使用不会触发告急",
+                "\(remaining)% remains; short bursts do not trigger an alert while capacity is ample"
+            )
+        case .normal:
+            return language.text(
+                "当前剩余 \(remaining)%：按当前平均速度仍可覆盖到重置，暂不需要调整",
+                "\(remaining)% remains; projected runway reaches the reset, so no action is needed"
+            )
+        case .warning, .critical:
+            return language.text(
+                "当前剩余 \(remaining)%：按当前平均速度约能覆盖剩余周期的 \(coverage)%",
+                "\(remaining)% remains; projected runway covers about \(coverage)% of the time until reset"
+            )
+        }
     }
 }
 

@@ -161,6 +161,10 @@ enum CodexPreviewRenderer {
             ],
             todayThreadTokens: 84_350_271,
             hourlyThreadTokens: previewHourlyUsageBuckets(),
+            dailyThreadTokens: previewDailyUsageBuckets(),
+            billedTodayThreadTokens: 146_220_407,
+            billedHourlyThreadTokens: previewBilledHourlyUsageBuckets(),
+            billedDailyThreadTokens: previewBilledDailyUsageBuckets(),
             hasRunningSession: true,
             activeModel: ModelSummary(
                 id: "gpt-5.6-sol",
@@ -757,6 +761,30 @@ enum CodexPreviewRenderer {
                     tokens: value * 1_000_000
                 )
             }
+        }
+    }
+
+    private static func previewBilledDailyUsageBuckets(
+        now: Date = Date()
+    ) -> [DailyUsageBucket] {
+        previewDailyUsageBuckets(now: now).enumerated().map { index, bucket in
+            let multiplier = index.isMultiple(of: 3) ? 2.5 : 1.45
+            return DailyUsageBucket(
+                startDate: bucket.startDate,
+                tokens: Int64((Double(bucket.tokens) * multiplier).rounded())
+            )
+        }
+    }
+
+    private static func previewBilledHourlyUsageBuckets(
+        now: Date = Date()
+    ) -> [HourlyUsageBucket] {
+        previewHourlyUsageBuckets(now: now).enumerated().map { index, bucket in
+            let multiplier = index.isMultiple(of: 4) ? 2.5 : 1.35
+            return HourlyUsageBucket(
+                hourStart: bucket.hourStart,
+                tokens: Int64((Double(bucket.tokens) * multiplier).rounded())
+            )
         }
     }
 

@@ -31,6 +31,15 @@ enum CodexProbe {
             let usage = CodexStatusPayloadParser.parseUsage(usageResult)
             print("usage=\(usage.lifetimeTokens == nil ? "unavailable" : "available")")
             print("daily_usage=\(usage.dailyUsageBuckets.isEmpty ? "unavailable" : "available")")
+            print("account_daily_buckets=\(usage.dailyUsageBuckets.count)")
+
+            if let localPaths = try? CodexDailyTokenUsageReader.discoverLocalUsageRollouts(),
+               let localUsage = try? CodexDailyTokenUsageReader.readRecentHours(
+                from: localPaths
+               ) {
+                let populatedDays = localUsage.dailyBuckets.filter { $0.tokens > 0 }
+                print("local_daily_buckets=\(populatedDays.count)/\(localUsage.dailyBuckets.count)")
+            }
 
             let authResult = try? await client.request(
                 method: "getAuthStatus",
