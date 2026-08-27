@@ -12,9 +12,13 @@ enum CodexDisplayPolicy {
     /// the backing thread query. The input is already ordered by recency, so a
     /// stable partition preserves that order within both groups.
     static func visibleRecentThreads(from threads: [ThreadSummary]) -> [ThreadSummary] {
-        let running = threads.filter { $0.executionState == .running }
-        let remaining = threads.filter { $0.executionState != .running }
-        return Array((running + remaining).prefix(recentThreadLimit))
+        let active = threads.filter {
+            $0.executionState == .running || $0.executionState == .waitingForInput
+        }
+        let remaining = threads.filter {
+            $0.executionState != .running && $0.executionState != .waitingForInput
+        }
+        return Array((active + remaining).prefix(recentThreadLimit))
     }
 
     static func shouldAnimateTokenConsumption(
@@ -185,6 +189,20 @@ enum CodexDisplayPolicy {
         currentThreads.compactMap { thread in
             guard previousStates[thread.id] == .running,
                   thread.executionState == .idle else {
+                return nil
+            }
+            return thread.id
+        }
+    }
+
+    /// Returns tasks that have just paused for explicit user input.
+    static func inputRequestedThreadIDs(
+        previousStates: [String: ThreadExecutionState],
+        currentThreads: [ThreadSummary]
+    ) -> [String] {
+        currentThreads.compactMap { thread in
+            guard previousStates[thread.id] != .waitingForInput,
+                  thread.executionState == .waitingForInput else {
                 return nil
             }
             return thread.id
@@ -444,6 +462,7 @@ struct ThreadTokenUsage: Equatable, Sendable {
 
 enum ThreadExecutionState: Equatable, Sendable {
     case running
+    case waitingForInput
     case idle
     case interrupted
     case failed

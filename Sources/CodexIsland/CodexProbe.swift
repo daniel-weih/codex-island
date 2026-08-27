@@ -77,6 +77,7 @@ enum CodexProbe {
                 let label: String
                 switch activity.executionState {
                 case .running: label = "running"
+                case .waitingForInput: label = "waiting_for_input"
                 case .idle: label = "idle"
                 case .interrupted: label = "interrupted"
                 case .failed: label = "failed"
