@@ -242,10 +242,17 @@ final class IslandPanelController: NSObject {
 
     private func evaluatePointerPosition() {
         let mouse = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: {
-            notchRect(on: $0)?.contains(mouse) == true
-        }) {
+        if let screen = screen(containing: mouse) {
+            let targetChanged = targetScreen !== screen
             targetScreen = screen
+
+            // Automatic mode follows the display containing the pointer. Do not
+            // require a physical notch: most external displays do not expose one.
+            if targetChanged,
+               displaySelection.preference == .automatic,
+               panel.isVisible {
+                reposition(animated: false)
+            }
         }
 
         let isInside = isPointerInsideInteractionRegion
@@ -305,22 +312,22 @@ final class IslandPanelController: NSObject {
 
     private func automaticPreferredScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
-        return targetScreen
-            ?? NSScreen.screens.first(where: { notchRect(on: $0)?.contains(mouse) == true })
+        return screen(containing: mouse)
+            ?? targetScreen
             ?? panel.screen
-            ?? NSScreen.screens.first(where: { $0.frame.contains(mouse) })
             ?? NSScreen.main
             ?? NSScreen.screens.first
     }
 
     private func initialTargetScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first(where: {
-            $0.frame.contains(mouse) && notchGeometry(on: $0) != nil
-        })
-            ?? NSScreen.screens.first(where: { notchGeometry(on: $0) != nil })
+        return screen(containing: mouse)
             ?? NSScreen.main
             ?? NSScreen.screens.first
+    }
+
+    private func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first(where: { $0.frame.contains(point) })
     }
 
     private func frame(for size: NSSize, on screen: NSScreen) -> NSRect {

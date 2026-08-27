@@ -1920,7 +1920,7 @@ private struct IslandDisplayPicker: View {
                                 ? "checkmark.circle.fill"
                                 : "circle"
                         )
-                            .font(.system(size: 6.4, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(
                                 choice.target == selection.preference
                                     ? Color.cyan.opacity(0.86)
@@ -1929,7 +1929,13 @@ private struct IslandDisplayPicker: View {
                             .frame(width: 8)
 
                         Text(optionLabel(for: choice))
-                            .font(.system(size: 6.6, weight: .semibold, design: .rounded))
+                            .font(
+                                .system(
+                                    size: IslandTypography.body,
+                                    weight: .semibold,
+                                    design: .rounded
+                                )
+                            )
                             .foregroundStyle(
                                 choice.isAvailable
                                     ? Color.white.opacity(0.72)
@@ -1940,8 +1946,8 @@ private struct IslandDisplayPicker: View {
 
                         Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 6)
-                    .frame(width: 142, height: 17)
+                    .padding(.horizontal, 8)
+                    .frame(width: 142, height: 24)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
