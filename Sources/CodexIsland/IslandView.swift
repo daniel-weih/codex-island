@@ -44,6 +44,18 @@ enum IslandLayout {
     }
 }
 
+private func quotaRemainingColor(
+    _ remainingPercent: Double?,
+    unavailableColor: Color
+) -> Color {
+    guard let remainingPercent else { return unavailableColor }
+    switch CodexDisplayPolicy.quotaRemainingLevel(for: remainingPercent) {
+    case .healthy: return .green
+    case .warning: return .yellow
+    case .critical: return .red
+    }
+}
+
 private enum IslandTypography {
     /// The former task-title size is now the readability floor for UI copy.
     static let body: CGFloat = 11.5
@@ -1442,12 +1454,10 @@ struct IslandView: View {
     }
 
     private var compactQuotaColor: Color {
-        guard let remaining = compactQuotaWindow?.remainingPercent else {
-            return .white.opacity(0.28)
-        }
-        if remaining < 10 { return .red }
-        if remaining < 20 { return .orange }
-        return selectedColorTheme.accent
+        quotaRemainingColor(
+            compactQuotaWindow?.remainingPercent,
+            unavailableColor: .white.opacity(0.28)
+        )
     }
 
     private func updateTokenHover(
@@ -1791,11 +1801,11 @@ private struct IslandSettingsPanel: View {
     private var languageDetailText: String {
         if languagePreference == .automatic {
             return language.text(
-                "自动跟随 macOS · 当前中文",
-                "Following macOS · English"
+                "跟随 macOS",
+                "Follows macOS"
             )
         }
-        return language.text("手动选择界面语言", "Manually selected")
+        return language.text("手动选择", "Manual")
     }
 
     private var launchAtLoginDetailText: String {
@@ -4031,12 +4041,10 @@ private struct QuotaMetric: View {
     }
 
     private var remainingBarColor: Color {
-        guard let remaining = window?.remainingPercent else {
-            return .white.opacity(0.18)
-        }
-        if remaining <= 10 { return .red }
-        if remaining <= 20 { return .yellow }
-        return theme.accent
+        quotaRemainingColor(
+            window?.remainingPercent,
+            unavailableColor: .white.opacity(0.18)
+        )
     }
 
     private var resetTimestamp: String? {

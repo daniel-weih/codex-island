@@ -102,6 +102,14 @@ enum CodexDisplayPolicy {
         )
     }
 
+    static func quotaRemainingLevel(
+        for remainingPercent: Double
+    ) -> QuotaRemainingLevel {
+        if remainingPercent <= 10 { return .critical }
+        if remainingPercent <= 30 { return .warning }
+        return .healthy
+    }
+
     /// Converts the remaining allowance into a personalized Token estimate.
     /// The baseline is the user's average daily volume over the previous 7
     /// complete calendar days, including inactive days, scaled to the quota
@@ -350,6 +358,12 @@ struct RateLimitWindow: Equatable {
 enum QuotaConsumptionPace: Equatable, Sendable {
     case slow
     case normal
+    case warning
+    case critical
+}
+
+enum QuotaRemainingLevel: Equatable, Sendable {
+    case healthy
     case warning
     case critical
 }

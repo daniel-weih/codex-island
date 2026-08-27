@@ -11,6 +11,7 @@ struct ParserChecks {
         checkCodexBucketPreference()
         checkTokenConsumptionPolicy()
         checkQuotaConsumptionPace()
+        checkQuotaRemainingLevels()
         checkEstimatedRemainingTokens()
         checkDisplayModelNames()
         checkReasoningEffortLabels()
@@ -744,6 +745,25 @@ struct ParserChecks {
         )
     }
 
+    private static func checkQuotaRemainingLevels() {
+        expect(
+            CodexDisplayPolicy.quotaRemainingLevel(for: 30.01) == .healthy,
+            "remaining quota above 30 percent stays green"
+        )
+        expect(
+            CodexDisplayPolicy.quotaRemainingLevel(for: 30) == .warning,
+            "30 percent remaining is yellow"
+        )
+        expect(
+            CodexDisplayPolicy.quotaRemainingLevel(for: 10.01) == .warning,
+            "remaining quota above 10 percent stays yellow"
+        )
+        expect(
+            CodexDisplayPolicy.quotaRemainingLevel(for: 10) == .critical,
+            "10 percent remaining is red"
+        )
+    }
+
     private static func checkEstimatedRemainingTokens() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -1325,6 +1345,20 @@ struct ParserChecks {
             let inputRequest = #"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"input-1"}}"# + "\n"
             try append(inputRequest)
             try expectState(.waitingForInput, "request_user_input waits for input")
+
+            let waitingAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let waitingModifiedAt = waitingAttributes[.modificationDate] as? Date ?? Date()
+            let longPendingApproval = try CodexThreadActivityReader.readLatest(
+                from: url.path,
+                threadID: threadID,
+                validatePath: false,
+                now: waitingModifiedAt.addingTimeInterval(24 * 60 * 60),
+                staleInterval: 30 * 60
+            )
+            expect(
+                longPendingApproval.executionState == .waitingForInput,
+                "waiting for input does not expire while approval is pending"
+            )
 
             let inputResponse = #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"input-1","output":"ok"}}"# + "\n"
             try append(inputResponse)
