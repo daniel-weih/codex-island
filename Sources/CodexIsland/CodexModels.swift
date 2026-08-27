@@ -225,13 +225,13 @@ enum CodexDisplayPolicy {
             in: .whitespacesAndNewlines
         ).lowercased()
         switch normalized {
-        case "minimal", "low", "light": return "LIGHT"
-        case "medium": return "MEDIUM"
-        case "high": return "HIGH"
-        case "xhigh", "extra-high", "extra_high", "extra high": return "XHIGH"
-        case "max": return "MAX"
-        case "ultra": return "ULTRA"
-        default: return normalized.uppercased()
+        case "minimal", "low", "light": return "Light"
+        case "medium": return "Medium"
+        case "high": return "High"
+        case "xhigh", "extra-high", "extra_high", "extra high": return "xHigh"
+        case "max": return "Max"
+        case "ultra": return "Ultra"
+        default: return normalized.capitalized
         }
     }
 

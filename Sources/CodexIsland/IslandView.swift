@@ -2928,12 +2928,9 @@ private struct ThreadConfigurationView: View {
         if let effort = thread.reasoningEffort,
            !effort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let displayLabel = CodexDisplayPolicy.reasoningEffortLabel(effort)
-            let isUltra = displayLabel == "ULTRA"
             ThreadSettingBadge(
                 text: displayLabel,
-                color: isUltra
-                    ? Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.94)
-                    : .white.opacity(0.42)
+                color: reasoningBadgeColor(for: displayLabel)
             )
             .frame(width: reasoningWidth, alignment: .leading)
             .help(
@@ -2944,6 +2941,21 @@ private struct ThreadConfigurationView: View {
             )
         } else {
             Color.clear.frame(width: reasoningWidth, height: 1)
+        }
+    }
+
+    private func reasoningBadgeColor(for displayLabel: String) -> Color {
+        switch displayLabel {
+        case "Max":
+            // Codex CLI Max uses a warm gold-to-orange ignition palette.
+            return Color(red: 1.0, green: 178.0 / 255.0, blue: 66.0 / 255.0)
+                .opacity(0.94)
+        case "Ultra":
+            // Codex CLI Ultra uses a violet-to-magenta ignition palette.
+            return Color(red: 186.0 / 255.0, green: 130.0 / 255.0, blue: 1.0)
+                .opacity(0.94)
+        default:
+            return .white.opacity(0.42)
         }
     }
 

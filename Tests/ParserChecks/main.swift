@@ -839,31 +839,35 @@ struct ParserChecks {
 
     private static func checkReasoningEffortLabels() {
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("low") == "LIGHT",
+            CodexDisplayPolicy.reasoningEffortLabel("low") == "Light",
             "low reasoning uses the Codex App Light label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("minimal") == "LIGHT",
+            CodexDisplayPolicy.reasoningEffortLabel("minimal") == "Light",
             "legacy minimal reasoning is folded into Light"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("medium") == "MEDIUM",
+            CodexDisplayPolicy.reasoningEffortLabel("medium") == "Medium",
             "medium reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("high") == "HIGH",
+            CodexDisplayPolicy.reasoningEffortLabel("high") == "High",
             "high reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("extra high") == "XHIGH",
+            CodexDisplayPolicy.reasoningEffortLabel("extra high") == "xHigh",
             "Extra High is the only abbreviated effort label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("max") == "MAX",
+            CodexDisplayPolicy.reasoningEffortLabel("xhigh") == "xHigh",
+            "the runtime xhigh value uses the Codex App spelling"
+        )
+        expect(
+            CodexDisplayPolicy.reasoningEffortLabel("max") == "Max",
             "max reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("ultra") == "ULTRA",
+            CodexDisplayPolicy.reasoningEffortLabel("ultra") == "Ultra",
             "ultra reasoning keeps its full label"
         )
     }
