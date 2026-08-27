@@ -123,6 +123,19 @@ struct ParserChecks {
             completed == ["completed"],
             "completion sound only observes a running-to-idle transition"
         )
+
+        let inputRequested = CodexDisplayPolicy.inputRequestedThreadIDs(
+            previousStates: ["waiting": .running, "already-waiting": .waitingForInput],
+            currentThreads: [
+                thread("waiting", .waitingForInput),
+                thread("already-waiting", .waitingForInput),
+                thread("running", .running)
+            ]
+        )
+        expect(
+            inputRequested == ["waiting"],
+            "approval sound only observes a transition into waiting for input"
+        )
     }
 
     private static func checkPlanBadgeLabels() {
@@ -1308,6 +1321,14 @@ struct ParserChecks {
             let start1 = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"# + "\n"
             try append(start1)
             try expectState(.running, "task_started becomes running")
+
+            let inputRequest = #"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"input-1"}}"# + "\n"
+            try append(inputRequest)
+            try expectState(.waitingForInput, "request_user_input waits for input")
+
+            let inputResponse = #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"input-1","output":"ok"}}"# + "\n"
+            try append(inputResponse)
+            try expectState(.running, "request_user_input response resumes running")
 
             let token1 = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2929630,"cached_input_tokens":2806528,"output_tokens":19878,"reasoning_output_tokens":2428,"total_tokens":2949508},"last_token_usage":{"input_tokens":93600,"cached_input_tokens":90000,"output_tokens":1400,"reasoning_output_tokens":300,"total_tokens":95000},"model_context_window":258400}}}"# + "\n"
             try append(token1)

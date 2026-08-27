@@ -336,18 +336,40 @@ final class IslandDisplayGeometry: ObservableObject {
 }
 
 @MainActor
-private enum TaskCompletionSoundPlayer {
-    private static let sound: NSSound? = {
-        guard let url = Bundle.module.url(
+private enum TaskSoundPlayer {
+    private static let completionSound: NSSound? = {
+        let url = Bundle.module.url(
+            forResource: "TaskCompletion8Bit",
+            withExtension: "wav"
+        ) ?? Bundle.module.url(
             forResource: "TaskCompletion",
             withExtension: "mp3"
+        )
+        guard let url else {
+            return nil
+        }
+        return NSSound(contentsOf: url, byReference: false)
+    }()
+
+    private static let approvalSound: NSSound? = {
+        guard let url = Bundle.module.url(
+            forResource: "TaskApprovalAlert",
+            withExtension: "wav"
         ) else {
             return nil
         }
         return NSSound(contentsOf: url, byReference: false)
     }()
 
-    static func play() {
+    static func playCompletion() {
+        play(completionSound)
+    }
+
+    static func playApproval() {
+        play(approvalSound)
+    }
+
+    private static func play(_ sound: NSSound?) {
         sound?.stop()
         if sound?.play() != true {
             NSSound.beep()
@@ -541,6 +563,10 @@ struct IslandView: View {
     }
 
     private func handleThreadStateChanges(_ threads: [ThreadSummary]) {
+        let inputRequestedThreadIDs = CodexDisplayPolicy.inputRequestedThreadIDs(
+            previousStates: previousThreadStates,
+            currentThreads: threads
+        )
         let completedThreadIDs = CodexDisplayPolicy.completedThreadIDs(
             previousStates: previousThreadStates,
             currentThreads: threads
@@ -548,11 +574,14 @@ struct IslandView: View {
         previousThreadStates = Self.threadStates(from: threads)
 
         guard usesTimelineUpdates,
-              completionSoundEnabled,
-              !completedThreadIDs.isEmpty else {
+              completionSoundEnabled else {
             return
         }
-        TaskCompletionSoundPlayer.play()
+        if !inputRequestedThreadIDs.isEmpty {
+            TaskSoundPlayer.playApproval()
+        } else if !completedThreadIDs.isEmpty {
+            TaskSoundPlayer.playCompletion()
+        }
     }
 
     private var islandShape: RoundedRectangle {
@@ -1615,8 +1644,8 @@ private struct IslandSettingsPanel: View {
                     icon: "speaker.wave.2.fill",
                     title: language.text("完成音效", "Completion sound"),
                     detail: language.text(
-                        "任务完成后播放",
-                        "Plays when tasks finish"
+                        "完成或等待输入时播放",
+                        "Plays on finish or input request"
                     ),
                     tint: .orange,
                     isOn: $completionSoundEnabled
@@ -2433,6 +2462,7 @@ private struct ConversationRow: View {
     private var titleColor: Color {
         switch thread.executionState {
         case .running: return .white.opacity(0.76)
+        case .waitingForInput: return .yellow.opacity(0.72)
         case .interrupted: return .orange.opacity(0.62)
         case .failed: return .red.opacity(0.66)
         case .idle, .unknown: return .white.opacity(rank == 0 ? 0.60 : 0.48)
@@ -2442,6 +2472,7 @@ private struct ConversationRow: View {
     private var trailingLabel: String {
         switch thread.executionState {
         case .running: return language.text("执行中", "Running")
+        case .waitingForInput: return language.text("等待输入", "Input needed")
         case .interrupted: return language.text("已中断", "Interrupted")
         case .failed: return language.text("失败", "Failed")
         case .idle, .unknown:
@@ -2461,6 +2492,7 @@ private struct ConversationRow: View {
     private var trailingColor: Color {
         switch thread.executionState {
         case .running: return .green.opacity(0.72)
+        case .waitingForInput: return .yellow.opacity(0.72)
         case .interrupted: return .orange.opacity(0.58)
         case .failed: return .red.opacity(0.62)
         case .idle, .unknown: return .white.opacity(rank == 0 ? 0.25 : 0.18)
@@ -2473,6 +2505,11 @@ private struct ConversationRow: View {
             return language.text(
                 "Codex 正在执行这条会话",
                 "Codex is running this session"
+            )
+        case .waitingForInput:
+            return language.text(
+                "Codex 正在等待你的输入",
+                "Codex is waiting for your input"
             )
         case .idle:
             return language.text(
@@ -2735,6 +2772,7 @@ private struct ThreadActivityIndicator: View {
     private var indicatorColor: Color {
         switch state {
         case .running: return .green
+        case .waitingForInput: return .yellow
         case .idle: return .white.opacity(0.20)
         case .interrupted: return .orange.opacity(0.72)
         case .failed: return .red.opacity(0.76)
@@ -2745,6 +2783,7 @@ private struct ThreadActivityIndicator: View {
     private var indicatorSize: CGFloat {
         switch state {
         case .running: return 5.5
+        case .waitingForInput: return 5.5
         case .idle, .interrupted, .failed: return 4.5
         case .unknown: return 5
         }
@@ -2753,6 +2792,7 @@ private struct ThreadActivityIndicator: View {
     private var helpText: String {
         switch state {
         case .running: return language.text("执行中", "Running")
+        case .waitingForInput: return language.text("等待输入", "Input needed")
         case .idle: return language.text("空闲", "Idle")
         case .interrupted: return language.text("已中断", "Interrupted")
         case .failed: return language.text("失败", "Failed")

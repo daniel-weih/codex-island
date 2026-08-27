@@ -11,6 +11,8 @@ enum CodexThreadActivityReader {
     private static let turnAbortedMarker = Data("turn_aborted".utf8)
     private static let tokenCountMarker = Data("token_count".utf8)
     private static let errorMarker = Data("\"type\":\"error\"".utf8)
+    private static let inputRequestMarker = Data("request_user_input".utf8)
+    private static let functionCallOutputMarker = Data("function_call_output".utf8)
     private static let cache = ThreadActivityCache()
 
     static func readLatest(
@@ -268,6 +270,24 @@ enum CodexThreadActivityReader {
         _ line: D
     ) -> RolloutEvent? {
         let data = Data(line)
+        if data.range(of: inputRequestMarker) != nil
+            || data.range(of: functionCallOutputMarker) != nil,
+           let object = try? JSONSerialization.jsonObject(with: data) as? JSONObject,
+           object.string("type") == "response_item",
+           let payload = object.dictionary("payload") {
+            switch payload.string("type") {
+            case "function_call":
+                guard payload.string("name") == "request_user_input",
+                      let callID = payload.string("call_id") else { return nil }
+                return .inputRequested(callID: callID)
+            case "function_call_output":
+                guard let callID = payload.string("call_id") else { return nil }
+                return .inputReceived(callID: callID)
+            default:
+                return nil
+            }
+        }
+
         guard data.range(of: taskStartedMarker) != nil
                 || data.range(of: taskCompleteMarker) != nil
                 || data.range(of: turnAbortedMarker) != nil
@@ -351,6 +371,8 @@ enum CodexThreadActivityReader {
 
 private enum RolloutEvent {
     case started(turnID: String?, occurredAt: Date?)
+    case inputRequested(callID: String)
+    case inputReceived(callID: String)
     case completed(turnID: String?)
     case aborted(turnID: String?)
     case failed
@@ -361,6 +383,7 @@ private struct ActivityReducer {
     var executionState: ThreadExecutionState = .unknown
     var activeTurnID: String?
     var activeStartedAt: Date?
+    var activeInputRequestID: String?
     var tokenUsage: ThreadTokenUsage?
 
     mutating func consume(_ event: RolloutEvent) {
@@ -368,6 +391,16 @@ private struct ActivityReducer {
         case .started(let turnID, let occurredAt):
             activeTurnID = turnID
             activeStartedAt = occurredAt
+            activeInputRequestID = nil
+            executionState = .running
+
+        case .inputRequested(let callID):
+            activeInputRequestID = callID
+            executionState = .waitingForInput
+
+        case .inputReceived(let callID):
+            guard activeInputRequestID == callID else { return }
+            activeInputRequestID = nil
             executionState = .running
 
         case .failed:
@@ -380,12 +413,14 @@ private struct ActivityReducer {
             }
             activeTurnID = nil
             activeStartedAt = nil
+            activeInputRequestID = nil
 
         case .aborted(let turnID):
             guard terminalMatches(turnID) else { return }
             executionState = .interrupted
             activeTurnID = nil
             activeStartedAt = nil
+            activeInputRequestID = nil
 
         case .tokenUsage(let usage):
             tokenUsage = usage
