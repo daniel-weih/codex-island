@@ -4,6 +4,7 @@ enum CodexUsageTimeline {
     static func lastDaysIncludingToday(
         from buckets: [DailyUsageBucket],
         todayTokens: Int64? = nil,
+        localDailyBuckets: [DailyUsageBucket] = [],
         count: Int = 30,
         now: Date = Date(),
         calendar inputCalendar: Calendar = .autoupdatingCurrent
@@ -27,6 +28,16 @@ enum CodexUsageTimeline {
         formatter.dateFormat = "yyyy-MM-dd"
         var tokenByDate = buckets.reduce(into: [String: Int64]()) { result, bucket in
             result[bucket.startDate, default: 0] += max(0, bucket.tokens)
+        }
+
+        // Account history can be delayed or temporarily truncated. Merge the
+        // locally reconstructed message-level totals for every retained date.
+        // `max` avoids double counting once the account bucket catches up.
+        for bucket in localDailyBuckets where bucket.tokens > 0 {
+            tokenByDate[bucket.startDate] = max(
+                tokenByDate[bucket.startDate] ?? 0,
+                bucket.tokens
+            )
         }
         if let todayTokens {
             tokenByDate[formatter.string(from: today)] = max(0, todayTokens)

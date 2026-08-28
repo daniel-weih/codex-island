@@ -1,17 +1,23 @@
 import Foundation
 
 struct LocalTokenUsageSnapshot: Equatable, Sendable {
+    /// Actual model tokens, without Fast quota weighting.
     var todayTokens: Int64
     var hourlyBuckets: [HourlyUsageBucket]
+    var dailyBuckets: [DailyUsageBucket]
+    /// Quota-billed tokens, with Fast calls weighted at 2.5x.
+    var billedTodayTokens: Int64
+    var billedHourlyBuckets: [HourlyUsageBucket]
+    var billedDailyBuckets: [DailyUsageBucket]
 }
 
-/// Computes recent locally-persisted Token increments for CLI/App model calls.
-/// Absolute cumulative counters are reduced to positive deltas, so replayed
-/// `token_count` notifications do not inflate the result. Forks use their own
-/// session timestamp, while subagents use their explicit activity boundary, so
-/// copied parent history is excluded while new work remains visible.
+/// Computes actual and quota-billed Token increments for local CLI/App calls.
+/// Each new `last_token_usage` is counted once at message granularity; only the
+/// billed series weights Fast calls by their quota cost. Fork and subagent
+/// boundaries exclude timestamp-rewritten parent history.
 enum CodexDailyTokenUsageReader {
     static let recentHourCount = 48
+    static let recentDayCount = 30
     private static let cache = DailyTokenUsageCache()
 
     static func readToday(
@@ -62,18 +68,34 @@ private struct DailyTokenEvent {
     var lastTokens: Int64?
 }
 
+private enum DailyUsageRecord {
+    case serviceTier(timestamp: Date, value: String)
+    case token(DailyTokenEvent)
+}
+
+private enum ActivityBoundaryKind {
+    case subagent
+    case fork(sessionID: String)
+}
+
 private struct DailyTokenFileEntry {
     var fileIdentity: String
     var fileSize: UInt64
     var modifiedAt: Date
     var previousTotal: Int64?
+    var serviceTier: String?
     var todayTotal: Int64
     var hourlyTotals: [Date: Int64]
+    var dailyTotals: [Date: Int64]
+    var billedTodayTotal: Int64
+    var billedHourlyTotals: [Date: Int64]
+    var billedDailyTotals: [Date: Int64]
     var trailingLineStartOffset: UInt64?
     var countingStart: Date
     var isExcluded: Bool
-    var isWaitingForSubagentBoundary: Bool
-    var subagentBoundarySearchOffset: UInt64?
+    var isWaitingForActivityBoundary: Bool
+    var activityBoundaryKind: ActivityBoundaryKind?
+    var activityBoundarySearchOffset: UInt64?
 }
 
 private enum DailyTokenUsageError: LocalizedError {
@@ -103,6 +125,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private var nextDayStart: Date?
     private var hourlyRangeStart: Date?
     private var hourlyRangeEnd: Date?
+    private var dailyRangeStart: Date?
     private var entries: [String: DailyTokenFileEntry] = [:]
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
@@ -124,6 +147,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         nextDayStart = nil
         hourlyRangeStart = nil
         hourlyRangeEnd = nil
+        dailyRangeStart = nil
         entries.removeAll()
     }
 
@@ -151,7 +175,11 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             throw DailyTokenUsageError.noReadableRollouts
         }
         let resolvedDayStart = calendar.startOfDay(for: now)
-        guard let resolvedNextDayStart = calendar.date(
+        guard let resolvedDailyRangeStart = calendar.date(
+            byAdding: .day,
+            value: -(CodexDailyTokenUsageReader.recentDayCount - 1),
+            to: resolvedDayStart
+        ), let resolvedNextDayStart = calendar.date(
             byAdding: .day,
             value: 1,
             to: resolvedDayStart
@@ -165,29 +193,45 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if dayStart != resolvedDayStart
             || nextDayStart != resolvedNextDayStart
             || hourlyRangeStart != resolvedHourlyRangeStart
-            || hourlyRangeEnd != resolvedHourlyRangeEnd {
+            || hourlyRangeEnd != resolvedHourlyRangeEnd
+            || dailyRangeStart != resolvedDailyRangeStart {
             dayStart = resolvedDayStart
             nextDayStart = resolvedNextDayStart
             hourlyRangeStart = resolvedHourlyRangeStart
             hourlyRangeEnd = resolvedHourlyRangeEnd
+            dailyRangeStart = resolvedDailyRangeStart
             entries.removeAll()
         }
 
         let paths = Array(Set(rolloutPaths.filter { !$0.isEmpty })).sorted()
         guard !paths.isEmpty else {
+            let emptyHourlyBuckets = Self.emptyHourlyBuckets(
+                startingAt: resolvedHourlyRangeStart,
+                count: hourCount,
+                calendar: calendar
+            )
+            let emptyDailyBuckets = Self.emptyDailyBuckets(
+                startingAt: resolvedDailyRangeStart,
+                count: CodexDailyTokenUsageReader.recentDayCount,
+                calendar: calendar
+            )
             return LocalTokenUsageSnapshot(
                 todayTokens: 0,
-                hourlyBuckets: Self.emptyHourlyBuckets(
-                    startingAt: resolvedHourlyRangeStart,
-                    count: hourCount,
-                    calendar: calendar
-                )
+                hourlyBuckets: emptyHourlyBuckets,
+                dailyBuckets: emptyDailyBuckets,
+                billedTodayTokens: 0,
+                billedHourlyBuckets: emptyHourlyBuckets,
+                billedDailyBuckets: emptyDailyBuckets
             )
         }
 
         var readableCount = 0
         var total: Int64 = 0
         var hourlyTotals: [Date: Int64] = [:]
+        var dailyTotals: [Date: Int64] = [:]
+        var billedTotal: Int64 = 0
+        var billedHourlyTotals: [Date: Int64] = [:]
+        var billedDailyTotals: [Date: Int64] = [:]
         for path in paths {
             let url = URL(fileURLWithPath: path).standardizedFileURL
             do {
@@ -197,6 +241,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     nextDayStart: resolvedNextDayStart,
                     hourlyRangeStart: resolvedHourlyRangeStart,
                     hourlyRangeEnd: resolvedHourlyRangeEnd,
+                    dailyRangeStart: resolvedDailyRangeStart,
                     calendar: calendar
                 )
                 entries[url.path] = entry
@@ -205,6 +250,28 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 for (hourStart, tokens) in entry.hourlyTotals {
                     hourlyTotals[hourStart] = Self.clampedAdd(
                         hourlyTotals[hourStart, default: 0],
+                        tokens
+                    )
+                }
+                billedTotal = Self.clampedAdd(
+                    billedTotal,
+                    entry.billedTodayTotal
+                )
+                for (hourStart, tokens) in entry.billedHourlyTotals {
+                    billedHourlyTotals[hourStart] = Self.clampedAdd(
+                        billedHourlyTotals[hourStart, default: 0],
+                        tokens
+                    )
+                }
+                for (dateStart, tokens) in entry.billedDailyTotals {
+                    billedDailyTotals[dateStart] = Self.clampedAdd(
+                        billedDailyTotals[dateStart, default: 0],
+                        tokens
+                    )
+                }
+                for (dateStart, tokens) in entry.dailyTotals {
+                    dailyTotals[dateStart] = Self.clampedAdd(
+                        dailyTotals[dateStart, default: 0],
                         tokens
                     )
                 }
@@ -228,9 +295,45 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 tokens: hourlyTotals[bucket.hourStart] ?? 0
             )
         }
+        let dailyBuckets = Self.emptyDailyBuckets(
+            startingAt: resolvedDailyRangeStart,
+            count: CodexDailyTokenUsageReader.recentDayCount,
+            calendar: calendar
+        ).map { bucket in
+            DailyUsageBucket(
+                startDate: bucket.startDate,
+                tokens: Self.dayDate(bucket.startDate, calendar: calendar)
+                    .flatMap { dailyTotals[$0] } ?? 0
+            )
+        }
+        let billedBuckets = Self.emptyHourlyBuckets(
+            startingAt: resolvedHourlyRangeStart,
+            count: hourCount,
+            calendar: calendar
+        ).map { bucket in
+            HourlyUsageBucket(
+                hourStart: bucket.hourStart,
+                tokens: billedHourlyTotals[bucket.hourStart] ?? 0
+            )
+        }
+        let billedDailyBuckets = Self.emptyDailyBuckets(
+            startingAt: resolvedDailyRangeStart,
+            count: CodexDailyTokenUsageReader.recentDayCount,
+            calendar: calendar
+        ).map { bucket in
+            DailyUsageBucket(
+                startDate: bucket.startDate,
+                tokens: Self.dayDate(bucket.startDate, calendar: calendar)
+                    .flatMap { billedDailyTotals[$0] } ?? 0
+            )
+        }
         return LocalTokenUsageSnapshot(
             todayTokens: total,
-            hourlyBuckets: buckets
+            hourlyBuckets: buckets,
+            dailyBuckets: dailyBuckets,
+            billedTodayTokens: billedTotal,
+            billedHourlyBuckets: billedBuckets,
+            billedDailyBuckets: billedDailyBuckets
         )
     }
 
@@ -241,9 +344,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start
             ?? calendar.startOfDay(for: now)
         let historyStart = calendar.date(
-            byAdding: .hour,
-            value: -(CodexDailyTokenUsageReader.recentHourCount - 1),
-            to: currentHourStart
+            byAdding: .day,
+            value: -(CodexDailyTokenUsageReader.recentDayCount - 1),
+            to: calendar.startOfDay(for: now)
         ) ?? currentHourStart
         let cutoff = min(
             historyStart,
@@ -294,6 +397,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         nextDayStart: Date,
         hourlyRangeStart: Date,
         hourlyRangeEnd: Date,
+        dailyRangeStart: Date,
         calendar: Calendar
     ) throws -> DailyTokenFileEntry {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -316,11 +420,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if var cached = entries[url.path],
            cached.fileIdentity == fileIdentity,
            fileSize > cached.fileSize,
-           cached.isWaitingForSubagentBoundary {
-            let search = try Self.firstSubagentActivityBoundary(
+           cached.isWaitingForActivityBoundary,
+           let boundaryKind = cached.activityBoundaryKind {
+            let search = try Self.firstActivityBoundary(
                 url: url,
                 fileSize: fileSize,
-                startingAt: cached.subagentBoundarySearchOffset ?? 0
+                kind: boundaryKind,
+                startingAt: cached.activityBoundarySearchOffset ?? 0
             )
             cached.fileSize = fileSize
             cached.modifiedAt = modifiedAt
@@ -328,7 +434,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 url: url,
                 fileSize: fileSize
             )
-            cached.subagentBoundarySearchOffset = search.activityStartedAt == nil
+            cached.activityBoundarySearchOffset = search.activityStartedAt == nil
                 ? search.nextSearchOffset
                 : nil
 
@@ -336,31 +442,42 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 return cached
             }
 
-            cached.countingStart = max(hourlyRangeStart, activityStartedAt)
+            cached.countingStart = max(dailyRangeStart, activityStartedAt)
             cached.isExcluded = false
-            cached.isWaitingForSubagentBoundary = false
+            cached.isWaitingForActivityBoundary = false
             cached.previousTotal = nil
+            cached.serviceTier = nil
             cached.todayTotal = 0
             cached.hourlyTotals = [:]
+            cached.dailyTotals = [:]
+            cached.billedTodayTotal = 0
+            cached.billedHourlyTotals = [:]
+            cached.billedDailyTotals = [:]
             let resumedCountingStart = cached.countingStart
             guard modifiedAt >= resumedCountingStart else { return cached }
 
-            let events = try Self.scanBackwardToDailyBaseline(
+            let records = try Self.scanBackwardToDailyBaseline(
                 url: url,
                 fileSize: fileSize,
                 dayStart: resumedCountingStart
             )
-            for event in events.reversed() {
+            for record in records.reversed() {
                 Self.consume(
-                    event,
+                    record,
                     previousTotal: &cached.previousTotal,
+                    serviceTier: &cached.serviceTier,
                     todayTotal: &cached.todayTotal,
                     hourlyTotals: &cached.hourlyTotals,
+                    dailyTotals: &cached.dailyTotals,
+                    billedTodayTotal: &cached.billedTodayTotal,
+                    billedHourlyTotals: &cached.billedHourlyTotals,
+                    billedDailyTotals: &cached.billedDailyTotals,
                     countingStart: resumedCountingStart,
                     dayStart: dayStart,
                     nextDayStart: nextDayStart,
                     hourlyRangeStart: hourlyRangeStart,
                     hourlyRangeEnd: hourlyRangeEnd,
+                    dailyRangeStart: dailyRangeStart,
                     calendar: calendar
                 )
             }
@@ -370,7 +487,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if var cached = entries[url.path],
            cached.fileIdentity == fileIdentity,
            fileSize > cached.fileSize,
-           !cached.isWaitingForSubagentBoundary {
+           !cached.isWaitingForActivityBoundary {
             let originalSize = cached.fileSize
             let scanStart = min(
                 cached.trailingLineStartOffset ?? originalSize,
@@ -380,29 +497,45 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             cached.modifiedAt = modifiedAt
             if !cached.isExcluded {
                 var previousTotal = cached.previousTotal
+                var serviceTier = cached.serviceTier
                 var todayTotal = cached.todayTotal
                 var hourlyTotals = cached.hourlyTotals
+                var dailyTotals = cached.dailyTotals
+                var billedTodayTotal = cached.billedTodayTotal
+                var billedHourlyTotals = cached.billedHourlyTotals
+                var billedDailyTotals = cached.billedDailyTotals
                 try Self.scanForward(
                     url: url,
                     from: scanStart,
                     to: fileSize
-                ) { event in
+                ) { record in
                     Self.consume(
-                        event,
+                        record,
                         previousTotal: &previousTotal,
+                        serviceTier: &serviceTier,
                         todayTotal: &todayTotal,
                         hourlyTotals: &hourlyTotals,
+                        dailyTotals: &dailyTotals,
+                        billedTodayTotal: &billedTodayTotal,
+                        billedHourlyTotals: &billedHourlyTotals,
+                        billedDailyTotals: &billedDailyTotals,
                         countingStart: cached.countingStart,
                         dayStart: dayStart,
                         nextDayStart: nextDayStart,
                         hourlyRangeStart: hourlyRangeStart,
                         hourlyRangeEnd: hourlyRangeEnd,
+                        dailyRangeStart: dailyRangeStart,
                         calendar: calendar
                     )
                 }
                 cached.previousTotal = previousTotal
+                cached.serviceTier = serviceTier
                 cached.todayTotal = todayTotal
                 cached.hourlyTotals = hourlyTotals
+                cached.dailyTotals = dailyTotals
+                cached.billedTodayTotal = billedTodayTotal
+                cached.billedHourlyTotals = billedHourlyTotals
+                cached.billedDailyTotals = billedDailyTotals
                 cached.trailingLineStartOffset = try Self.findTrailingLineStartOffset(
                     url: url,
                     fileSize: fileSize
@@ -413,43 +546,55 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
         let session = try Self.localUsageSession(url: url, fileSize: fileSize)
         let countingStart = max(
-            hourlyRangeStart,
-            session.activityStartedAt ?? session.startedAt ?? hourlyRangeStart
+            dailyRangeStart,
+            session.activityStartedAt ?? session.startedAt ?? dailyRangeStart
         )
         var entry = DailyTokenFileEntry(
             fileIdentity: fileIdentity,
             fileSize: fileSize,
             modifiedAt: modifiedAt,
             previousTotal: nil,
+            serviceTier: nil,
             todayTotal: 0,
             hourlyTotals: [:],
+            dailyTotals: [:],
+            billedTodayTotal: 0,
+            billedHourlyTotals: [:],
+            billedDailyTotals: [:],
             trailingLineStartOffset: try Self.findTrailingLineStartOffset(
                 url: url,
                 fileSize: fileSize
             ),
             countingStart: countingStart,
             isExcluded: !session.isIncluded || session.isWaitingForActivityBoundary,
-            isWaitingForSubagentBoundary: session.isWaitingForActivityBoundary,
-            subagentBoundarySearchOffset: session.subagentBoundarySearchOffset
+            isWaitingForActivityBoundary: session.isWaitingForActivityBoundary,
+            activityBoundaryKind: session.activityBoundaryKind,
+            activityBoundarySearchOffset: session.activityBoundarySearchOffset
         )
         guard !entry.isExcluded, modifiedAt >= countingStart else { return entry }
 
-        let events = try Self.scanBackwardToDailyBaseline(
+        let records = try Self.scanBackwardToDailyBaseline(
             url: url,
             fileSize: fileSize,
             dayStart: countingStart
         )
-        for event in events.reversed() {
+        for record in records.reversed() {
             Self.consume(
-                event,
+                record,
                 previousTotal: &entry.previousTotal,
+                serviceTier: &entry.serviceTier,
                 todayTotal: &entry.todayTotal,
                 hourlyTotals: &entry.hourlyTotals,
+                dailyTotals: &entry.dailyTotals,
+                billedTodayTotal: &entry.billedTodayTotal,
+                billedHourlyTotals: &entry.billedHourlyTotals,
+                billedDailyTotals: &entry.billedDailyTotals,
                 countingStart: countingStart,
                 dayStart: dayStart,
                 nextDayStart: nextDayStart,
                 hourlyRangeStart: hourlyRangeStart,
                 hourlyRangeEnd: hourlyRangeEnd,
+                dailyRangeStart: dailyRangeStart,
                 calendar: calendar
             )
         }
@@ -457,32 +602,59 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     }
 
     private static func consume(
-        _ event: DailyTokenEvent,
+        _ record: DailyUsageRecord,
         previousTotal: inout Int64?,
+        serviceTier: inout String?,
         todayTotal: inout Int64,
         hourlyTotals: inout [Date: Int64],
+        dailyTotals: inout [Date: Int64],
+        billedTodayTotal: inout Int64,
+        billedHourlyTotals: inout [Date: Int64],
+        billedDailyTotals: inout [Date: Int64],
         countingStart: Date,
         dayStart: Date,
         nextDayStart: Date,
         hourlyRangeStart: Date,
         hourlyRangeEnd: Date,
+        dailyRangeStart: Date,
         calendar: Calendar
     ) {
-        let delta: Int64
+        guard case .token(let event) = record else {
+            if case .serviceTier(_, let value) = record {
+                serviceTier = value
+            }
+            return
+        }
+
+        let rawDelta: Int64
         if let previousTotal {
-            if event.totalTokens >= previousTotal {
-                delta = event.totalTokens - previousTotal
+            if event.totalTokens > previousTotal {
+                // A forked or parent task can absorb a child's cumulative
+                // counter between notifications. `last_token_usage` is the
+                // message-level call that belongs to this rollout; using the
+                // whole cumulative jump would count the child twice.
+                rawDelta = max(
+                    0,
+                    event.lastTokens ?? (event.totalTokens - previousTotal)
+                )
+            } else if event.totalTokens < previousTotal {
+                rawDelta = max(0, event.lastTokens ?? event.totalTokens)
             } else {
-                delta = max(0, event.lastTokens ?? event.totalTokens)
+                rawDelta = 0
             }
         } else {
-            delta = max(0, event.lastTokens ?? event.totalTokens)
+            rawDelta = max(0, event.lastTokens ?? event.totalTokens)
         }
         previousTotal = event.totalTokens
+        let billedDelta = budgetWeightedTokens(
+            rawDelta,
+            serviceTier: serviceTier
+        )
 
         guard event.timestamp >= countingStart else { return }
         if event.timestamp >= dayStart, event.timestamp < nextDayStart {
-            todayTotal = clampedAdd(todayTotal, delta)
+            todayTotal = clampedAdd(todayTotal, rawDelta)
+            billedTodayTotal = clampedAdd(billedTodayTotal, billedDelta)
         }
         if event.timestamp >= hourlyRangeStart,
            event.timestamp < hourlyRangeEnd,
@@ -492,9 +664,38 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
            )?.start {
             hourlyTotals[hourStart] = clampedAdd(
                 hourlyTotals[hourStart, default: 0],
-                delta
+                rawDelta
+            )
+            billedHourlyTotals[hourStart] = clampedAdd(
+                billedHourlyTotals[hourStart, default: 0],
+                billedDelta
             )
         }
+        if event.timestamp >= dailyRangeStart,
+           event.timestamp < nextDayStart {
+            let dateStart = calendar.startOfDay(for: event.timestamp)
+            dailyTotals[dateStart] = clampedAdd(
+                dailyTotals[dateStart, default: 0],
+                rawDelta
+            )
+            billedDailyTotals[dateStart] = clampedAdd(
+                billedDailyTotals[dateStart, default: 0],
+                billedDelta
+            )
+        }
+    }
+
+    private static func budgetWeightedTokens(
+        _ tokens: Int64,
+        serviceTier: String?
+    ) -> Int64 {
+        guard tokens > 0 else { return 0 }
+        guard CodexDisplayPolicy.isFastServiceTier(serviceTier) else {
+            return tokens
+        }
+        let weighted = Double(tokens) * CodexDisplayPolicy.fastBudgetMultiplier
+        guard weighted.isFinite else { return Int64.max }
+        return Int64(min(weighted.rounded(), Double(Int64.max)))
     }
 
     private static func emptyHourlyBuckets(
@@ -509,20 +710,61 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         }
     }
 
+    private static func emptyDailyBuckets(
+        startingAt start: Date,
+        count: Int,
+        calendar: Calendar
+    ) -> [DailyUsageBucket] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return (0..<count).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: start).map {
+                DailyUsageBucket(startDate: formatter.string(from: $0), tokens: 0)
+            }
+        }
+    }
+
+    private static func dayDate(_ value: String, calendar: Calendar) -> Date? {
+        let parts = value.split(separator: "-")
+        guard parts.count == 3,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]) else {
+            return nil
+        }
+        return calendar.date(
+            from: DateComponents(year: year, month: month, day: day)
+        ).map { calendar.startOfDay(for: $0) }
+    }
+
     /// Returns newest-to-oldest events, including the first absolute counter
     /// before the requested range as the cumulative baseline.
     private static func scanBackwardToDailyBaseline(
         url: URL,
         fileSize: UInt64,
         dayStart: Date
-    ) throws -> [DailyTokenEvent] {
-        var events: [DailyTokenEvent] = []
+    ) throws -> [DailyUsageRecord] {
+        var records: [DailyUsageRecord] = []
+        var crossedTokenBaseline = false
         try scanLinesBackward(url: url, fileSize: fileSize) { line in
-            guard let event = parseTokenEvent(line) else { return true }
-            events.append(event)
-            return event.timestamp >= dayStart
+            guard let record = parseUsageRecord(line) else { return true }
+            records.append(record)
+            switch record {
+            case .token(let event):
+                if event.timestamp < dayStart {
+                    crossedTokenBaseline = true
+                }
+                return true
+            case .serviceTier(let timestamp, _):
+                // Keep the last setting before the range so the first counted
+                // message receives the tier that was actually active.
+                return !(crossedTokenBaseline && timestamp <= dayStart)
+            }
         }
-        return events
+        return records
     }
 
     private static func scanLinesBackward(
@@ -605,7 +847,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         url: URL,
         from lowerBound: UInt64,
         to upperBound: UInt64,
-        consumeEvent: (DailyTokenEvent) -> Void
+        consumeRecord: (DailyUsageRecord) -> Void
     ) throws {
         guard upperBound > lowerBound else { return }
         let handle = try FileHandle(forReadingFrom: url)
@@ -624,8 +866,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             for byte in chunk {
                 if byte == 0x0A {
                     if !skippingOversizedLine,
-                       let event = parseTokenEvent(line) {
-                        consumeEvent(event)
+                       let record = parseUsageRecord(line) {
+                        consumeRecord(record)
                     }
                     line.removeAll(keepingCapacity: true)
                     skippingOversizedLine = false
@@ -669,6 +911,31 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         )
     }
 
+    private static func parseUsageRecord(_ line: Data) -> DailyUsageRecord? {
+        if let event = parseTokenEvent(line) {
+            return .token(event)
+        }
+        guard line.range(of: Data("service_tier".utf8)) != nil,
+              let object = try? JSONSerialization.jsonObject(with: line) as? JSONObject,
+              let timestampString = object.string("timestamp"),
+              let timestamp = parseTimestamp(timestampString),
+              let payload = object.dictionary("payload") else {
+            return nil
+        }
+
+        let value: String?
+        if object.string("type") == "event_msg",
+           payload.string("type") == "thread_settings_applied" {
+            value = payload.dictionary("thread_settings")?.string("service_tier")
+        } else if object.string("type") == "turn_context" {
+            value = payload.string("service_tier")
+        } else {
+            value = nil
+        }
+        guard let value else { return nil }
+        return .serviceTier(timestamp: timestamp, value: value)
+    }
+
     private static func parseTimestamp(_ value: String) -> Date? {
         fractionalTimestampFormatter.date(from: value)
             ?? timestampFormatter.date(from: value)
@@ -685,10 +952,11 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         var activityStartedAt: Date?
         var isIncluded: Bool
         var isWaitingForActivityBoundary: Bool
-        var subagentBoundarySearchOffset: UInt64?
+        var activityBoundaryKind: ActivityBoundaryKind?
+        var activityBoundarySearchOffset: UInt64?
     }
 
-    private struct SubagentBoundarySearchResult {
+    private struct ActivityBoundarySearchResult {
         var activityStartedAt: Date?
         var nextSearchOffset: UInt64
     }
@@ -710,7 +978,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 activityStartedAt: nil,
                 isIncluded: false,
                 isWaitingForActivityBoundary: false,
-                subagentBoundarySearchOffset: nil
+                activityBoundaryKind: nil,
+                activityBoundarySearchOffset: nil
             )
         }
         guard let object = sessionMetaObject(line),
@@ -720,24 +989,38 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 activityStartedAt: nil,
                 isIncluded: containsLocalUsageSourceMarker(line),
                 isWaitingForActivityBoundary: false,
-                subagentBoundarySearchOffset: nil
+                activityBoundaryKind: nil,
+                activityBoundarySearchOffset: nil
             )
         }
         let isSubagent = isSubagentUsageSession(payload)
-        let boundarySearch = isSubagent
-            ? try firstSubagentActivityBoundary(
+        let boundaryKind: ActivityBoundaryKind?
+        if isSubagent {
+            boundaryKind = .subagent
+        } else if payload.string("forked_from_id") != nil,
+                  let sessionID = payload.string("id")
+                    ?? payload.string("session_id") {
+            boundaryKind = .fork(sessionID: sessionID)
+        } else {
+            boundaryKind = nil
+        }
+        let boundarySearch = try boundaryKind.map {
+            try firstActivityBoundary(
                 url: url,
                 fileSize: fileSize,
+                kind: $0,
                 startingAt: 0
             )
-            : nil
+        }
         let activityStartedAt = boundarySearch?.activityStartedAt
         return LocalUsageSession(
             startedAt: object.string("timestamp").flatMap(parseTimestamp),
             activityStartedAt: activityStartedAt,
             isIncluded: isLocalUsageSession(payload),
-            isWaitingForActivityBoundary: isSubagent && activityStartedAt == nil,
-            subagentBoundarySearchOffset: activityStartedAt == nil
+            isWaitingForActivityBoundary: boundaryKind != nil
+                && activityStartedAt == nil,
+            activityBoundaryKind: boundaryKind,
+            activityBoundarySearchOffset: activityStartedAt == nil
                 ? boundarySearch?.nextSearchOffset
                 : nil
         )
@@ -802,13 +1085,35 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     /// replay from work performed by the child itself. Until the row is fully
     /// committed, the rollout must contribute zero rather than briefly showing
     /// the copied cumulative counters as new usage.
+    private static func firstActivityBoundary(
+        url: URL,
+        fileSize: UInt64,
+        kind: ActivityBoundaryKind,
+        startingAt: UInt64
+    ) throws -> ActivityBoundarySearchResult {
+        switch kind {
+        case .subagent:
+            return try firstSubagentActivityBoundary(
+                url: url,
+                fileSize: fileSize,
+                startingAt: startingAt
+            )
+        case .fork(let sessionID):
+            return try firstForkActivityBoundary(
+                url: url,
+                fileSize: fileSize,
+                sessionID: sessionID
+            )
+        }
+    }
+
     private static func firstSubagentActivityBoundary(
         url: URL,
         fileSize: UInt64,
         startingAt requestedStart: UInt64
-    ) throws -> SubagentBoundarySearchResult {
+    ) throws -> ActivityBoundarySearchResult {
         guard fileSize > 0 else {
-            return SubagentBoundarySearchResult(
+            return ActivityBoundarySearchResult(
                 activityStartedAt: nil,
                 nextSearchOffset: 0
             )
@@ -852,13 +1157,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     ) {
                     case .committed(let line):
                         if let boundary = parseSubagentActivityBoundary(line) {
-                            return SubagentBoundarySearchResult(
+                            return ActivityBoundarySearchResult(
                                 activityStartedAt: boundary,
                                 nextSearchOffset: markerOffset
                             )
                         }
                     case .pending:
-                        return SubagentBoundarySearchResult(
+                        return ActivityBoundarySearchResult(
                             activityStartedAt: nil,
                             nextSearchOffset: markerOffset
                         )
@@ -881,12 +1186,78 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         }
 
         let overlap = UInt64(overlapCount)
-        return SubagentBoundarySearchResult(
+        return ActivityBoundarySearchResult(
             activityStartedAt: nil,
             nextSearchOffset: max(
                 startingAt,
                 fileSize > overlap ? fileSize - overlap : 0
             )
+        )
+    }
+
+    /// A user-created fork also starts with a timestamp-rewritten copy of its
+    /// parent. Codex writes the fork's own `session_meta` again immediately
+    /// before the first real turn; that second matching row is the reliable
+    /// boundary between replayed history and new model calls.
+    private static func firstForkActivityBoundary(
+        url: URL,
+        fileSize: UInt64,
+        sessionID: String
+    ) throws -> ActivityBoundarySearchResult {
+        guard fileSize > 0 else {
+            return ActivityBoundarySearchResult(
+                activityStartedAt: nil,
+                nextSearchOffset: 0
+            )
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var offset: UInt64 = 0
+        var line = Data()
+        var skippingOversizedLine = false
+        var hasSeenInitialSessionMeta = false
+        while offset < fileSize {
+            let readCount = min(chunkSize, Int(fileSize - offset))
+            let chunk = try handle.read(upToCount: readCount) ?? Data()
+            guard !chunk.isEmpty else { break }
+            offset += UInt64(chunk.count)
+
+            for byte in chunk {
+                if byte == 0x0A {
+                    if !skippingOversizedLine,
+                       let object = sessionMetaObject(line),
+                       let payload = object.dictionary("payload"),
+                       (payload.string("id")
+                            ?? payload.string("session_id")) == sessionID {
+                        if hasSeenInitialSessionMeta,
+                           let timestamp = object.string("timestamp")
+                            .flatMap(parseTimestamp) {
+                            return ActivityBoundarySearchResult(
+                                activityStartedAt: timestamp,
+                                nextSearchOffset: offset
+                            )
+                        }
+                        hasSeenInitialSessionMeta = true
+                    }
+                    line.removeAll(keepingCapacity: true)
+                    skippingOversizedLine = false
+                } else if !skippingOversizedLine {
+                    if line.count < maximumSessionMetaSize {
+                        line.append(byte)
+                    } else {
+                        line.removeAll(keepingCapacity: false)
+                        skippingOversizedLine = true
+                    }
+                }
+            }
+        }
+
+        // Rescan from the beginning after an append so the initial matching
+        // metadata row is still available to distinguish from the boundary.
+        return ActivityBoundarySearchResult(
+            activityStartedAt: nil,
+            nextSearchOffset: 0
         )
     }
 

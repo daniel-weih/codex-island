@@ -6,6 +6,7 @@ enum CodexDisplayPolicy {
     static let recentThreadLimit = 3
     static let recentThreadFetchLimit = 12
     static let usageHabitDayCount = 7
+    static let fastBudgetMultiplier = 2.5
     static let resetCreditExpiryWarningInterval: TimeInterval = 7 * 24 * 60 * 60
 
     /// Keeps active work visible when the compact dashboard has fewer rows than
@@ -56,9 +57,10 @@ enum CodexDisplayPolicy {
         return interval >= 0 && interval <= resetCreditExpiryWarningInterval
     }
 
-    /// Compares actual quota use with a perfectly even burn through the current
-    /// reset window. The difference is relative to the expected use at this point
-    /// in the cycle, so 30% used versus 20% elapsed is 50% ahead of pace.
+    /// Produces a human-facing capacity warning rather than treating every
+    /// above-average burst as an emergency. Remaining quota is the primary
+    /// gate; projected runway only raises an alert once capacity is genuinely
+    /// low enough that the user may need to change behavior.
     static func quotaConsumptionPace(
         window: RateLimitWindow?,
         now: Date = Date()
@@ -77,26 +79,48 @@ enum CodexDisplayPolicy {
         let elapsedPercent = now.timeIntervalSince(lastResetAt) / duration * 100
         guard elapsedPercent > 0 else { return nil }
         let usedPercent = min(100, max(0, window.usedPercent))
+        let remainingPercent = 100 - usedPercent
         let relativeDifferencePercent = (
             usedPercent / elapsedPercent - 1
         ) * 100
+        let projectedUsedPercentAtReset = usedPercent / elapsedPercent * 100
+        let projectedRemainingPercentAtReset = max(
+            0,
+            100 - projectedUsedPercentAtReset
+        )
+        let remainingCyclePercent = 100 - elapsedPercent
+        let timeNeededPercentOfCycle = usedPercent > 0
+            ? remainingPercent * elapsedPercent / usedPercent
+            : .infinity
+        let runwayCoverageRatio = remainingCyclePercent > 0
+            ? timeNeededPercentOfCycle / remainingCyclePercent
+            : .infinity
         let pace: QuotaConsumptionPace
 
-        if relativeDifferencePercent < -10 {
-            pace = .slow
-        } else if relativeDifferencePercent <= 10 {
-            pace = .normal
-        } else if relativeDifferencePercent <= 25 {
-            pace = .warning
-        } else {
+        // Do not call a fresh-cycle burst an emergency while most capacity is
+        // still available. Warning states require both low remaining quota and
+        // insufficient projected runway, with a safety margin to avoid flapping.
+        if remainingPercent <= 15, runwayCoverageRatio < 0.85 {
             pace = .critical
+        } else if remainingPercent <= 25, runwayCoverageRatio < 0.5 {
+            pace = .critical
+        } else if remainingPercent <= 35, runwayCoverageRatio < 0.85 {
+            pace = .warning
+        } else if elapsedPercent >= 20,
+                  projectedRemainingPercentAtReset >= 20 {
+            pace = .slow
+        } else {
+            pace = .normal
         }
 
         return QuotaConsumptionPaceAssessment(
             pace: pace,
             usedPercent: usedPercent,
+            remainingPercent: remainingPercent,
             elapsedPercent: elapsedPercent,
             relativeDifferencePercent: relativeDifferencePercent,
+            projectedRemainingPercentAtReset: projectedRemainingPercentAtReset,
+            runwayCoverageRatio: runwayCoverageRatio,
             lastResetAt: lastResetAt,
             nextResetAt: resetsAt
         )
@@ -160,9 +184,21 @@ enum CodexDisplayPolicy {
         guard historicalTokens > 0 else { return nil }
         let averageDailyTokens = historicalTokens / Double(usageHabitDayCount)
         let windowDays = Double(durationMinutes) / (24 * 60)
-        let estimate = averageDailyTokens * windowDays * remainingPercent / 100
+        let estimate = averageDailyTokens
+            * windowDays
+            * remainingPercent
+            / 100
         guard estimate.isFinite, estimate > 0 else { return nil }
         return Int64(min(estimate.rounded(), Double(Int64.max)))
+    }
+
+    static func isFastServiceTier(_ serviceTier: String?) -> Bool {
+        guard let normalized = serviceTier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() else {
+            return false
+        }
+        return normalized == "priority" || normalized == "fast"
     }
 
     static func displayModelName(_ rawValue: String) -> String {
@@ -371,8 +407,11 @@ enum QuotaRemainingLevel: Equatable, Sendable {
 struct QuotaConsumptionPaceAssessment: Equatable, Sendable {
     var pace: QuotaConsumptionPace
     var usedPercent: Double
+    var remainingPercent: Double
     var elapsedPercent: Double
     var relativeDifferencePercent: Double
+    var projectedRemainingPercentAtReset: Double
+    var runwayCoverageRatio: Double
     var lastResetAt: Date
     var nextResetAt: Date
 }
@@ -522,6 +561,12 @@ struct CodexSnapshot: Equatable {
     /// Local model-call Token increments for the last 48 clock hours,
     /// including the current partial hour.
     var hourlyThreadTokens: [HourlyUsageBucket] = []
+    /// Local message-level Token increments for the last 30 calendar days.
+    var dailyThreadTokens: [DailyUsageBucket] = []
+    /// The same local activity after Fast calls are billed at 2.5x.
+    var billedTodayThreadTokens: Int64? = nil
+    var billedHourlyThreadTokens: [HourlyUsageBucket] = []
+    var billedDailyThreadTokens: [DailyUsageBucket] = []
     /// Compact-island activity state. This intentionally differs from the
     /// expanded header's app-server connection indicator.
     var hasRunningSession: Bool = false
