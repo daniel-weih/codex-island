@@ -8,31 +8,17 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 
 ## 界面预览
 
-### 展开态
-
-![Codex Island 展开态总览](docs/images/ui/dashboard.png)
-
-> 截图由内置离屏预览生成，其中的额度、词元、套餐、日期和会话内容均为演示数据。`≈ … 词元` 是根据最近 7 个完整自然日、当前额度周期长度和剩余比例计算的个性化估算值，不是 Codex 官方返回的精确词元额度。
-
 ### 收起态
 
 | 静默状态 | Token 消耗中 |
 | :---: | :---: |
 | ![Codex Island 收起态](docs/images/ui/compact.png) | ![Codex Island Token 消耗动效状态](docs/images/ui/compact-consuming.png) |
 
-### 悬停明细
+### 展开态
 
-**重置次数到期时间**
+![Codex Island 展开态总览](docs/images/ui/dashboard.png)
 
-![Codex Island 重置次数到期时间悬浮卡片](docs/images/ui/reset-expirations.png)
-
-**会话 Token 明细**
-
-![Codex Island 会话 Token 明细悬浮卡片](docs/images/ui/token-details.png)
-
-**实际用量与 ⚡ 模式等效用量**
-
-![Codex Island 用量序列说明](docs/images/ui/chart-legend.png)
+> 截图由内置离屏预览生成，其中的额度、词元、套餐、日期和会话内容均为演示数据。`≈ … 词元` 是根据最近 7 个完整自然日、当前额度周期长度和剩余比例计算的个性化估算值，不是 Codex 官方返回的精确词元额度。
 
 ### 设置
 
