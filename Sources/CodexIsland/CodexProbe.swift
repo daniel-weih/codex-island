@@ -35,7 +35,10 @@ enum CodexProbe {
 
             if let localPaths = try? CodexDailyTokenUsageReader.discoverLocalUsageRollouts(),
                let localUsage = try? CodexDailyTokenUsageReader.readRecentHours(
-                from: localPaths
+                from: localPaths,
+                usesChatGPTCredits: account.authType?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == "chatgpt"
                ) {
                 let populatedDays = localUsage.dailyBuckets.filter { $0.tokens > 0 }
                 print("local_daily_buckets=\(populatedDays.count)/\(localUsage.dailyBuckets.count)")

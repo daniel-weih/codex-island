@@ -76,6 +76,35 @@ enum IslandHeaderAction: Sendable {
     case quit
 }
 
+enum TokenChartLegendKind: String, Equatable, Sendable {
+    case actual
+    case modeEquivalent
+
+    func title(for language: IslandInterfaceLanguage) -> String {
+        switch self {
+        case .actual:
+            return language.text("实际", "Actual")
+        case .modeEquivalent:
+            return language.text("⚡等效", "⚡ Equivalent")
+        }
+    }
+
+    func explanation(for language: IslandInterfaceLanguage) -> String {
+        switch self {
+        case .actual:
+            return language.text(
+                "模型的实际词元用量，开启或关闭 Fast 模式都相同。",
+                "The number of tokens processed by the model. Fast mode does not change this value."
+            )
+        case .modeEquivalent:
+            return language.text(
+                "开启 Fast 不会改变实际词元用量，但会更快消耗额度。该数值综合考虑对应模型的 Fast 额度倍率，估算关闭 Fast 时的等效词元用量。",
+                "Fast mode does not change actual token usage, but it consumes usage limits faster. This value applies the model's Fast usage multiplier to estimate equivalent usage with Fast mode off."
+            )
+        }
+    }
+}
+
 private func activityIndicatorOffset(
     rowWidth: CGFloat,
     bucketCount: Int
@@ -137,12 +166,14 @@ private enum IslandPopoverContent: Equatable {
     case token(threadID: String, rank: Int, usage: ThreadTokenUsage)
     case context(threadID: String, rank: Int, usage: ThreadTokenUsage?)
     case reset(ResetCreditSummary)
+    case chartLegend(TokenChartLegendKind)
 
     var identity: String {
         switch self {
         case .token(let threadID, _, _): return "token-\(threadID)"
         case .context(let threadID, _, _): return "context-\(threadID)"
         case .reset: return "reset"
+        case .chartLegend(let kind): return "chart-legend-\(kind.rawValue)"
         }
     }
 
@@ -155,6 +186,8 @@ private enum IslandPopoverContent: Equatable {
                 for: summary,
                 language: language
             )
+        case .chartLegend(let kind):
+            return TokenChartLegendPopover.size(for: kind, language: language)
         }
     }
 }
@@ -281,6 +314,56 @@ private func islandCursorTooltipPlacement(
     )
 }
 
+private func islandChartLegendPopoverPlacement(
+    pointer: CGPoint,
+    popoverSize: CGSize,
+    canvasSize: CGSize,
+    displayScale: CGFloat,
+    margin: CGFloat = 7,
+    cursorGap: CGFloat = 6
+) -> IslandPopoverPlacement {
+    guard canvasSize.width > 0, canvasSize.height > 0 else {
+        return IslandPopoverPlacement(center: pointer, scale: 1)
+    }
+
+    let cursor = NSCursor.current
+    let cursorSize = cursor.image.size
+    let hotSpot = cursor.hotSpot
+    let cursorTop = pointer.y - min(max(0, hotSpot.y), cursorSize.height)
+    let cursorBottom = cursorTop + max(0, cursorSize.height)
+    let belowCenter = cursorBottom + cursorGap + popoverSize.height / 2
+    let aboveCenter = cursorTop - cursorGap - popoverSize.height / 2
+    let canFitBelow = belowCenter + popoverSize.height / 2
+        <= canvasSize.height - margin
+    let desiredY = canFitBelow ? belowCenter : aboveCenter
+
+    func clamp(_ value: CGFloat, lower: CGFloat, upper: CGFloat) -> CGFloat {
+        guard lower <= upper else { return (lower + upper) / 2 }
+        return min(upper, max(lower, value))
+    }
+
+    let center = CGPoint(
+        x: clamp(
+            pointer.x,
+            lower: margin + popoverSize.width / 2,
+            upper: canvasSize.width - margin - popoverSize.width / 2
+        ),
+        y: clamp(
+            desiredY,
+            lower: margin + popoverSize.height / 2,
+            upper: canvasSize.height - margin - popoverSize.height / 2
+        )
+    )
+    let scale = max(1, displayScale)
+    return IslandPopoverPlacement(
+        center: CGPoint(
+            x: (center.x * scale).rounded() / scale,
+            y: (center.y * scale).rounded() / scale
+        ),
+        scale: 1
+    )
+}
+
 private func islandDefaultTokenPopoverPointer(rank: Int, canvasSize: CGSize) -> CGPoint {
     let rowsTop = canvasSize.height
         - IslandLayout.expandedBottomPadding
@@ -313,6 +396,18 @@ private func islandDefaultResetPopoverPointer(
         y: IslandLayout.expandedHeaderHeight(
             forTopRegionHeight: topRegionHeight
         ) + 63
+    )
+}
+
+private func islandDefaultChartLegendPopoverPointer(
+    topRegionHeight: CGFloat,
+    canvasSize: CGSize
+) -> CGPoint {
+    CGPoint(
+        x: canvasSize.width * 0.69,
+        y: IslandLayout.expandedHeaderHeight(
+            forTopRegionHeight: topRegionHeight
+        ) + 105
     )
 }
 
@@ -427,6 +522,7 @@ struct IslandView: View {
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
+        initialHoveredChartLegend: TokenChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
@@ -487,6 +583,11 @@ struct IslandView: View {
                   let summary = viewModel.snapshot.resetCredits {
             self.initialPopover = IslandPopoverPresentation(
                 content: .reset(summary),
+                pointer: nil
+            )
+        } else if let initialHoveredChartLegend {
+            self.initialPopover = IslandPopoverPresentation(
+                content: .chartLegend(initialHoveredChartLegend),
                 pointer: nil
             )
         } else {
@@ -611,13 +712,14 @@ struct IslandView: View {
                         for: displayedPopover.content,
                         canvasSize: canvasSize
                     )
-                let placement = islandPopoverPlacement(
+                let popoverSize = displayedPopover.content.size(
+                    for: interfaceLanguage
+                )
+                let placement = popoverPlacement(
+                    for: displayedPopover.content,
                     pointer: pointer,
-                    popoverSize: displayedPopover.content.size(
-                        for: interfaceLanguage
-                    ),
-                    canvasSize: canvasSize,
-                    displayScale: displayScale
+                    popoverSize: popoverSize,
+                    canvasSize: canvasSize
                 )
 
                 popoverView(for: displayedPopover.content)
@@ -627,6 +729,28 @@ struct IslandView: View {
             }
         }
         .allowsHitTesting(false)
+    }
+
+    private func popoverPlacement(
+        for content: IslandPopoverContent,
+        pointer: CGPoint,
+        popoverSize: CGSize,
+        canvasSize: CGSize
+    ) -> IslandPopoverPlacement {
+        if case .chartLegend = content {
+            return islandChartLegendPopoverPlacement(
+                pointer: pointer,
+                popoverSize: popoverSize,
+                canvasSize: canvasSize,
+                displayScale: displayScale
+            )
+        }
+        return islandPopoverPlacement(
+            pointer: pointer,
+            popoverSize: popoverSize,
+            canvasSize: canvasSize,
+            displayScale: displayScale
+        )
     }
 
     private func headerTooltipLayer(canvasSize: CGSize) -> some View {
@@ -726,6 +850,8 @@ struct IslandView: View {
             ContextWindowPopover(usage: usage)
         case .reset(let summary):
             ResetExpirationPopover(summary: summary)
+        case .chartLegend(let kind):
+            TokenChartLegendPopover(kind: kind)
         }
     }
 
@@ -746,6 +872,11 @@ struct IslandView: View {
             )
         case .reset:
             return islandDefaultResetPopoverPointer(
+                topRegionHeight: displayGeometry.topRegionHeight,
+                canvasSize: canvasSize
+            )
+        case .chartLegend:
+            return islandDefaultChartLegendPopoverPointer(
                 topRegionHeight: displayGeometry.topRegionHeight,
                 canvasSize: canvasSize
             )
@@ -1301,6 +1432,13 @@ struct IslandView: View {
             onResetHoverChange: { hovering, pointer in
                 updateResetHover(hovering: hovering, pointer: pointer)
             },
+            onLegendHoverChange: { kind, hovering, pointer in
+                updateChartLegendHover(
+                    kind: kind,
+                    hovering: hovering,
+                    pointer: pointer
+                )
+            },
             chartRange: $tokenChartRange,
             planLabel: CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: viewModel.snapshot.account.planType,
@@ -1407,12 +1545,12 @@ struct IslandView: View {
         let lifetime: String
         if let tokens = viewModel.snapshot.usage.lifetimeTokens {
             lifetime = interfaceLanguage.text(
-                "累计 Token \(exactTokenCount(tokens))",
+                "累计词元 \(exactTokenCount(tokens))",
                 "Total tokens \(exactTokenCount(tokens))"
             )
         } else {
             lifetime = interfaceLanguage.text(
-                "累计 Token 尚未同步",
+                "累计词元尚未同步",
                 "Total tokens not yet synced"
             )
         }
@@ -1431,7 +1569,7 @@ struct IslandView: View {
             )
         guard let tokens = viewModel.snapshot.todayThreadTokens else {
             return interfaceLanguage.text(
-                "\(state)，今日会话 Token 用量暂不可用",
+                "\(state)，今日会话词元用量暂不可用",
                 "\(state). Today's session token usage is unavailable"
             )
         }
@@ -1440,7 +1578,7 @@ struct IslandView: View {
             number: .decimal
         )
         return interfaceLanguage.text(
-            "\(state)，今日会话 Token 用量 \(exactTokens)",
+            "\(state)，今日会话词元用量 \(exactTokens)",
             "\(state). Today's session token usage is \(exactTokens)"
         )
     }
@@ -1519,6 +1657,24 @@ struct IslandView: View {
                 )
             )
         } else if case .reset = activePopover?.content {
+            hidePopover()
+        }
+    }
+
+    private func updateChartLegendHover(
+        kind: TokenChartLegendKind,
+        hovering: Bool,
+        pointer: CGPoint?
+    ) {
+        if hovering, let pointer {
+            showPopover(
+                IslandPopoverPresentation(
+                    content: .chartLegend(kind),
+                    pointer: pointer
+                )
+            )
+        } else if case .chartLegend(let activeKind) = activePopover?.content,
+                  activeKind == kind {
             hidePopover()
         }
     }
@@ -3064,14 +3220,14 @@ private struct ThreadFastStatusIconView: View {
 
     private var fastColor: Color {
         guard let tier = thread.serviceTier?.lowercased() else {
-            return .white.opacity(0.17)
+            return .white.opacity(0.08)
         }
         let isFast = tier == "priority" || tier == "fast"
         let isInferred = thread.serviceTierSource == .effectiveConfig
         if isFast {
             return theme.accent.opacity(isInferred ? 0.62 : 0.94)
         }
-        return .white.opacity(isInferred ? 0.20 : 0.28)
+        return .white.opacity(isInferred ? 0.08 : 0.12)
     }
 
     private var fastHelp: String {
@@ -3157,7 +3313,7 @@ private struct TokenUsageDetailPopover: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack(spacing: 4) {
-                Text(language.text("累计 TOKEN", "TOTAL TOKEN"))
+                Text(language.text("累计词元", "TOTAL TOKENS"))
                     .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .tracking(0.25)
                     .foregroundStyle(.white.opacity(0.38))
@@ -3316,9 +3472,104 @@ private struct ContextWindowPopover: View {
         _ values: (used: Int64, window: Int64)
     ) -> String {
         language.text(
-            "已使用 \(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) Token",
+            "已使用 \(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) 词元",
             "\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) tokens used"
         )
+    }
+}
+
+private struct TokenChartLegendPopover: View {
+    private static let horizontalPadding: CGFloat = 11
+    private static let verticalPadding: CGFloat = 9
+
+    let kind: TokenChartLegendKind
+
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
+
+    static func size(
+        for kind: TokenChartLegendKind,
+        language: IslandInterfaceLanguage
+    ) -> CGSize {
+        switch (kind, language) {
+        case (.actual, .chinese):
+            return CGSize(width: 272, height: 68)
+        case (.actual, .english):
+            return CGSize(width: 314, height: 72)
+        case (.modeEquivalent, .chinese):
+            return CGSize(width: 344, height: 86)
+        case (.modeEquivalent, .english):
+            return CGSize(width: 358, height: 100)
+        }
+    }
+
+    var body: some View {
+        let popoverSize = Self.size(for: kind, language: language)
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TokenChartLegendMarker(
+                    kind: kind,
+                    color: markerColor,
+                    isVisible: true,
+                    width: 5,
+                    height: 10
+                )
+
+                Text(kind.title(for: language))
+                    .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
+                    .foregroundStyle(titleColor)
+                    .lineLimit(1)
+            }
+
+            Text(kind.explanation(for: language))
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, Self.horizontalPadding)
+        .padding(.vertical, Self.verticalPadding)
+        .frame(
+            width: popoverSize.width,
+            height: popoverSize.height,
+            alignment: .topLeading
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color(red: 0.018, green: 0.020, blue: 0.026))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(0.12),
+                    lineWidth: 1 / max(1, displayScale)
+                )
+        )
+        .shadow(color: .black.opacity(0.52), radius: 8, y: 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(kind.title(for: language))，\(kind.explanation(for: language))"
+        )
+    }
+
+    private var markerColor: Color {
+        switch kind {
+        case .actual:
+            return theme.accent.opacity(0.78)
+        case .modeEquivalent:
+            return theme.accent.opacity(0.90)
+        }
+    }
+
+    private var titleColor: Color {
+        switch kind {
+        case .actual:
+            return .white.opacity(0.82)
+        case .modeEquivalent:
+            return theme.accent.opacity(0.92)
+        }
     }
 }
 
@@ -3352,6 +3603,7 @@ private struct AccountActivityCard: View {
     let window: RateLimitWindow?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
+    let onLegendHoverChange: (TokenChartLegendKind, Bool, CGPoint?) -> Void
     let planLabel: String?
 
     @Environment(\.displayScale) private var displayScale
@@ -3378,6 +3630,11 @@ private struct AccountActivityCard: View {
         window: RateLimitWindow?,
         resetSummary: ResetCreditSummary?,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
+        onLegendHoverChange: @escaping (
+            TokenChartLegendKind,
+            Bool,
+            CGPoint?
+        ) -> Void,
         chartRange: Binding<TokenChartRange>,
         planLabel: String?
     ) {
@@ -3392,6 +3649,7 @@ private struct AccountActivityCard: View {
         self.window = window
         self.resetSummary = resetSummary
         self.onResetHoverChange = onResetHoverChange
+        self.onLegendHoverChange = onLegendHoverChange
         self.planLabel = planLabel
         _avatarImage = State(initialValue: identity.avatarData.flatMap(NSImage.init(data:)))
         _chartRange = chartRange
@@ -3588,12 +3846,12 @@ private struct AccountActivityCard: View {
         if chartRange == .hours48 {
             if hourlyUsage.allSatisfy({ $0.tokens == 0 }) {
                 return language.text(
-                    "近48小时暂无 Token 使用",
+                    "近48小时暂无词元使用",
                     "No tokens in the last 48 hours"
                 )
             }
             return language.text(
-                "近48小时 Token",
+                "近48小时词元",
                 "Hourly tokens · last 48 hours"
             )
         }
@@ -3607,12 +3865,12 @@ private struct AccountActivityCard: View {
         }
         if usage.dailyUsageBuckets.isEmpty && (todayTokens ?? 0) == 0 {
             return language.text(
-                "近30天暂无 Token 使用",
+                "近30天暂无词元使用",
                 "No token usage in the last 30 days"
             )
         }
         return language.text(
-            "近30天 Token",
+            "近30天用量",
             "Daily tokens · last 30 days"
         )
     }
@@ -3658,15 +3916,15 @@ private struct AccountActivityCard: View {
     private var chartLegend: some View {
         HStack(spacing: 7) {
             chartLegendItem(
-                color: .white.opacity(0.42),
-                text: language.text("实际", "Actual"),
+                kind: .actual,
+                color: theme.accent.opacity(0.78),
                 isVisible: showsActual
             ) {
                 toggleActualSeries()
             }
             chartLegendItem(
+                kind: .modeEquivalent,
                 color: theme.accent.opacity(0.86),
-                text: language.text("计费", "Billed"),
                 isVisible: showsBilled
             ) {
                 toggleBilledSeries()
@@ -3676,32 +3934,40 @@ private struct AccountActivityCard: View {
     }
 
     private func chartLegendItem(
+        kind: TokenChartLegendKind,
         color: Color,
-        text: String,
         isVisible: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(isVisible ? color : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .strokeBorder(color.opacity(isVisible ? 0 : 0.46), lineWidth: 1)
-                    )
-                    .frame(width: 5, height: 8)
-                Text(text)
+                TokenChartLegendMarker(
+                    kind: kind,
+                    color: color,
+                    isVisible: isVisible,
+                    width: 5,
+                    height: 8
+                )
+                Text(kind.title(for: language))
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(isVisible ? 0.38 : 0.18))
             }
+            .frame(height: 20)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(
-            isVisible
-                ? language.text("隐藏\(text) Token", "Hide \(text.lowercased()) tokens")
-                : language.text("显示\(text) Token", "Show \(text.lowercased()) tokens")
-        )
+        .onContinuousHover(
+            coordinateSpace: .named(IslandCoordinateSpace.name)
+        ) { phase in
+            switch phase {
+            case .active(let location):
+                onLegendHoverChange(kind, true, location)
+            case .ended:
+                onLegendHoverChange(kind, false, nil)
+            }
+        }
+        .accessibilityLabel(kind.title(for: language))
+        .accessibilityHint(kind.explanation(for: language))
     }
 
     private func toggleActualSeries() {
@@ -3892,19 +4158,146 @@ enum TokenChartRange {
     }
 }
 
+private enum TokenChartBarStyle {
+    case solid
+    case marker(seed: UInt64)
+}
+
+private enum TokenChartSegmentPosition {
+    case whole
+    case top
+    case bottom
+}
+
+private struct TokenChartSegmentShape: Shape {
+    let position: TokenChartSegmentPosition
+
+    func path(in rect: CGRect) -> Path {
+        guard rect.width > 0, rect.height > 0 else { return Path() }
+
+        switch position {
+        case .whole:
+            return Path(
+                roundedRect: rect,
+                cornerRadius: min(rect.width, rect.height) / 2
+            )
+        case .top:
+            let radius = min(rect.width / 2, rect.height)
+            var path = Path()
+            path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.minX + radius, y: rect.minY),
+                control: CGPoint(x: rect.minX, y: rect.minY)
+            )
+            path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.maxX, y: rect.minY + radius),
+                control: CGPoint(x: rect.maxX, y: rect.minY)
+            )
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            path.closeSubpath()
+            return path
+        case .bottom:
+            let radius = min(rect.width / 2, rect.height)
+            var path = Path()
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+                control: CGPoint(x: rect.maxX, y: rect.maxY)
+            )
+            path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+            path.addQuadCurve(
+                to: CGPoint(x: rect.minX, y: rect.maxY - radius),
+                control: CGPoint(x: rect.minX, y: rect.maxY)
+            )
+            path.closeSubpath()
+            return path
+        }
+    }
+}
+
+private struct TokenChartSketchRandom {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
+    }
+
+    mutating func signed(_ amplitude: CGFloat) -> CGFloat {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        value ^= value >> 31
+        let unit = CGFloat(value & 0xFFFF) / CGFloat(UInt16.max)
+        return ((unit * 2) - 1) * amplitude
+    }
+}
+
+private func tokenChartSketchSeed(_ value: String) -> UInt64 {
+    value.utf8.reduce(0xcbf2_9ce4_8422_2325) { hash, byte in
+        (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01B3
+    }
+}
+
+private func tokenChartSketchSeed(_ hourStart: Date) -> UInt64 {
+    let hour = Int64(floor(hourStart.timeIntervalSince1970 / 3_600))
+    return UInt64(bitPattern: hour) &* 0x9E37_79B9_7F4A_7C15
+}
+
+private struct TokenChartLegendMarker: View {
+    let kind: TokenChartLegendKind
+    let color: Color
+    let isVisible: Bool
+    let width: CGFloat
+    let height: CGFloat
+
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        ZStack {
+            if isVisible {
+                TokenChartSlimBar(
+                    height: height,
+                    width: width,
+                    color: color,
+                    isEmpty: false,
+                    style: kind == .actual
+                        ? .solid
+                        : .marker(seed: tokenChartSketchSeed("legend"))
+                )
+            } else {
+                RoundedRectangle(cornerRadius: width / 2, style: .continuous)
+                    .strokeBorder(
+                        color.opacity(0.46),
+                        lineWidth: 1 / max(1, displayScale)
+                    )
+                    .frame(width: width, height: height)
+            }
+        }
+        .frame(width: width, height: height)
+    }
+}
+
 private struct TokenChartSlimBar: View {
     let height: CGFloat
     let width: CGFloat
     let color: Color
     let isEmpty: Bool
+    var style: TokenChartBarStyle = .solid
+    var segmentPosition: TokenChartSegmentPosition = .whole
 
+    @Environment(\.displayScale) private var displayScale
+
+    @ViewBuilder
     var body: some View {
-        ZStack(alignment: .bottom) {
-            if !isEmpty {
-                RoundedRectangle(
-                    cornerRadius: width / 2,
-                    style: .continuous
-                )
+        if !isEmpty {
+            switch style {
+            case .solid:
+                TokenChartSegmentShape(position: segmentPosition)
                 .fill(
                     LinearGradient(
                         colors: [color, color.opacity(0.58)],
@@ -3913,8 +4306,134 @@ private struct TokenChartSlimBar: View {
                     )
                 )
                 .frame(width: width, height: height)
+            case .marker(let seed):
+                Canvas(opaque: false, colorMode: .linear) { context, size in
+                    drawMarkerBar(
+                        context: &context,
+                        size: size,
+                        seed: seed
+                    )
+                }
+                .frame(width: width, height: height)
             }
         }
+    }
+
+    private func drawMarkerBar(
+        context: inout GraphicsContext,
+        size: CGSize,
+        seed: UInt64
+    ) {
+        guard size.width > 0, size.height > 0 else { return }
+
+        let pixel = 1 / max(1, displayScale)
+        var random = TokenChartSketchRandom(seed: seed)
+        let baseInset = max(
+            pixel / 2,
+            min(0.42, size.width * 0.08)
+        )
+        let baseRect = CGRect(
+            x: baseInset,
+            y: baseInset,
+            width: max(pixel, size.width - (baseInset * 2)),
+            height: max(pixel, size.height - (baseInset * 2))
+        )
+        let silhouette = TokenChartSegmentShape(
+            position: segmentPosition
+        ).path(in: baseRect)
+
+        // A transparent body with two slightly misregistered outlines stays
+        // legible at menu-bar scale while retaining a restrained hand-drawn
+        // character. The silhouette still preserves the exact data height.
+        context.fill(silhouette, with: .color(color.opacity(0.075)))
+
+        let primaryWidth = max(pixel, min(0.82, size.width * 0.18))
+        let secondaryWidth = max(pixel, min(0.58, size.width * 0.13))
+        let maximumOffset = min(0.20, size.width * 0.04)
+        let topOffset = min(0.22, size.height * 0.018)
+
+        for pass in 0..<2 {
+            let xOffset = random.signed(maximumOffset)
+            let yOffset = pass == 0
+                ? max(0, random.signed(topOffset))
+                : max(0, random.signed(topOffset * 0.75))
+            let passInset = baseInset + CGFloat(pass) * min(0.10, pixel / 2)
+            let rect = CGRect(
+                x: max(0, passInset + xOffset),
+                y: passInset + yOffset,
+                width: max(
+                    pixel,
+                    size.width - (passInset * 2) - abs(xOffset)
+                ),
+                height: max(
+                    pixel,
+                    size.height - (passInset * 2) - yOffset
+                )
+            )
+            let outline = TokenChartSegmentShape(
+                position: segmentPosition
+            ).path(in: rect)
+            context.stroke(
+                outline,
+                with: .color(color.opacity(pass == 0 ? 0.72 : 0.30)),
+                style: StrokeStyle(
+                    lineWidth: pass == 0 ? primaryWidth : secondaryWidth,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+        }
+    }
+}
+
+private struct TokenChartCombinedBar: View {
+    let actualHeight: CGFloat
+    let billedHeight: CGFloat
+    let width: CGFloat
+    let color: Color
+    let showsActual: Bool
+    let showsBilled: Bool
+    let isHovered: Bool
+    let seed: UInt64
+
+    private var visibleActualHeight: CGFloat {
+        showsActual ? max(0, actualHeight) : 0
+    }
+
+    private var equivalentSegmentHeight: CGFloat {
+        guard showsBilled else { return 0 }
+        if showsActual {
+            return max(0, billedHeight - visibleActualHeight)
+        }
+        return max(0, billedHeight)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if equivalentSegmentHeight > 0 {
+                TokenChartSlimBar(
+                    height: equivalentSegmentHeight,
+                    width: width,
+                    color: color,
+                    isEmpty: false,
+                    style: .marker(seed: seed),
+                    segmentPosition: visibleActualHeight > 0 ? .top : .whole
+                )
+                .opacity(isHovered ? 1 : 0.92)
+            }
+
+            if visibleActualHeight > 0 {
+                TokenChartSlimBar(
+                    height: visibleActualHeight,
+                    width: width,
+                    color: color,
+                    isEmpty: false,
+                    segmentPosition: equivalentSegmentHeight > 0 ? .bottom : .whole
+                )
+                .opacity(isHovered ? 0.98 : 0.76)
+            }
+        }
+        .frame(width: width, alignment: .bottom)
     }
 }
 
@@ -3966,28 +4485,16 @@ private struct DailyTokenActivityChart: View {
                         ZStack(alignment: .bottom) {
                             Color.clear
 
-                            HStack(alignment: .bottom, spacing: 1) {
-                                if showsActual {
-                                    TokenChartSlimBar(
-                                        height: actualHeight,
-                                        width: showsBilled
-                                            ? (isHovered ? 4.5 : 3.5)
-                                            : (isHovered ? 6.5 : 5.5),
-                                        color: .white.opacity(isHovered ? 0.62 : 0.38),
-                                        isEmpty: bucket.tokens == 0
-                                    )
-                                }
-                                if showsBilled {
-                                    TokenChartSlimBar(
-                                        height: billedHeight,
-                                        width: showsActual
-                                            ? (isHovered ? 5.5 : 4.5)
-                                            : (isHovered ? 6.5 : 5.5),
-                                        color: theme.accent.opacity(isHovered ? 0.92 : 0.72),
-                                        isEmpty: billedTokens == 0
-                                    )
-                                }
-                            }
+                            TokenChartCombinedBar(
+                                actualHeight: actualHeight,
+                                billedHeight: billedHeight,
+                                width: 6.25,
+                                color: theme.accent,
+                                showsActual: showsActual,
+                                showsBilled: showsBilled,
+                                isHovered: isHovered,
+                                seed: tokenChartSketchSeed(bucket.startDate)
+                            )
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -4010,19 +4517,19 @@ private struct DailyTokenActivityChart: View {
         let date = shortUsageDate(bucket.startDate, language: language)
         if showsActual && showsBilled {
             return language.text(
-                "\(date)：实际 \(exactTokenCount(bucket.tokens)) Token；计费 \(exactTokenCount(billedTokens)) Token",
-                "\(date): Actual \(exactTokenCount(bucket.tokens)) Token; billed \(exactTokenCount(billedTokens)) Token"
+                "\(date)：实际消耗 \(exactTokenCount(bucket.tokens)) 词元；⚡模式等效 \(exactTokenCount(billedTokens)) 词元",
+                "\(date): Actual usage \(exactTokenCount(bucket.tokens)) tokens; mode equivalent \(exactTokenCount(billedTokens)) tokens"
             )
         }
         if showsActual {
             return language.text(
-                "\(date)：实际 \(exactTokenCount(bucket.tokens)) Token",
-                "\(date): Actual \(exactTokenCount(bucket.tokens)) Token"
+                "\(date)：实际消耗 \(exactTokenCount(bucket.tokens)) 词元",
+                "\(date): Actual usage \(exactTokenCount(bucket.tokens)) tokens"
             )
         }
         return language.text(
-            "\(date)：计费 \(exactTokenCount(billedTokens)) Token",
-            "\(date): Billed \(exactTokenCount(billedTokens)) Token"
+            "\(date)：⚡模式等效 \(exactTokenCount(billedTokens)) 词元",
+            "\(date): Mode equivalent \(exactTokenCount(billedTokens)) tokens"
         )
     }
 
@@ -4090,32 +4597,16 @@ private struct HourlyTokenActivityChart: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                             }
 
-                            HStack(alignment: .bottom, spacing: 0.75) {
-                                if showsActual {
-                                    TokenChartSlimBar(
-                                        height: actualHeight,
-                                        width: showsBilled
-                                            ? (isHovered ? 2.75 : 1.75)
-                                            : (isHovered ? 3.75 : 3),
-                                        color: .white.opacity(isHovered ? 0.62 : 0.38),
-                                        isEmpty: bucket.tokens == 0
-                                    )
-                                }
-                                if showsBilled {
-                                    TokenChartSlimBar(
-                                        height: billedHeight,
-                                        width: showsActual
-                                            ? (isHovered
-                                                ? 3.25
-                                                : (isCurrentHour ? 2.75 : 2.25))
-                                            : (isHovered ? 3.75 : (isCurrentHour ? 3.5 : 3)),
-                                        color: theme.accent.opacity(
-                                            isHovered ? 0.92 : (isCurrentHour ? 0.86 : 0.72)
-                                        ),
-                                        isEmpty: billedTokens == 0
-                                    )
-                                }
-                            }
+                            TokenChartCombinedBar(
+                                actualHeight: actualHeight,
+                                billedHeight: billedHeight,
+                                width: isCurrentHour ? 4 : 3.5,
+                                color: theme.accent,
+                                showsActual: showsActual,
+                                showsBilled: showsBilled,
+                                isHovered: isHovered,
+                                seed: tokenChartSketchSeed(bucket.hourStart)
+                            )
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -4145,19 +4636,19 @@ private struct HourlyTokenActivityChart: View {
             : ""
         if showsActual && showsBilled {
             return language.text(
-                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际 \(exactTokenCount(bucket.tokens)) Token；计费 \(exactTokenCount(billedTokens)) Token\(suffix)",
-                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual \(exactTokenCount(bucket.tokens)) Token; billed \(exactTokenCount(billedTokens)) Token\(suffix)"
+                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际消耗 \(exactTokenCount(bucket.tokens)) 词元；⚡模式等效 \(exactTokenCount(billedTokens)) 词元\(suffix)",
+                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual usage \(exactTokenCount(bucket.tokens)) tokens; mode equivalent \(exactTokenCount(billedTokens)) tokens\(suffix)"
             )
         }
         if showsActual {
             return language.text(
-                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际 \(exactTokenCount(bucket.tokens)) Token\(suffix)",
-                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual \(exactTokenCount(bucket.tokens)) Token\(suffix)"
+                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际消耗 \(exactTokenCount(bucket.tokens)) 词元\(suffix)",
+                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual usage \(exactTokenCount(bucket.tokens)) tokens\(suffix)"
             )
         }
         return language.text(
-            "\(hourlyUsageDateText(bucket.hourStart, language: language))：计费 \(exactTokenCount(billedTokens)) Token\(suffix)",
-            "\(hourlyUsageDateText(bucket.hourStart, language: language)): Billed \(exactTokenCount(billedTokens)) Token\(suffix)"
+            "\(hourlyUsageDateText(bucket.hourStart, language: language))：⚡模式等效 \(exactTokenCount(billedTokens)) 词元\(suffix)",
+            "\(hourlyUsageDateText(bucket.hourStart, language: language)): Mode equivalent \(exactTokenCount(billedTokens)) tokens\(suffix)"
         )
     }
 }
@@ -4298,20 +4789,23 @@ private struct QuotaMetric: View {
 
     private var estimatedRemainingTokenText: String? {
         guard let estimatedRemainingTokens else { return nil }
-        return "≈\(compactTokenCount(estimatedRemainingTokens)) Token"
+        return language.text(
+            "≈\(compactTokenCount(estimatedRemainingTokens)) 词元",
+            "≈\(compactTokenCount(estimatedRemainingTokens)) Tokens"
+        )
     }
 
     private var estimatedRemainingTokenAnnotation: String {
         language.text(
-            "（标准模式 · 近7日计费历史）",
-            "(standard mode · 7-day billed history)"
+            "（标准模式 · 近7日等效用量）",
+            "(standard mode · 7-day equivalent usage)"
         )
     }
 
     private var estimatedRemainingTokenHelp: String {
         return language.text(
-            "根据最近 7 个完整自然日的计费 Token、额度周期长度与剩余比例估算；假设后续全部使用标准模式",
-            "Estimated from billed Tokens over the previous 7 complete days, the quota window, and remaining percentage; assumes standard mode for future use"
+            "根据最近 7 个完整自然日的模式等效词元、额度周期长度与剩余比例估算；假设后续全部使用标准模式",
+            "Estimated from equivalent tokens over the previous 7 complete days, the quota window, and remaining percentage; assumes standard mode for future use"
         )
     }
 
@@ -4829,7 +5323,7 @@ private func tokenUsageHelp(
 ) -> String {
     language.text(
         """
-        累计 Token：\(exactTokenCount(usage.totalTokens))
+        累计词元：\(exactTokenCount(usage.totalTokens))
         输入：\(exactTokenCount(usage.inputTokens))（其中缓存：\(exactTokenCount(usage.cachedInputTokens))）
         输出：\(exactTokenCount(usage.outputTokens))（其中推理：\(exactTokenCount(usage.reasoningOutputTokens))）
         """,
@@ -4886,7 +5380,7 @@ private func contextWindowHelp(
     let usedPercent = contextWindowUsedPercent(values)
     let remainingPercent = max(0, 100 - usedPercent)
     return language.text(
-        "上下文窗口：已使用 \(usedPercent)%（剩余 \(remainingPercent)%），\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) Token",
+        "上下文窗口：已使用 \(usedPercent)%（剩余 \(remainingPercent)%），\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) 词元",
         "Context window: \(usedPercent)% used (\(remainingPercent)% left), \(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) tokens used"
     )
 }

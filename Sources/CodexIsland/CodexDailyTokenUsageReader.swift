@@ -5,16 +5,27 @@ struct LocalTokenUsageSnapshot: Equatable, Sendable {
     var todayTokens: Int64
     var hourlyBuckets: [HourlyUsageBucket]
     var dailyBuckets: [DailyUsageBucket]
-    /// Quota-billed tokens, with Fast calls weighted at 2.5x.
+    /// Standard-mode-equivalent tokens for ChatGPT-credit usage, with OpenAI
+    /// Fast calls weighted by the model that was active for each call.
     var billedTodayTokens: Int64
     var billedHourlyBuckets: [HourlyUsageBucket]
     var billedDailyBuckets: [DailyUsageBucket]
+    /// Rollouts whose metadata was already observed as recently modified while
+    /// reducing usage. Reusing this list avoids a second stat pass when
+    /// resolving live execution state.
+    var recentlyModifiedRolloutPaths: [String]
 }
 
-/// Computes actual and quota-billed Token increments for local CLI/App calls.
+struct DailyTokenUsageCacheDiagnostics: Equatable, Sendable {
+    var baselineScanCount: Int
+}
+
+/// Computes actual and Standard-mode-equivalent Token increments for local
+/// CLI/App calls.
 /// Each new `last_token_usage` is counted once at message granularity; only the
-/// billed series weights Fast calls by their quota cost. Fork and subagent
-/// boundaries exclude timestamp-rewritten parent history.
+/// equivalent series weights eligible Fast calls by their model-specific quota
+/// cost.
+/// Fork and subagent boundaries exclude timestamp-rewritten parent history.
 enum CodexDailyTokenUsageReader {
     static let recentHourCount = 48
     static let recentDayCount = 30
@@ -23,25 +34,29 @@ enum CodexDailyTokenUsageReader {
     static func readToday(
         from rolloutPaths: [String],
         now: Date = Date(),
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        usesChatGPTCredits: Bool = true
     ) throws -> Int64 {
         try readRecentHours(
             from: rolloutPaths,
             now: now,
-            calendar: calendar
+            calendar: calendar,
+            usesChatGPTCredits: usesChatGPTCredits
         ).todayTokens
     }
 
     static func readRecentHours(
         from rolloutPaths: [String],
         now: Date = Date(),
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        usesChatGPTCredits: Bool = true
     ) throws -> LocalTokenUsageSnapshot {
         try cache.readRecentHours(
             from: rolloutPaths,
             now: now,
             calendar: calendar,
-            hourCount: recentHourCount
+            hourCount: recentHourCount,
+            usesChatGPTCredits: usesChatGPTCredits
         )
     }
 
@@ -60,6 +75,10 @@ enum CodexDailyTokenUsageReader {
     static func resetCacheForTesting() {
         cache.reset()
     }
+
+    static func cacheDiagnosticsForTesting() -> DailyTokenUsageCacheDiagnostics {
+        cache.diagnostics()
+    }
 }
 
 private struct DailyTokenEvent {
@@ -68,8 +87,15 @@ private struct DailyTokenEvent {
     var lastTokens: Int64?
 }
 
+private struct DailyRuntimeSettingsEvent {
+    var timestamp: Date
+    var model: String?
+    var modelProvider: String?
+    var serviceTier: String?
+}
+
 private enum DailyUsageRecord {
-    case serviceTier(timestamp: Date, value: String)
+    case runtimeSettings(DailyRuntimeSettingsEvent)
     case token(DailyTokenEvent)
 }
 
@@ -83,6 +109,9 @@ private struct DailyTokenFileEntry {
     var fileSize: UInt64
     var modifiedAt: Date
     var previousTotal: Int64?
+    var model: String?
+    var sessionModelProvider: String?
+    var modelProvider: String?
     var serviceTier: String?
     var todayTotal: Int64
     var hourlyTotals: [Date: Int64]
@@ -109,12 +138,24 @@ private enum DailyTokenUsageError: LocalizedError {
     }
 }
 
+private struct DailyTokenCalendarSignature: Equatable {
+    var identifier: String
+    var timeZoneIdentifier: String
+
+    init(calendar: Calendar) {
+        identifier = String(describing: calendar.identifier)
+        timeZoneIdentifier = calendar.timeZone.identifier
+    }
+}
+
 private final class DailyTokenUsageCache: @unchecked Sendable {
     private static let chunkSize = 64 * 1024
     private static let boundarySearchChunkSize = 1024 * 1024
     private static let maximumRelevantLineSize = 64 * 1024
     private static let maximumSessionMetaSize = 512 * 1024
     private static let tokenCountMarker = Data("token_count".utf8)
+    private static let threadSettingsMarker = Data("thread_settings_applied".utf8)
+    private static let turnContextMarker = Data("turn_context".utf8)
     private static let subagentBoundaryMarker = Data(
         "inter_agent_communication_metadata".utf8
     )
@@ -126,7 +167,12 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private var hourlyRangeStart: Date?
     private var hourlyRangeEnd: Date?
     private var dailyRangeStart: Date?
+    private var usesChatGPTCredits: Bool?
+    private var calendarSignature: DailyTokenCalendarSignature?
+    private var lastObservedNow: Date?
+    private var cachedRolloutPaths: Set<String> = []
     private var entries: [String: DailyTokenFileEntry] = [:]
+    private var baselineScanCount = 0
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -148,14 +194,28 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         hourlyRangeStart = nil
         hourlyRangeEnd = nil
         dailyRangeStart = nil
+        usesChatGPTCredits = nil
+        calendarSignature = nil
+        lastObservedNow = nil
+        cachedRolloutPaths.removeAll()
         entries.removeAll()
+        baselineScanCount = 0
+    }
+
+    func diagnostics() -> DailyTokenUsageCacheDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return DailyTokenUsageCacheDiagnostics(
+            baselineScanCount: baselineScanCount
+        )
     }
 
     func readRecentHours(
         from rolloutPaths: [String],
         now: Date,
         calendar: Calendar,
-        hourCount: Int
+        hourCount: Int,
+        usesChatGPTCredits: Bool
     ) throws -> LocalTokenUsageSnapshot {
         guard hourCount > 0,
               let currentHourStart = calendar.dateInterval(
@@ -190,20 +250,64 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if dayStart != resolvedDayStart
+        let resolvedCalendarSignature = DailyTokenCalendarSignature(
+            calendar: calendar
+        )
+        let hasCompleteWindow = dayStart != nil
+            && nextDayStart != nil
+            && hourlyRangeStart != nil
+            && hourlyRangeEnd != nil
+            && dailyRangeStart != nil
+            && self.usesChatGPTCredits != nil
+            && calendarSignature != nil
+        let mustRebuild = !hasCompleteWindow
+            || self.usesChatGPTCredits != usesChatGPTCredits
+            || calendarSignature != resolvedCalendarSignature
+            || now < (lastObservedNow ?? now)
+            || resolvedDayStart < (dayStart ?? resolvedDayStart)
+            || resolvedNextDayStart < (nextDayStart ?? resolvedNextDayStart)
+            || resolvedHourlyRangeStart
+                < (hourlyRangeStart ?? resolvedHourlyRangeStart)
+            || resolvedHourlyRangeEnd
+                < (hourlyRangeEnd ?? resolvedHourlyRangeEnd)
+            || resolvedDailyRangeStart
+                < (dailyRangeStart ?? resolvedDailyRangeStart)
+        let windowChanged = dayStart != resolvedDayStart
             || nextDayStart != resolvedNextDayStart
             || hourlyRangeStart != resolvedHourlyRangeStart
             || hourlyRangeEnd != resolvedHourlyRangeEnd
-            || dailyRangeStart != resolvedDailyRangeStart {
-            dayStart = resolvedDayStart
-            nextDayStart = resolvedNextDayStart
-            hourlyRangeStart = resolvedHourlyRangeStart
-            hourlyRangeEnd = resolvedHourlyRangeEnd
-            dailyRangeStart = resolvedDailyRangeStart
-            entries.removeAll()
-        }
+            || dailyRangeStart != resolvedDailyRangeStart
 
-        let paths = Array(Set(rolloutPaths.filter { !$0.isEmpty })).sorted()
+        if mustRebuild {
+            entries.removeAll()
+        } else if windowChanged {
+            rollCachedEntries(
+                dayStart: resolvedDayStart,
+                hourlyRangeStart: resolvedHourlyRangeStart,
+                dailyRangeStart: resolvedDailyRangeStart
+            )
+        }
+        dayStart = resolvedDayStart
+        nextDayStart = resolvedNextDayStart
+        hourlyRangeStart = resolvedHourlyRangeStart
+        hourlyRangeEnd = resolvedHourlyRangeEnd
+        dailyRangeStart = resolvedDailyRangeStart
+        self.usesChatGPTCredits = usesChatGPTCredits
+        calendarSignature = resolvedCalendarSignature
+        lastObservedNow = now
+
+        let paths = Array(Set(
+            rolloutPaths
+                .filter { !$0.isEmpty }
+                .map {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path
+                }
+        )).sorted()
+        let activePathSet = Set(paths)
+        if activePathSet != cachedRolloutPaths {
+            entries = entries.filter { activePathSet.contains($0.key) }
+            cachedRolloutPaths = activePathSet
+        }
         guard !paths.isEmpty else {
             let emptyHourlyBuckets = Self.emptyHourlyBuckets(
                 startingAt: resolvedHourlyRangeStart,
@@ -221,7 +325,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 dailyBuckets: emptyDailyBuckets,
                 billedTodayTokens: 0,
                 billedHourlyBuckets: emptyHourlyBuckets,
-                billedDailyBuckets: emptyDailyBuckets
+                billedDailyBuckets: emptyDailyBuckets,
+                recentlyModifiedRolloutPaths: []
             )
         }
 
@@ -232,6 +337,10 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         var billedTotal: Int64 = 0
         var billedHourlyTotals: [Date: Int64] = [:]
         var billedDailyTotals: [Date: Int64] = [:]
+        var recentlyModifiedRolloutPaths: [String] = []
+        let recentModificationCutoff = now.addingTimeInterval(
+            -Self.freshRunningLookback
+        )
         for path in paths {
             let url = URL(fileURLWithPath: path).standardizedFileURL
             do {
@@ -240,12 +349,15 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     dayStart: resolvedDayStart,
                     nextDayStart: resolvedNextDayStart,
                     hourlyRangeStart: resolvedHourlyRangeStart,
-                    hourlyRangeEnd: resolvedHourlyRangeEnd,
                     dailyRangeStart: resolvedDailyRangeStart,
+                    usesChatGPTCredits: usesChatGPTCredits,
                     calendar: calendar
                 )
                 entries[url.path] = entry
                 readableCount += 1
+                if entry.modifiedAt >= recentModificationCutoff {
+                    recentlyModifiedRolloutPaths.append(url.path)
+                }
                 total = Self.clampedAdd(total, entry.todayTotal)
                 for (hourStart, tokens) in entry.hourlyTotals {
                     hourlyTotals[hourStart] = Self.clampedAdd(
@@ -333,8 +445,38 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             dailyBuckets: dailyBuckets,
             billedTodayTokens: billedTotal,
             billedHourlyBuckets: billedBuckets,
-            billedDailyBuckets: billedDailyBuckets
+            billedDailyBuckets: billedDailyBuckets,
+            recentlyModifiedRolloutPaths: recentlyModifiedRolloutPaths
         )
+    }
+
+    /// Time windows only move forward during normal operation. Preserve the
+    /// expensive EOF reducer state and discard buckets that have simply aged
+    /// out instead of reparsing every rollout at each hour or midnight.
+    private func rollCachedEntries(
+        dayStart: Date,
+        hourlyRangeStart: Date,
+        dailyRangeStart: Date
+    ) {
+        for path in Array(entries.keys) {
+            guard var entry = entries[path] else { continue }
+            entry.hourlyTotals = entry.hourlyTotals.filter {
+                $0.key >= hourlyRangeStart
+            }
+            entry.billedHourlyTotals = entry.billedHourlyTotals.filter {
+                $0.key >= hourlyRangeStart
+            }
+            entry.dailyTotals = entry.dailyTotals.filter {
+                $0.key >= dailyRangeStart
+            }
+            entry.billedDailyTotals = entry.billedDailyTotals.filter {
+                $0.key >= dailyRangeStart
+            }
+            entry.todayTotal = entry.dailyTotals[dayStart] ?? 0
+            entry.billedTodayTotal = entry.billedDailyTotals[dayStart] ?? 0
+            entry.countingStart = max(entry.countingStart, dailyRangeStart)
+            entries[path] = entry
+        }
     }
 
     static func discoverLocalUsageRollouts(
@@ -396,8 +538,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         dayStart: Date,
         nextDayStart: Date,
         hourlyRangeStart: Date,
-        hourlyRangeEnd: Date,
         dailyRangeStart: Date,
+        usesChatGPTCredits: Bool,
         calendar: Calendar
     ) throws -> DailyTokenFileEntry {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -446,6 +588,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             cached.isExcluded = false
             cached.isWaitingForActivityBoundary = false
             cached.previousTotal = nil
+            cached.model = nil
+            cached.modelProvider = cached.sessionModelProvider
             cached.serviceTier = nil
             cached.todayTotal = 0
             cached.hourlyTotals = [:]
@@ -456,6 +600,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             let resumedCountingStart = cached.countingStart
             guard modifiedAt >= resumedCountingStart else { return cached }
 
+            baselineScanCount += 1
             let records = try Self.scanBackwardToDailyBaseline(
                 url: url,
                 fileSize: fileSize,
@@ -465,6 +610,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 Self.consume(
                     record,
                     previousTotal: &cached.previousTotal,
+                    model: &cached.model,
+                    modelProvider: &cached.modelProvider,
                     serviceTier: &cached.serviceTier,
                     todayTotal: &cached.todayTotal,
                     hourlyTotals: &cached.hourlyTotals,
@@ -476,8 +623,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     dayStart: dayStart,
                     nextDayStart: nextDayStart,
                     hourlyRangeStart: hourlyRangeStart,
-                    hourlyRangeEnd: hourlyRangeEnd,
                     dailyRangeStart: dailyRangeStart,
+                    usesChatGPTCredits: usesChatGPTCredits,
                     calendar: calendar
                 )
             }
@@ -497,6 +644,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             cached.modifiedAt = modifiedAt
             if !cached.isExcluded {
                 var previousTotal = cached.previousTotal
+                var model = cached.model
+                var modelProvider = cached.modelProvider
                 var serviceTier = cached.serviceTier
                 var todayTotal = cached.todayTotal
                 var hourlyTotals = cached.hourlyTotals
@@ -512,6 +661,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     Self.consume(
                         record,
                         previousTotal: &previousTotal,
+                        model: &model,
+                        modelProvider: &modelProvider,
                         serviceTier: &serviceTier,
                         todayTotal: &todayTotal,
                         hourlyTotals: &hourlyTotals,
@@ -523,12 +674,14 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                         dayStart: dayStart,
                         nextDayStart: nextDayStart,
                         hourlyRangeStart: hourlyRangeStart,
-                        hourlyRangeEnd: hourlyRangeEnd,
                         dailyRangeStart: dailyRangeStart,
+                        usesChatGPTCredits: usesChatGPTCredits,
                         calendar: calendar
                     )
                 }
                 cached.previousTotal = previousTotal
+                cached.model = model
+                cached.modelProvider = modelProvider
                 cached.serviceTier = serviceTier
                 cached.todayTotal = todayTotal
                 cached.hourlyTotals = hourlyTotals
@@ -554,6 +707,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             fileSize: fileSize,
             modifiedAt: modifiedAt,
             previousTotal: nil,
+            model: nil,
+            sessionModelProvider: session.modelProvider,
+            modelProvider: session.modelProvider,
             serviceTier: nil,
             todayTotal: 0,
             hourlyTotals: [:],
@@ -573,6 +729,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         )
         guard !entry.isExcluded, modifiedAt >= countingStart else { return entry }
 
+        baselineScanCount += 1
         let records = try Self.scanBackwardToDailyBaseline(
             url: url,
             fileSize: fileSize,
@@ -582,6 +739,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             Self.consume(
                 record,
                 previousTotal: &entry.previousTotal,
+                model: &entry.model,
+                modelProvider: &entry.modelProvider,
                 serviceTier: &entry.serviceTier,
                 todayTotal: &entry.todayTotal,
                 hourlyTotals: &entry.hourlyTotals,
@@ -593,8 +752,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 dayStart: dayStart,
                 nextDayStart: nextDayStart,
                 hourlyRangeStart: hourlyRangeStart,
-                hourlyRangeEnd: hourlyRangeEnd,
                 dailyRangeStart: dailyRangeStart,
+                usesChatGPTCredits: usesChatGPTCredits,
                 calendar: calendar
             )
         }
@@ -604,6 +763,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private static func consume(
         _ record: DailyUsageRecord,
         previousTotal: inout Int64?,
+        model: inout String?,
+        modelProvider: inout String?,
         serviceTier: inout String?,
         todayTotal: inout Int64,
         hourlyTotals: inout [Date: Int64],
@@ -615,13 +776,21 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         dayStart: Date,
         nextDayStart: Date,
         hourlyRangeStart: Date,
-        hourlyRangeEnd: Date,
         dailyRangeStart: Date,
+        usesChatGPTCredits: Bool,
         calendar: Calendar
     ) {
         guard case .token(let event) = record else {
-            if case .serviceTier(_, let value) = record {
-                serviceTier = value
+            if case .runtimeSettings(let settings) = record {
+                if let recordedModel = settings.model {
+                    model = recordedModel
+                }
+                if let recordedModelProvider = settings.modelProvider {
+                    modelProvider = recordedModelProvider
+                }
+                if let recordedServiceTier = settings.serviceTier {
+                    serviceTier = recordedServiceTier
+                }
             }
             return
         }
@@ -648,7 +817,10 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         previousTotal = event.totalTokens
         let billedDelta = budgetWeightedTokens(
             rawDelta,
-            serviceTier: serviceTier
+            model: model,
+            modelProvider: modelProvider,
+            serviceTier: serviceTier,
+            usesChatGPTCredits: usesChatGPTCredits
         )
 
         guard event.timestamp >= countingStart else { return }
@@ -656,8 +828,11 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             todayTotal = clampedAdd(todayTotal, rawDelta)
             billedTodayTotal = clampedAdd(billedTodayTotal, billedDelta)
         }
+        // Keep already-parsed future buckets. A file can receive the first
+        // record of the next hour after `now` was captured but before this
+        // scan starts. Advancing the EOF reducer while dropping that record
+        // would make it impossible to recover without a cold rescan.
         if event.timestamp >= hourlyRangeStart,
-           event.timestamp < hourlyRangeEnd,
            let hourStart = calendar.dateInterval(
             of: .hour,
             for: event.timestamp
@@ -671,8 +846,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 billedDelta
             )
         }
-        if event.timestamp >= dailyRangeStart,
-           event.timestamp < nextDayStart {
+        if event.timestamp >= dailyRangeStart {
             let dateStart = calendar.startOfDay(for: event.timestamp)
             dailyTotals[dateStart] = clampedAdd(
                 dailyTotals[dateStart, default: 0],
@@ -687,15 +861,35 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
     private static func budgetWeightedTokens(
         _ tokens: Int64,
-        serviceTier: String?
+        model: String?,
+        modelProvider: String?,
+        serviceTier: String?,
+        usesChatGPTCredits: Bool
     ) -> Int64 {
         guard tokens > 0 else { return 0 }
+        guard usesChatGPTCredits else { return tokens }
+        guard normalizedModelProvider(modelProvider) == "openai" else {
+            return tokens
+        }
         guard CodexDisplayPolicy.isFastServiceTier(serviceTier) else {
             return tokens
         }
-        let weighted = Double(tokens) * CodexDisplayPolicy.fastBudgetMultiplier
+        guard let multiplier = CodexFastModeUsagePolicy.multiplier(for: model) else {
+            return tokens
+        }
+        let weighted = Double(tokens) * multiplier
         guard weighted.isFinite else { return Int64.max }
         return Int64(min(weighted.rounded(), Double(Int64.max)))
+    }
+
+    private static func normalizedModelProvider(_ value: String?) -> String? {
+        guard let normalized = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
     }
 
     private static func emptyHourlyBuckets(
@@ -749,6 +943,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     ) throws -> [DailyUsageRecord] {
         var records: [DailyUsageRecord] = []
         var crossedTokenBaseline = false
+        var capturedModelBaseline = false
+        var capturedModelProviderBaseline = false
+        var capturedServiceTierBaseline = false
         try scanLinesBackward(url: url, fileSize: fileSize) { line in
             guard let record = parseUsageRecord(line) else { return true }
             records.append(record)
@@ -757,12 +954,22 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 if event.timestamp < dayStart {
                     crossedTokenBaseline = true
                 }
-                return true
-            case .serviceTier(let timestamp, _):
-                // Keep the last setting before the range so the first counted
-                // message receives the tier that was actually active.
-                return !(crossedTokenBaseline && timestamp <= dayStart)
+            case .runtimeSettings(let settings):
+                if settings.timestamp <= dayStart {
+                    capturedModelBaseline = capturedModelBaseline
+                        || settings.model != nil
+                    capturedModelProviderBaseline = capturedModelProviderBaseline
+                        || settings.modelProvider != nil
+                    capturedServiceTierBaseline = capturedServiceTierBaseline
+                        || settings.serviceTier != nil
+                }
             }
+            // Keep the last model, provider, and service tier from before the
+            // range so the first counted message receives the active settings.
+            return !(crossedTokenBaseline
+                && capturedModelBaseline
+                && capturedModelProviderBaseline
+                && capturedServiceTierBaseline)
         }
         return records
     }
@@ -915,7 +1122,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if let event = parseTokenEvent(line) {
             return .token(event)
         }
-        guard line.range(of: Data("service_tier".utf8)) != nil,
+        guard line.range(of: threadSettingsMarker) != nil
+                || line.range(of: turnContextMarker) != nil,
               let object = try? JSONSerialization.jsonObject(with: line) as? JSONObject,
               let timestampString = object.string("timestamp"),
               let timestamp = parseTimestamp(timestampString),
@@ -923,17 +1131,35 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return nil
         }
 
-        let value: String?
+        let model: String?
+        let modelProvider: String?
+        let serviceTier: String?
         if object.string("type") == "event_msg",
            payload.string("type") == "thread_settings_applied" {
-            value = payload.dictionary("thread_settings")?.string("service_tier")
+            let settings = payload.dictionary("thread_settings")
+            model = settings?.string("model")
+            modelProvider = settings?.string("model_provider_id")
+            serviceTier = settings?.string("service_tier")
         } else if object.string("type") == "turn_context" {
-            value = payload.string("service_tier")
+            model = payload.string("model")
+            modelProvider = nil
+            serviceTier = payload.string("service_tier")
         } else {
-            value = nil
+            model = nil
+            modelProvider = nil
+            serviceTier = nil
         }
-        guard let value else { return nil }
-        return .serviceTier(timestamp: timestamp, value: value)
+        guard model != nil || modelProvider != nil || serviceTier != nil else {
+            return nil
+        }
+        return .runtimeSettings(
+            DailyRuntimeSettingsEvent(
+                timestamp: timestamp,
+                model: model,
+                modelProvider: modelProvider,
+                serviceTier: serviceTier
+            )
+        )
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
@@ -950,6 +1176,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private struct LocalUsageSession {
         var startedAt: Date?
         var activityStartedAt: Date?
+        var modelProvider: String?
         var isIncluded: Bool
         var isWaitingForActivityBoundary: Bool
         var activityBoundaryKind: ActivityBoundaryKind?
@@ -976,6 +1203,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return LocalUsageSession(
                 startedAt: nil,
                 activityStartedAt: nil,
+                modelProvider: nil,
                 isIncluded: false,
                 isWaitingForActivityBoundary: false,
                 activityBoundaryKind: nil,
@@ -987,6 +1215,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return LocalUsageSession(
                 startedAt: nil,
                 activityStartedAt: nil,
+                modelProvider: nil,
                 isIncluded: containsLocalUsageSourceMarker(line),
                 isWaitingForActivityBoundary: false,
                 activityBoundaryKind: nil,
@@ -1016,6 +1245,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         return LocalUsageSession(
             startedAt: object.string("timestamp").flatMap(parseTimestamp),
             activityStartedAt: activityStartedAt,
+            modelProvider: payload.string("model_provider"),
             isIncluded: isLocalUsageSession(payload),
             isWaitingForActivityBoundary: boundaryKind != nil
                 && activityStartedAt == nil,

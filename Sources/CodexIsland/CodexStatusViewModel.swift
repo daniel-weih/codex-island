@@ -445,19 +445,29 @@ final class CodexStatusViewModel: ObservableObject {
         let discoveredPaths = localActivityRolloutPaths
         let recentPaths = snapshot.recentThreads.compactMap(\.rolloutPath)
         let tokenPaths = Array(Set(discoveredPaths + recentPaths))
+        let usesChatGPTCredits = snapshot.account.authType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "chatgpt"
         let recentHasRunningSession = snapshot.recentThreads.contains {
             $0.executionState == .running
         }
         let localActivity = await Task.detached(priority: .utility) {
             let usage = try? CodexDailyTokenUsageReader.readRecentHours(
                 from: tokenPaths,
-                now: now
+                now: now,
+                usesChatGPTCredits: usesChatGPTCredits
             )
-            let runningCutoff = now.addingTimeInterval(-30 * 60)
-            let freshPaths = discoveredPaths.filter { path in
-                let attributes = try? FileManager.default.attributesOfItem(atPath: path)
-                let modifiedAt = attributes?[.modificationDate] as? Date
-                return modifiedAt.map { $0 >= runningCutoff } ?? false
+            let freshPaths: [String]
+            if let usage {
+                freshPaths = usage.recentlyModifiedRolloutPaths
+            } else {
+                let runningCutoff = now.addingTimeInterval(-30 * 60)
+                freshPaths = discoveredPaths.filter { path in
+                    let attributes = try? FileManager.default
+                        .attributesOfItem(atPath: path)
+                    let modifiedAt = attributes?[.modificationDate] as? Date
+                    return modifiedAt.map { $0 >= runningCutoff } ?? false
+                }
             }
             let hasRunningSession = freshPaths.contains { path in
                 (try? CodexThreadActivityReader.readLatest(from: path))?

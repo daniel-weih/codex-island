@@ -13,6 +13,7 @@ struct ParserChecks {
         checkQuotaConsumptionPace()
         checkQuotaRemainingLevels()
         checkEstimatedRemainingTokens()
+        checkFastModeUsageMultipliers()
         checkDisplayModelNames()
         checkReasoningEffortLabels()
         checkHeaderTokenCounts()
@@ -884,6 +885,33 @@ struct ParserChecks {
         )
     }
 
+    private static func checkFastModeUsageMultipliers() {
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-5.4") == 2.0,
+            "GPT-5.4 Fast usage counts as 2x Standard-mode quota"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: " openai/GPT-5.4-codex ") == 2.0,
+            "GPT-5.4 family matching handles provider prefixes, suffixes, and case"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-5.5") == 2.5,
+            "GPT-5.5 Fast usage counts as 2.5x Standard-mode quota"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-5.6-sol") == 2.5,
+            "GPT-5.6 variants count as 2.5x Standard-mode quota"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "future-model") == nil,
+            "models outside the official Fast support list are not guessed"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: nil) == nil,
+            "missing models are not assigned a guessed multiplier"
+        )
+    }
+
     private static func checkDisplayModelNames() {
         expect(
             CodexDisplayPolicy.displayModelName("openai/gpt-5.6-sol") == "5.6-Sol",
@@ -1626,13 +1654,17 @@ struct ParserChecks {
         func sessionMeta(
             forked: Bool = false,
             startedAt: Date? = nil,
-            subagent: Bool = false
+            subagent: Bool = false,
+            modelProvider: String? = "openai"
         ) -> String {
             let forkField = forked ? ",\"forked_from_id\":\"parent\"" : ""
+            let providerField = modelProvider.map {
+                ",\"model_provider\":\"\($0)\""
+            } ?? ""
             let sourceFields = subagent
                 ? "\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"parent\"}}},\"thread_source\":\"subagent\""
                 : "\"source\":\"cli\",\"thread_source\":\"user\""
-            return "{\"timestamp\":\"\(formatter.string(from: startedAt ?? afterMidnight))\",\"type\":\"session_meta\",\"payload\":{\"id\":\"test\",\(sourceFields)\(forkField)}}"
+            return "{\"timestamp\":\"\(formatter.string(from: startedAt ?? afterMidnight))\",\"type\":\"session_meta\",\"payload\":{\"id\":\"test\",\(sourceFields)\(providerField)\(forkField)}}"
         }
 
         func token(_ date: Date, total: Int64, last: Int64?) -> String {
@@ -1642,8 +1674,45 @@ struct ParserChecks {
             return "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":\(total)}\(lastField)}}}"
         }
 
+        func runtimeFields(
+            model: String?,
+            modelProviderID: String? = nil,
+            serviceTier: String?
+        ) -> String {
+            [
+                model.map { "\"model\":\"\($0)\"" },
+                modelProviderID.map { "\"model_provider_id\":\"\($0)\"" },
+                serviceTier.map { "\"service_tier\":\"\($0)\"" }
+            ]
+            .compactMap { $0 }
+            .joined(separator: ",")
+        }
+
+        func threadSettings(
+            _ date: Date,
+            model: String? = nil,
+            modelProviderID: String? = nil,
+            serviceTier: String? = nil
+        ) -> String {
+            let fields = runtimeFields(
+                model: model,
+                modelProviderID: modelProviderID,
+                serviceTier: serviceTier
+            )
+            return "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\(fields)}}}"
+        }
+
+        func turnContext(
+            _ date: Date,
+            model: String? = nil,
+            serviceTier: String? = nil
+        ) -> String {
+            let fields = runtimeFields(model: model, serviceTier: serviceTier)
+            return "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"turn_context\",\"payload\":{\(fields)}}"
+        }
+
         func serviceTier(_ date: Date, _ value: String) -> String {
-            "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"service_tier\":\"\(value)\"}}}"
+            threadSettings(date, serviceTier: value)
         }
 
         func subagentBoundary(_ date: Date) -> String {
@@ -1658,6 +1727,41 @@ struct ParserChecks {
                 ofItemAtPath: url.path
             )
             return url
+        }
+
+        func appendLines(_ lines: [String], to url: URL) throws {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(
+                contentsOf: Data((lines.joined(separator: "\n") + "\n").utf8)
+            )
+        }
+
+        func hourlyTokens(
+            _ buckets: [HourlyUsageBucket],
+            containing date: Date
+        ) -> Int64? {
+            guard let hourStart = calendar.dateInterval(
+                of: .hour,
+                for: date
+            )?.start else {
+                return nil
+            }
+            return buckets.first { $0.hourStart == hourStart }?.tokens
+        }
+
+        func dailyTokens(
+            _ buckets: [DailyUsageBucket],
+            containing date: Date
+        ) -> Int64? {
+            let dateFormatter = DateFormatter()
+            dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+            dateFormatter.calendar = calendar
+            dateFormatter.timeZone = calendar.timeZone
+            dateFormatter.dateFormat = "yyyy-MM-dd"
+            let dateLabel = dateFormatter.string(from: date)
+            return buckets.first { $0.startDate == dateLabel }?.tokens
         }
 
         do {
@@ -1708,8 +1812,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                weightedSnapshot.billedTodayTokens == 410,
-                "billed Fast messages count as 2.5 budget Tokens"
+                weightedSnapshot.billedTodayTokens == 260,
+                "Fast messages without model metadata remain unweighted"
             )
             expect(
                 weightedSnapshot.hourlyBuckets.reduce(Int64(0)) {
@@ -1717,8 +1821,193 @@ struct ParserChecks {
                 } == 260
                     && weightedSnapshot.billedHourlyBuckets.reduce(Int64(0)) {
                         $0 + $1.tokens
-                    } == 410,
-                "hourly charts retain separate actual and billed series"
+                    } == 260,
+                "hourly charts do not guess an unsupported Fast multiplier"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let modelWeighted = write(
+                [
+                    sessionMeta(),
+                    threadSettings(
+                        afterMidnight,
+                        model: "gpt-5.4",
+                        serviceTier: "priority"
+                    ),
+                    token(afterMidnight.addingTimeInterval(1), total: 100, last: 100),
+                    turnContext(
+                        afterMidnight.addingTimeInterval(2),
+                        model: "gpt-5.5"
+                    ),
+                    token(afterMidnight.addingTimeInterval(3), total: 200, last: 100),
+                    threadSettings(
+                        afterMidnight.addingTimeInterval(4),
+                        model: "gpt-5.6-sol"
+                    ),
+                    token(afterMidnight.addingTimeInterval(5), total: 300, last: 100),
+                    turnContext(
+                        afterMidnight.addingTimeInterval(6),
+                        model: "future-model"
+                    ),
+                    token(afterMidnight.addingTimeInterval(7), total: 400, last: 100),
+                    turnContext(
+                        afterMidnight.addingTimeInterval(8),
+                        model: "gpt-5.4",
+                        serviceTier: "default"
+                    ),
+                    token(afterMidnight.addingTimeInterval(9), total: 500, last: 100)
+                ],
+                name: "model-weighted.jsonl"
+            )
+            let modelWeightedSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [modelWeighted.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                modelWeightedSnapshot.todayTokens == 500,
+                "model-specific Fast weighting does not change actual Tokens"
+            )
+            expect(
+                modelWeightedSnapshot.billedTodayTokens == 900,
+                "supported Fast models use official multipliers and unknown models stay 1x"
+            )
+
+            let modelWeightedHandle = try FileHandle(forWritingTo: modelWeighted)
+            try modelWeightedHandle.seekToEnd()
+            try modelWeightedHandle.write(contentsOf: Data(([
+                threadSettings(
+                    afterMidnight.addingTimeInterval(10),
+                    serviceTier: "priority"
+                ),
+                token(afterMidnight.addingTimeInterval(11), total: 600, last: 100)
+            ].joined(separator: "\n") + "\n").utf8))
+            try modelWeightedHandle.close()
+            let appendedModelWeightedSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [modelWeighted.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                appendedModelWeightedSnapshot.billedTodayTokens == 1_100,
+                "incremental scans retain the active model when only Fast tier changes"
+            )
+
+            let nonChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [modelWeighted.path],
+                now: now,
+                calendar: calendar,
+                usesChatGPTCredits: false
+            )
+            expect(
+                nonChatGPTSnapshot.todayTokens == 600
+                    && nonChatGPTSnapshot.billedTodayTokens == 600,
+                "non-ChatGPT authentication does not apply ChatGPT Fast multipliers"
+            )
+            let reenabledChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [modelWeighted.path],
+                now: now,
+                calendar: calendar,
+                usesChatGPTCredits: true
+            )
+            expect(
+                reenabledChatGPTSnapshot.billedTodayTokens == 1_100,
+                "changing the ChatGPT-credit mode safely invalidates cached weighting"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let providerWeighted = write(
+                [
+                    sessionMeta(modelProvider: "openai"),
+                    threadSettings(
+                        afterMidnight,
+                        model: "gpt-5.6-sol",
+                        modelProviderID: "custom-provider",
+                        serviceTier: "priority"
+                    ),
+                    token(afterMidnight.addingTimeInterval(1), total: 100, last: 100),
+                    threadSettings(
+                        afterMidnight.addingTimeInterval(2),
+                        modelProviderID: "openai"
+                    ),
+                    token(afterMidnight.addingTimeInterval(3), total: 200, last: 100)
+                ],
+                name: "provider-weighted.jsonl"
+            )
+            let providerWeightedSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [providerWeighted.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                providerWeightedSnapshot.todayTokens == 200
+                    && providerWeightedSnapshot.billedTodayTokens == 350,
+                "only the OpenAI provider receives ChatGPT Fast weighting"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let customSessionProvider = write(
+                [
+                    sessionMeta(modelProvider: "custom-provider"),
+                    threadSettings(
+                        afterMidnight,
+                        model: "gpt-5.4",
+                        serviceTier: "priority"
+                    ),
+                    token(afterMidnight.addingTimeInterval(1), total: 100, last: 100)
+                ],
+                name: "custom-session-provider.jsonl"
+            )
+            let customSessionProviderSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [customSessionProvider.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                customSessionProviderSnapshot.billedTodayTokens == 100,
+                "session metadata prevents weighting custom model providers"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let dailyRangeStart = calendar.date(
+                byAdding: .day,
+                value: -(CodexDailyTokenUsageReader.recentDayCount - 1),
+                to: dayStart
+            )!
+            let baselineWeighted = write(
+                [
+                    sessionMeta(
+                        startedAt: calendar.date(
+                            byAdding: .day,
+                            value: -40,
+                            to: dayStart
+                        )
+                    ),
+                    threadSettings(
+                        dailyRangeStart.addingTimeInterval(-180),
+                        serviceTier: "priority"
+                    ),
+                    turnContext(
+                        dailyRangeStart.addingTimeInterval(-120),
+                        model: "gpt-5.4"
+                    ),
+                    token(
+                        dailyRangeStart.addingTimeInterval(-60),
+                        total: 100,
+                        last: 100
+                    ),
+                    token(afterMidnight, total: 200, last: 100)
+                ],
+                name: "baseline-model-weighted.jsonl"
+            )
+            let baselineWeightedSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [baselineWeighted.path],
+                now: now,
+                calendar: calendar
+            )
+            expect(
+                baselineWeightedSnapshot.billedTodayTokens == 200,
+                "pre-range model and Fast tier remain active for the first counted call"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -1833,6 +2122,369 @@ struct ParserChecks {
                     $0.startDate == dailyFormatter.string(from: historicalDay)
                 }?.tokens == 40,
                 "local daily timeline retains message-level history for 30 days"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let rolloverHourStart = calendar.date(
+                byAdding: .hour,
+                value: 10,
+                to: dayStart
+            )!
+            let rolloverEvent = rolloverHourStart.addingTimeInterval(30 * 60)
+            let hourRollover = write(
+                [
+                    sessionMeta(
+                        startedAt: rolloverHourStart.addingTimeInterval(-60)
+                    ),
+                    token(rolloverEvent, total: 80, last: 80)
+                ],
+                name: "hour-rollover.jsonl"
+            )
+            let beforeHourRollover = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [hourRollover.path],
+                now: rolloverHourStart.addingTimeInterval(59 * 60),
+                calendar: calendar
+            )
+            let beforeHourDiagnostics = CodexDailyTokenUsageReader
+                .cacheDiagnosticsForTesting()
+            let afterHourRollover = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [hourRollover.path],
+                now: rolloverHourStart.addingTimeInterval(61 * 60),
+                calendar: calendar
+            )
+            let afterHourDiagnostics = CodexDailyTokenUsageReader
+                .cacheDiagnosticsForTesting()
+            expect(
+                beforeHourRollover.hourlyBuckets.last?.tokens == 80,
+                "cached hourly usage starts in the current partial hour"
+            )
+            expect(
+                hourlyTokens(
+                    afterHourRollover.hourlyBuckets,
+                    containing: rolloverEvent
+                ) == 80
+                    && afterHourRollover.hourlyBuckets.last?.tokens == 0
+                    && afterHourRollover.todayTokens == 80,
+                "the same cache rolls across an hour boundary without losing usage"
+            )
+            expect(
+                hourlyTokens(
+                    afterHourRollover.billedHourlyBuckets,
+                    containing: rolloverEvent
+                ) == 80,
+                "billed hourly usage rolls across an hour boundary with actual usage"
+            )
+            expect(
+                beforeHourDiagnostics.baselineScanCount == 1
+                    && afterHourDiagnostics == beforeHourDiagnostics,
+                "hour rollover reuses the reducer without another baseline scan"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let futureHourStart = calendar.date(
+                byAdding: .hour,
+                value: 14,
+                to: dayStart
+            )!
+            let futureHourEvent = futureHourStart.addingTimeInterval(0.25)
+            let prewrittenFutureHour = write(
+                [
+                    sessionMeta(
+                        startedAt: futureHourStart.addingTimeInterval(-120)
+                    ),
+                    token(futureHourEvent, total: 42, last: 42)
+                ],
+                name: "prewritten-future-hour.jsonl"
+            )
+            try FileManager.default.setAttributes(
+                [.modificationDate: futureHourEvent],
+                ofItemAtPath: prewrittenFutureHour.path
+            )
+            let beforeFutureHour = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [prewrittenFutureHour.path],
+                now: futureHourStart.addingTimeInterval(-1),
+                calendar: calendar
+            )
+            let afterFutureHour = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [prewrittenFutureHour.path],
+                now: futureHourStart.addingTimeInterval(1),
+                calendar: calendar
+            )
+            expect(
+                beforeFutureHour.hourlyBuckets.last?.tokens == 0
+                    && afterFutureHour.hourlyBuckets.last?.tokens == 42,
+                "a prewritten next-hour event appears after rollover without another append"
+            )
+            expect(
+                CodexDailyTokenUsageReader.cacheDiagnosticsForTesting()
+                    .baselineScanCount == 1,
+                "a prewritten next-hour event does not require a cold rescan"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let midnightRollover = write(
+                [
+                    sessionMeta(
+                        startedAt: beforeMidnight.addingTimeInterval(-60)
+                    ),
+                    token(beforeMidnight, total: 75, last: 75)
+                ],
+                name: "midnight-rollover.jsonl"
+            )
+            let beforeMidnightRollover = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [midnightRollover.path],
+                now: beforeMidnight.addingTimeInterval(30),
+                calendar: calendar
+            )
+            expect(
+                beforeMidnightRollover.todayTokens == 75,
+                "usage immediately before midnight belongs to the old day"
+            )
+            try appendLines(
+                [token(afterMidnight, total: 105, last: 30)],
+                to: midnightRollover
+            )
+            let afterMidnightRollover = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [midnightRollover.path],
+                now: afterMidnight.addingTimeInterval(30),
+                calendar: calendar
+            )
+            expect(
+                afterMidnightRollover.todayTokens == 30
+                    && dailyTokens(
+                        afterMidnightRollover.dailyBuckets,
+                        containing: beforeMidnight
+                    ) == 75
+                    && dailyTokens(
+                        afterMidnightRollover.dailyBuckets,
+                        containing: afterMidnight
+                    ) == 30,
+                "the same cache rolls across midnight and separates both days"
+            )
+            expect(
+                afterMidnightRollover.hourlyBuckets.reduce(Int64(0)) {
+                    $0 + $1.tokens
+                } == 105
+                    && afterMidnightRollover.billedDailyBuckets.reduce(Int64(0)) {
+                        $0 + $1.tokens
+                    } == 105,
+                "hourly and billed histories remain intact across midnight"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let prewrittenFutureDay = write(
+                [
+                    sessionMeta(
+                        startedAt: beforeMidnight.addingTimeInterval(-60)
+                    ),
+                    token(afterMidnight, total: 30, last: 30)
+                ],
+                name: "prewritten-future-day.jsonl"
+            )
+            let beforeFutureDay = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [prewrittenFutureDay.path],
+                now: dayStart.addingTimeInterval(-1),
+                calendar: calendar
+            )
+            let afterFutureDay = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [prewrittenFutureDay.path],
+                now: afterMidnight.addingTimeInterval(60),
+                calendar: calendar
+            )
+            expect(
+                beforeFutureDay.todayTokens == 0
+                    && afterFutureDay.todayTokens == 30
+                    && dailyTokens(
+                        afterFutureDay.dailyBuckets,
+                        containing: afterMidnight
+                    ) == 30,
+                "a prewritten next-day event enters today's totals after midnight"
+            )
+            expect(
+                CodexDailyTokenUsageReader.cacheDiagnosticsForTesting()
+                    .baselineScanCount == 1,
+                "midnight rollover promotes a future daily bucket without rescanning"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let jumpEvent = calendar.date(
+                byAdding: .minute,
+                value: 70,
+                to: dayStart
+            )!
+            let jumpInitialNow = calendar.date(
+                byAdding: .minute,
+                value: 90,
+                to: dayStart
+            )!
+            let jumpRollover = write(
+                [
+                    sessionMeta(startedAt: dayStart),
+                    token(jumpEvent, total: 55, last: 55)
+                ],
+                name: "multi-window-rollover.jsonl"
+            )
+            let jumpInitial = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [jumpRollover.path],
+                now: jumpInitialNow,
+                calendar: calendar
+            )
+            expect(
+                jumpInitial.todayTokens == 55
+                    && hourlyTokens(
+                        jumpInitial.hourlyBuckets,
+                        containing: jumpEvent
+                    ) == 55,
+                "forward-jump fixture starts inside the hourly and daily windows"
+            )
+            let afterSixHourJump = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [jumpRollover.path],
+                now: jumpInitialNow.addingTimeInterval(6 * 60 * 60),
+                calendar: calendar
+            )
+            expect(
+                afterSixHourJump.todayTokens == 55
+                    && hourlyTokens(
+                        afterSixHourJump.hourlyBuckets,
+                        containing: jumpEvent
+                    ) == 55,
+                "the same cache handles a multi-hour forward jump"
+            )
+            let afterThreeDayJump = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [jumpRollover.path],
+                now: jumpInitialNow.addingTimeInterval(3 * 24 * 60 * 60),
+                calendar: calendar
+            )
+            expect(
+                afterThreeDayJump.todayTokens == 0
+                    && afterThreeDayJump.hourlyBuckets.allSatisfy {
+                        $0.tokens == 0
+                    }
+                    && dailyTokens(
+                        afterThreeDayJump.dailyBuckets,
+                        containing: jumpEvent
+                    ) == 55,
+                "a multi-day jump expires hourly usage while retaining 30-day history"
+            )
+            let afterThirtyFiveDayJump = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [jumpRollover.path],
+                now: jumpInitialNow.addingTimeInterval(35 * 24 * 60 * 60),
+                calendar: calendar
+            )
+            expect(
+                afterThirtyFiveDayJump.todayTokens == 0
+                    && afterThirtyFiveDayJump.hourlyBuckets.count
+                        == CodexDailyTokenUsageReader.recentHourCount
+                    && afterThirtyFiveDayJump.hourlyBuckets.allSatisfy {
+                        $0.tokens == 0
+                    }
+                    && afterThirtyFiveDayJump.dailyBuckets.count
+                        == CodexDailyTokenUsageReader.recentDayCount
+                    && afterThirtyFiveDayJump.dailyBuckets.allSatisfy {
+                        $0.tokens == 0
+                    },
+                "a large forward jump expires usage outside both rolling windows"
+            )
+            let beforeClockRewindDiagnostics = CodexDailyTokenUsageReader
+                .cacheDiagnosticsForTesting()
+            let afterClockRewind = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [jumpRollover.path],
+                now: jumpInitialNow,
+                calendar: calendar
+            )
+            expect(
+                afterClockRewind.todayTokens == 55
+                    && hourlyTokens(
+                        afterClockRewind.hourlyBuckets,
+                        containing: jumpEvent
+                    ) == 55
+                    && dailyTokens(
+                        afterClockRewind.dailyBuckets,
+                        containing: jumpEvent
+                    ) == 55,
+                "moving the clock backward rebuilds the cached windows correctly"
+            )
+            expect(
+                beforeClockRewindDiagnostics.baselineScanCount == 1
+                    && CodexDailyTokenUsageReader.cacheDiagnosticsForTesting()
+                        .baselineScanCount == 2,
+                "clock rewind intentionally performs one new baseline scan"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let appendHourStart = calendar.date(
+                byAdding: .hour,
+                value: 8,
+                to: dayStart
+            )!
+            let firstAppendEvent = appendHourStart.addingTimeInterval(50 * 60)
+            let appendAfterRollover = write(
+                [
+                    sessionMeta(
+                        startedAt: appendHourStart.addingTimeInterval(-60)
+                    ),
+                    token(firstAppendEvent, total: 100, last: 100)
+                ],
+                name: "append-after-window-rollover.jsonl"
+            )
+            _ = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [appendAfterRollover.path],
+                now: appendHourStart.addingTimeInterval(55 * 60),
+                calendar: calendar
+            )
+            let appendRolledNow = appendHourStart.addingTimeInterval(65 * 60)
+            let beforeRolloverAppend = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [appendAfterRollover.path],
+                now: appendRolledNow,
+                calendar: calendar
+            )
+            expect(
+                beforeRolloverAppend.hourlyBuckets.last?.tokens == 0
+                    && hourlyTokens(
+                        beforeRolloverAppend.hourlyBuckets,
+                        containing: firstAppendEvent
+                    ) == 100,
+                "the cache rolls before a new token is appended"
+            )
+            let secondAppendEvent = appendHourStart.addingTimeInterval(66 * 60)
+            try appendLines(
+                [token(secondAppendEvent, total: 160, last: 60)],
+                to: appendAfterRollover
+            )
+            let afterRolloverAppend = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [appendAfterRollover.path],
+                now: appendHourStart.addingTimeInterval(67 * 60),
+                calendar: calendar
+            )
+            let repeatedAfterRolloverAppend = try CodexDailyTokenUsageReader
+                .readRecentHours(
+                    from: [appendAfterRollover.path],
+                    now: appendHourStart.addingTimeInterval(67 * 60),
+                    calendar: calendar
+                )
+            expect(
+                afterRolloverAppend.todayTokens == 160
+                    && hourlyTokens(
+                        afterRolloverAppend.hourlyBuckets,
+                        containing: firstAppendEvent
+                    ) == 100
+                    && hourlyTokens(
+                        afterRolloverAppend.hourlyBuckets,
+                        containing: secondAppendEvent
+                    ) == 60
+                    && afterRolloverAppend.hourlyBuckets.reduce(Int64(0)) {
+                        $0 + $1.tokens
+                    } == 160,
+                "a token appended after window rollover is added to the new hour"
+            )
+            expect(
+                repeatedAfterRolloverAppend == afterRolloverAppend,
+                "an appended token remains counted exactly once after window rollover"
+            )
+            expect(
+                CodexDailyTokenUsageReader.cacheDiagnosticsForTesting()
+                    .baselineScanCount == 1,
+                "an append after rollover uses the incremental cursor"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()

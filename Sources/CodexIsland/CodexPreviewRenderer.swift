@@ -246,6 +246,12 @@ enum CodexPreviewRenderer {
         let resetHoverURL = directory.appendingPathComponent(
             "codex-island-expanded-reset-hover.png"
         )
+        let chartLegendHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-chart-legend-hover.png"
+        )
+        let chartLegendHoverEnglishURL = directory.appendingPathComponent(
+            "codex-island-expanded-chart-legend-hover-english.png"
+        )
         var outputURLs = [
             compactURL,
             compactConsumingURL,
@@ -269,7 +275,9 @@ enum CodexPreviewRenderer {
             hoverBottomURL,
             contextHoverURL,
             contextHoverEnglishURL,
-            resetHoverURL
+            resetHoverURL,
+            chartLegendHoverURL,
+            chartLegendHoverEnglishURL
         ]
         outputURLs.append(contentsOf: companyThemePreviews.map(\.url))
         var englishSnapshot = snapshot
@@ -515,6 +523,24 @@ enum CodexPreviewRenderer {
             previewLanguagePreference: .chinese,
             size: expandedSize,
             to: resetHoverURL
+        )
+        try render(
+            snapshot: snapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredChartLegend: .modeEquivalent,
+            previewLanguagePreference: .chinese,
+            size: expandedSize,
+            to: chartLegendHoverURL
+        )
+        try render(
+            snapshot: englishSnapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            initialHoveredChartLegend: .modeEquivalent,
+            previewLanguagePreference: .english,
+            size: expandedSize,
+            to: chartLegendHoverEnglishURL
         )
 
         func renderMatrixPreview(
@@ -795,6 +821,7 @@ enum CodexPreviewRenderer {
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
+        initialHoveredChartLegend: TokenChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
@@ -832,6 +859,7 @@ enum CodexPreviewRenderer {
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
             initialHoveredContextThreadID: initialHoveredContextThreadID,
             initialResetSummaryHover: initialResetSummaryHover,
+            initialHoveredChartLegend: initialHoveredChartLegend,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,
             initialHoveredHeaderAction: initialHoveredHeaderAction,

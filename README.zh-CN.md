@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标移入后展开，展示 Codex 账户额度、Profile 头像与昵称、累计及近 30 天 Token 活动，以及最近三条会话各自的来源、精简模型名、推理强度、Fast 状态和累计 Token。
+Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标移入后展开，展示 Codex 账户额度、Profile 头像与昵称、累计及近期词元活动、实际用量与 Fast 模式等效用量，以及最近三条会话各自的来源、精简模型名、推理强度、Fast 状态和累计词元。
 
 账户、用量和会话索引来自本机 `codex app-server` 的只读接口；会话配置来自该会话本地 rollout 中最近一次 `thread_settings_applied`。Profile 昵称和头像通过 Codex App 当前使用的 Profile 接口按需读取，认证 token 只在请求期间保留于内存，不会写盘或输出到日志。程序不会解析会话消息正文，也不会调用消耗 reset credit 的接口。
 
@@ -12,7 +12,7 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 
 ![Codex Island 展开态总览](docs/images/ui/dashboard.png)
 
-> 截图由内置离屏预览生成，其中的额度、Token、套餐、日期和会话内容均为演示数据。`≈ … Token` 是根据最近 7 个完整自然日、当前额度周期长度和剩余比例计算的个性化估算值，不是 Codex 官方返回的精确 Token 额度。
+> 截图由内置离屏预览生成，其中的额度、词元、套餐、日期和会话内容均为演示数据。`≈ … 词元` 是根据最近 7 个完整自然日、当前额度周期长度和剩余比例计算的个性化估算值，不是 Codex 官方返回的精确词元额度。
 
 ### 收起态
 
@@ -29,6 +29,10 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 **会话 Token 明细**
 
 ![Codex Island 会话 Token 明细悬浮卡片](docs/images/ui/token-details.png)
+
+**实际用量与 ⚡ 模式等效用量**
+
+![Codex Island 用量序列说明](docs/images/ui/chart-legend.png)
 
 ### 设置
 
@@ -80,9 +84,9 @@ open "dist/Codex-Island.dmg"
 
 ### 直接下载 DMG（备选）
 
-**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.07.27/Codex-Island.dmg)**
+**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.08.28/Codex-Island.dmg)**
 
-当前版本为 `v2026.07.27`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
+当前版本为 `v2026.08.28`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
 
 ### 开机启动
 
@@ -121,7 +125,7 @@ swift run CodexIsland --render-preview dist/previews
 - 收起态左侧显示本机消息触发的全部模型调用当日 Token 新增量；检测到 Token 持续消耗时，粒子从刘海侧向当日用量方向流动；有会话执行时亮绿点，否则显示灰点
 - 主额度的剩余比例、下次重置时间、相对使用节奏，以及基于最近 7 个完整自然日使用习惯的个性化 Token 估算
 - `rateLimitResetCredits.availableCount` 显示可用 reset 次数；悬停可查看全部可用次数的到期时间
-- Profile 头像、昵称、账户累计 Token，以及可切换的近 30 日每日 / 过去 48 小时每小时 Token 柱图
+- Profile 头像、昵称、账户累计词元，以及可切换的近 30 日每日 / 过去 48 小时每小时用量柱图；图表可分别展示实际用量、Fast 模式等效用量或同时展示，并可悬停查看口径说明
 - 点击展开态的非会话区域可激活 Codex App；右上角依次提供截图复制、打开 Codex 设置、打开灵动岛设置和退出按钮
 - 灵动岛设置支持状态动效、Token 消耗动效、任务完成音效、品牌配色、界面语言、显示器选择与开机启动；任务完成音效与开机启动默认关闭；显示位置默认自动，也可固定到内建屏或任一已连接外接屏，目标屏断开时临时回退并在重连后自动恢复
 - Codex 账户套餐，以及最近三条 CLI/App 会话各自的来源、精简模型名（如 `5.6-Sol`）、推理强度和 Fast 状态；执行中的任务优先展示
@@ -143,7 +147,9 @@ swift run CodexIsland --render-preview dist/previews
 
 所有业务调用均为只读。为取得 App Profile 昵称和头像，程序通过本地 App Server 的 `getAuthStatus` 临时取得当前 token，然后请求 Codex App 当前使用的 `/wham/profiles/me`；网络会话使用无 Cookie、无磁盘缓存的临时配置，401 时最多刷新 token 并重试一次。该 Profile 路径不是公开契约，失败时自动回退为“Codex 用户”和昵称首字母占位，不会读取本机账户名或系统头像，也不影响额度、用量和会话状态。
 
-程序还会在 `$CODEX_HOME/sessions` 与 `$CODEX_HOME/archived_sessions` 中只读发现本机 CLI/App 会话、Fork 与子代理，并扫描对应 `.jsonl`；最近会话通过 `thread/list` 的 `source` 标记为 `TUI` 或 `APP`，同时只提取模型设置、带时间戳的 `token_count` 累计用量及 `task_started`、`task_complete`、`turn_aborted`、`error` 生命周期事件。当日和近 48 小时分时用量按每次模型调用后累计值的正向增量计算，重复通知不会重复计数；Fork 从自己的 `session_meta` 创建时间开始计入，子代理则从首个 `inter_agent_communication_metadata` 活动边界开始计入，因此不会重复统计时间戳被重写的父会话历史。今日柱与收起态今日数值都使用该本地实时结果，之前日期仍来自账户日汇总。最近会话列表、执行状态、累计 Token 和分时用量每秒刷新，本地全量会话索引每 15 秒刷新，额度保持 30 秒刷新，账户统计使用 5 分钟缓存，Profile 身份使用 15 分钟缓存。退出应用时子进程会一并结束。
+程序还会在 `$CODEX_HOME/sessions` 与 `$CODEX_HOME/archived_sessions` 中只读发现本机 CLI/App 会话、Fork 与子代理，并扫描对应 `.jsonl`；最近会话通过 `thread/list` 的 `source` 标记为 `TUI` 或 `APP`，同时只提取模型设置、带时间戳的 `token_count` 累计用量及 `task_started`、`task_complete`、`turn_aborted`、`error` 生命周期事件。当日和近 48 小时分时用量按每次模型调用后累计值的正向增量计算，重复通知不会重复计数；等效序列不会改变实际词元数，仅在用量计入 ChatGPT 额度时按对应模型的已知 Fast 额度倍率折算，未知模型不会猜测倍率。Fork 从自己的 `session_meta` 创建时间开始计入，子代理则从首个 `inter_agent_communication_metadata` 活动边界开始计入，因此不会重复统计时间戳被重写的父会话历史。
+
+本地 rollout 解析使用滚动内存缓存：未变化的文件只检查元数据，追加内容只从上次文件末尾继续读取，跨小时或日期时仅裁剪过期桶，不再重新扫描最近 30 天。今日柱与收起态今日数值都使用该本地实时结果，之前日期仍来自账户日汇总。最近会话列表、执行状态、累计词元和分时用量每秒刷新，本地全量会话索引每 15 秒刷新，额度保持 30 秒刷新，账户统计使用 5 分钟缓存，Profile 身份使用 15 分钟缓存。退出应用时子进程会一并结束。
 
 ## 第三方素材
 
