@@ -189,6 +189,9 @@ enum CodexPreviewRenderer {
         let expandedHourlyURL = directory.appendingPathComponent(
             "codex-island-expanded-hourly.png"
         )
+        let expandedSmallFastDeltaURL = directory.appendingPathComponent(
+            "codex-island-expanded-small-fast-delta.png"
+        )
         let expandedTsinghuaURL = directory.appendingPathComponent(
             "codex-island-expanded-tsinghua.png"
         )
@@ -259,6 +262,7 @@ enum CodexPreviewRenderer {
             compactConsuming1xURL,
             expandedURL,
             expandedHourlyURL,
+            expandedSmallFastDeltaURL,
             expandedTsinghuaURL,
             settingsURL,
             expandedEnglishURL,
@@ -357,6 +361,23 @@ enum CodexPreviewRenderer {
             expanded: true,
             size: expandedSize,
             to: expandedURL
+        )
+        var smallFastDeltaSnapshot = snapshot
+        smallFastDeltaSnapshot.billedDailyThreadTokens = snapshot.dailyThreadTokens.map {
+            DailyUsageBucket(
+                startDate: $0.startDate,
+                tokens: Int64((Double($0.tokens) * 1.02).rounded())
+            )
+        }
+        smallFastDeltaSnapshot.billedTodayThreadTokens = Int64(
+            (Double(snapshot.todayThreadTokens ?? 0) * 1.02).rounded()
+        )
+        try render(
+            snapshot: smallFastDeltaSnapshot,
+            displayGeometry: geometry,
+            expanded: true,
+            size: expandedSize,
+            to: expandedSmallFastDeltaURL
         )
         try render(
             snapshot: snapshot,
@@ -686,6 +707,29 @@ enum CodexPreviewRenderer {
             snapshot: hugeTokenSnapshot,
             expanded: false,
             width: IslandLayout.compactWidth(forNotchWidth: geometry.notchWidth)
+        )
+
+        var largeSessionTokenSnapshot = englishSnapshot
+        largeSessionTokenSnapshot.recentThreads[1].tokenUsage = ThreadTokenUsage(
+            inputTokens: 1_433_505_694,
+            cachedInputTokens: 1_409_567_616,
+            outputTokens: 3_051_868,
+            reasoningOutputTokens: 1_077_695,
+            totalTokens: 1_436_557_562,
+            contextTokensUsed: 188_432,
+            contextWindowTokens: 258_400
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-notch-token-popover-large-english-scale-2x.png",
+            snapshot: largeSessionTokenSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .english
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-notch-token-popover-large-chinese-scale-2x.png",
+            snapshot: largeSessionTokenSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .chinese
         )
 
         var headerWidthBoundarySnapshot = englishSnapshot

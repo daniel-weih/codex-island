@@ -179,7 +179,11 @@ private enum IslandPopoverContent: Equatable {
 
     func size(for language: IslandInterfaceLanguage) -> CGSize {
         switch self {
-        case .token: return TokenUsageDetailPopover.size
+        case .token(_, _, let usage):
+            return TokenUsageDetailPopover.size(
+                for: usage,
+                language: language
+            )
         case .context: return ContextWindowPopover.size
         case .reset(let summary):
             return ResetExpirationPopover.size(
@@ -3301,9 +3305,36 @@ private struct ThreadTokenUsageView: View {
 }
 
 private struct TokenUsageDetailPopover: View {
-    static let width: CGFloat = 278
+    static let minimumWidth: CGFloat = 278
     static let height: CGFloat = 78
-    static let size = CGSize(width: width, height: height)
+
+    static func size(
+        for usage: ThreadTokenUsage,
+        language: IslandInterfaceLanguage
+    ) -> CGSize {
+        CGSize(
+            width: width(for: usage, language: language),
+            height: height
+        )
+    }
+
+    private static func width(
+        for usage: ThreadTokenUsage,
+        language: IslandInterfaceLanguage
+    ) -> CGFloat {
+        let longestValue = [
+            usage.totalTokens,
+            usage.inputTokens,
+            usage.cachedInputTokens,
+            usage.outputTokens,
+            usage.reasoningOutputTokens
+        ]
+            .map { exactTokenCount($0).count }
+            .max() ?? 0
+        let baseWidth: CGFloat = language == .english ? 320 : 290
+        let overflowCharacters = max(0, longestValue - 13)
+        return min(420, baseWidth + CGFloat(overflowCharacters) * 13)
+    }
 
     let usage: ThreadTokenUsage
     @Environment(\.displayScale) private var displayScale
@@ -3311,6 +3342,8 @@ private struct TokenUsageDetailPopover: View {
     @Environment(\.islandColorTheme) private var theme
 
     var body: some View {
+        let width = Self.width(for: usage, language: language)
+
         VStack(spacing: 6) {
             HStack(spacing: 4) {
                 Text(language.text("累计词元", "TOTAL TOKENS"))
@@ -3350,7 +3383,7 @@ private struct TokenUsageDetailPopover: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .frame(width: Self.width, height: Self.height)
+        .frame(width: width, height: Self.height)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color(red: 0.018, green: 0.020, blue: 0.026))
@@ -3377,6 +3410,8 @@ private struct TokenUsageDetailPopover: View {
                 .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.32))
                 .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
+                .layoutPriority(1)
 
             Spacer(minLength: 4)
 
@@ -3846,13 +3881,13 @@ private struct AccountActivityCard: View {
         if chartRange == .hours48 {
             if hourlyUsage.allSatisfy({ $0.tokens == 0 }) {
                 return language.text(
-                    "近48小时暂无词元使用",
-                    "No tokens in the last 48 hours"
+                    "暂无分时用量",
+                    "No hourly token usage"
                 )
             }
             return language.text(
-                "近48小时词元",
-                "Hourly tokens · last 48 hours"
+                "分时用量",
+                "Hourly tokens"
             )
         }
         if usage.lifetimeTokens == nil
@@ -3865,13 +3900,13 @@ private struct AccountActivityCard: View {
         }
         if usage.dailyUsageBuckets.isEmpty && (todayTokens ?? 0) == 0 {
             return language.text(
-                "近30天暂无词元使用",
-                "No token usage in the last 30 days"
+                "暂无每日用量",
+                "No daily token usage"
             )
         }
         return language.text(
-            "近30天用量",
-            "Daily tokens · last 30 days"
+            "每日用量",
+            "Daily tokens"
         )
     }
 
@@ -4163,59 +4198,13 @@ private enum TokenChartBarStyle {
     case marker(seed: UInt64)
 }
 
-private enum TokenChartSegmentPosition {
-    case whole
-    case top
-    case bottom
-}
-
-private struct TokenChartSegmentShape: Shape {
-    let position: TokenChartSegmentPosition
-
+private struct TokenChartBarShape: Shape {
     func path(in rect: CGRect) -> Path {
         guard rect.width > 0, rect.height > 0 else { return Path() }
-
-        switch position {
-        case .whole:
-            return Path(
-                roundedRect: rect,
-                cornerRadius: min(rect.width, rect.height) / 2
-            )
-        case .top:
-            let radius = min(rect.width / 2, rect.height)
-            var path = Path()
-            path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
-            path.addQuadCurve(
-                to: CGPoint(x: rect.minX + radius, y: rect.minY),
-                control: CGPoint(x: rect.minX, y: rect.minY)
-            )
-            path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
-            path.addQuadCurve(
-                to: CGPoint(x: rect.maxX, y: rect.minY + radius),
-                control: CGPoint(x: rect.maxX, y: rect.minY)
-            )
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-            path.closeSubpath()
-            return path
-        case .bottom:
-            let radius = min(rect.width / 2, rect.height)
-            var path = Path()
-            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
-            path.addQuadCurve(
-                to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
-                control: CGPoint(x: rect.maxX, y: rect.maxY)
-            )
-            path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
-            path.addQuadCurve(
-                to: CGPoint(x: rect.minX, y: rect.maxY - radius),
-                control: CGPoint(x: rect.minX, y: rect.maxY)
-            )
-            path.closeSubpath()
-            return path
-        }
+        return Path(
+            roundedRect: rect,
+            cornerRadius: min(rect.width, rect.height) / 2
+        )
     }
 }
 
@@ -4288,7 +4277,6 @@ private struct TokenChartSlimBar: View {
     let color: Color
     let isEmpty: Bool
     var style: TokenChartBarStyle = .solid
-    var segmentPosition: TokenChartSegmentPosition = .whole
 
     @Environment(\.displayScale) private var displayScale
 
@@ -4297,7 +4285,7 @@ private struct TokenChartSlimBar: View {
         if !isEmpty {
             switch style {
             case .solid:
-                TokenChartSegmentShape(position: segmentPosition)
+                TokenChartBarShape()
                 .fill(
                     LinearGradient(
                         colors: [color, color.opacity(0.58)],
@@ -4338,9 +4326,7 @@ private struct TokenChartSlimBar: View {
             width: max(pixel, size.width - (baseInset * 2)),
             height: max(pixel, size.height - (baseInset * 2))
         )
-        let silhouette = TokenChartSegmentShape(
-            position: segmentPosition
-        ).path(in: baseRect)
+        let silhouette = TokenChartBarShape().path(in: baseRect)
 
         // A transparent body with two slightly misregistered outlines stays
         // legible at menu-bar scale while retaining a restrained hand-drawn
@@ -4370,9 +4356,7 @@ private struct TokenChartSlimBar: View {
                     size.height - (passInset * 2) - yOffset
                 )
             )
-            let outline = TokenChartSegmentShape(
-                position: segmentPosition
-            ).path(in: rect)
+            let outline = TokenChartBarShape().path(in: rect)
             context.stroke(
                 outline,
                 with: .color(color.opacity(pass == 0 ? 0.72 : 0.30)),
@@ -4400,40 +4384,42 @@ private struct TokenChartCombinedBar: View {
         showsActual ? max(0, actualHeight) : 0
     }
 
-    private var equivalentSegmentHeight: CGFloat {
-        guard showsBilled else { return 0 }
-        if showsActual {
-            return max(0, billedHeight - visibleActualHeight)
-        }
-        return max(0, billedHeight)
+    private var visibleBilledHeight: CGFloat {
+        showsBilled ? max(0, billedHeight) : 0
+    }
+
+    private var combinedHeight: CGFloat {
+        max(visibleActualHeight, visibleBilledHeight)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if equivalentSegmentHeight > 0 {
+        ZStack(alignment: .bottom) {
+            if visibleBilledHeight > 0 {
                 TokenChartSlimBar(
-                    height: equivalentSegmentHeight,
+                    height: visibleBilledHeight,
                     width: width,
                     color: color,
                     isEmpty: false,
-                    style: .marker(seed: seed),
-                    segmentPosition: visibleActualHeight > 0 ? .top : .whole
+                    style: .marker(seed: seed)
                 )
                 .opacity(isHovered ? 1 : 0.92)
             }
 
             if visibleActualHeight > 0 {
-                TokenChartSlimBar(
-                    height: visibleActualHeight,
-                    width: width,
-                    color: color,
-                    isEmpty: false,
-                    segmentPosition: equivalentSegmentHeight > 0 ? .bottom : .whole
-                )
-                .opacity(isHovered ? 0.98 : 0.76)
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [color, color.opacity(0.58)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: width, height: visibleActualHeight)
+                    .opacity(isHovered ? 0.98 : 0.76)
             }
         }
-        .frame(width: width, alignment: .bottom)
+        .frame(width: width, height: combinedHeight, alignment: .bottom)
+        .clipShape(TokenChartBarShape())
     }
 }
 
