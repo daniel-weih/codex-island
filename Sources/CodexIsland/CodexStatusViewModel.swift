@@ -455,7 +455,8 @@ final class CodexStatusViewModel: ObservableObject {
             let usage = try? CodexDailyTokenUsageReader.readRecentHours(
                 from: tokenPaths,
                 now: now,
-                usesChatGPTCredits: usesChatGPTCredits
+                usesChatGPTCredits: usesChatGPTCredits,
+                priorityRolloutPaths: recentPaths
             )
             let freshPaths: [String]
             if let usage {

@@ -2492,6 +2492,12 @@ struct ParserChecks {
                 [
                     sessionMeta(forked: true, startedAt: laterToday),
                     token(laterToday.addingTimeInterval(0.5), total: 9_900, last: 9_900),
+                    threadSettings(
+                        laterToday.addingTimeInterval(0.75),
+                        model: "gpt-5.6-sol",
+                        modelProviderID: "openai",
+                        serviceTier: "priority"
+                    ),
                     sessionMeta(
                         forked: true,
                         startedAt: laterToday.addingTimeInterval(1)
@@ -2508,6 +2514,16 @@ struct ParserChecks {
             expect(
                 forkValue == 99,
                 "forked rollout counts new model calls but skips copied history"
+            )
+            let forkUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [forked.path],
+                now: now,
+                calendar: calendar,
+                usesChatGPTCredits: true
+            )
+            expect(
+                forkUsage.billedTodayTokens == 248,
+                "forked usage inherits the pre-boundary Fast baseline"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2551,6 +2567,12 @@ struct ParserChecks {
             let subagent = write(
                 [
                     sessionMeta(startedAt: laterToday, subagent: true),
+                    threadSettings(
+                        laterToday,
+                        model: "gpt-5.6-sol",
+                        modelProviderID: "openai",
+                        serviceTier: "priority"
+                    ),
                     token(laterToday, total: 500, last: 500),
                     token(laterToday, total: 570, last: 70),
                     #"{"type":"response_item","payload":{"text":"inter_agent_communication_metadata"}}"#,
@@ -2576,14 +2598,23 @@ struct ParserChecks {
             expect(
                 subagentHourlyValue.hourlyBuckets.reduce(Int64(0)) {
                     $0 + $1.tokens
-                } == 70,
-                "hourly timeline also excludes subagent parent-history replay"
+                } == 70
+                    && subagentHourlyValue.billedHourlyBuckets.reduce(Int64(0)) {
+                        $0 + $1.tokens
+                    } == 175,
+                "subagent usage inherits the pre-boundary Fast baseline without counting replayed Tokens"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
             let pendingSubagent = write(
                 [
                     sessionMeta(startedAt: laterToday, subagent: true),
+                    threadSettings(
+                        laterToday,
+                        model: "gpt-5.6-sol",
+                        modelProviderID: "openai",
+                        serviceTier: "priority"
+                    ),
                     token(laterToday, total: 9_000, last: 9_000)
                 ],
                 name: "pending-subagent.jsonl"
@@ -2613,6 +2644,16 @@ struct ParserChecks {
             expect(
                 readyValue == 80,
                 "subagent cache rebuilds when the activity boundary is appended"
+            )
+            let readyUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [pendingSubagent.path],
+                now: now,
+                calendar: calendar,
+                usesChatGPTCredits: true
+            )
+            expect(
+                readyUsage.billedTodayTokens == 200,
+                "appended subagent activity restores the inherited Fast baseline"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2705,6 +2746,100 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(largeValue == 60, "oversized unrelated rollout rows do not break daily scanning")
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let coldHistory = write(
+                [
+                    sessionMeta(),
+                    token(afterMidnight, total: 10, last: 10)
+                ],
+                name: "cold-history.jsonl"
+            )
+            let liveHistory = write(
+                [
+                    sessionMeta(),
+                    token(afterMidnight, total: 20, last: 20)
+                ],
+                name: "live-history.jsonl"
+            )
+            let inactiveModifiedAt = now.addingTimeInterval(-2 * 60 * 60)
+            try FileManager.default.setAttributes(
+                [.modificationDate: inactiveModifiedAt],
+                ofItemAtPath: coldHistory.path
+            )
+            try FileManager.default.setAttributes(
+                [.modificationDate: inactiveModifiedAt],
+                ofItemAtPath: liveHistory.path
+            )
+            let splitPaths = [coldHistory.path, liveHistory.path]
+            let initialSplitUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: splitPaths,
+                now: now,
+                calendar: calendar,
+                priorityRolloutPaths: [liveHistory.path]
+            )
+            let initialPerformance = CodexDailyTokenUsageReader
+                .performanceDiagnosticsForTesting()
+            let repeatedSplitUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: splitPaths,
+                now: now.addingTimeInterval(1),
+                calendar: calendar,
+                priorityRolloutPaths: [liveHistory.path]
+            )
+            let repeatedPerformance = CodexDailyTokenUsageReader
+                .performanceDiagnosticsForTesting()
+            expect(
+                initialSplitUsage.todayTokens == 30
+                    && repeatedSplitUsage == initialSplitUsage,
+                "hot and cold rollout polling preserves the aggregated usage"
+            )
+            expect(
+                initialPerformance.metadataCheckCount == 2
+                    && repeatedPerformance.metadataCheckCount == 3,
+                "one-second polling skips metadata checks for inactive history"
+            )
+
+            try appendLines(
+                [token(laterToday, total: 15, last: 5)],
+                to: coldHistory
+            )
+            let beforeHistoricalRefresh = try CodexDailyTokenUsageReader
+                .readRecentHours(
+                    from: splitPaths,
+                    now: now.addingTimeInterval(2),
+                    calendar: calendar,
+                    priorityRolloutPaths: [liveHistory.path]
+                )
+            let afterHistoricalRefresh = try CodexDailyTokenUsageReader
+                .readRecentHours(
+                    from: splitPaths,
+                    now: now.addingTimeInterval(31),
+                    calendar: calendar,
+                    priorityRolloutPaths: [liveHistory.path]
+                )
+            let refreshedPerformance = CodexDailyTokenUsageReader
+                .performanceDiagnosticsForTesting()
+            expect(
+                beforeHistoricalRefresh.todayTokens == 30
+                    && afterHistoricalRefresh.todayTokens == 35,
+                "inactive history refreshes within the bounded 30-second interval"
+            )
+            expect(
+                refreshedPerformance.metadataCheckCount == 6
+                    && refreshedPerformance.aggregateRebuildCount == 0,
+                "changed files update cached aggregates by delta"
+            )
+            let afterColdPathRemoval = try CodexDailyTokenUsageReader
+                .readRecentHours(
+                    from: [liveHistory.path],
+                    now: now.addingTimeInterval(32),
+                    calendar: calendar,
+                    priorityRolloutPaths: [liveHistory.path]
+                )
+            expect(
+                afterColdPathRemoval.todayTokens == 20,
+                "removing a rollout path subtracts its cached aggregate"
+            )
 
             let codexHome = directory.appendingPathComponent("codex-home")
             let sessions = codexHome

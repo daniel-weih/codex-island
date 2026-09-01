@@ -20,6 +20,11 @@ struct DailyTokenUsageCacheDiagnostics: Equatable, Sendable {
     var baselineScanCount: Int
 }
 
+struct DailyTokenUsagePerformanceDiagnostics: Equatable, Sendable {
+    var metadataCheckCount: Int
+    var aggregateRebuildCount: Int
+}
+
 /// Computes actual and Standard-mode-equivalent Token increments for local
 /// CLI/App calls.
 /// Each new `last_token_usage` is counted once at message granularity; only the
@@ -49,14 +54,16 @@ enum CodexDailyTokenUsageReader {
         from rolloutPaths: [String],
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent,
-        usesChatGPTCredits: Bool = true
+        usesChatGPTCredits: Bool = true,
+        priorityRolloutPaths: [String] = []
     ) throws -> LocalTokenUsageSnapshot {
         try cache.readRecentHours(
             from: rolloutPaths,
             now: now,
             calendar: calendar,
             hourCount: recentHourCount,
-            usesChatGPTCredits: usesChatGPTCredits
+            usesChatGPTCredits: usesChatGPTCredits,
+            priorityRolloutPaths: priorityRolloutPaths
         )
     }
 
@@ -66,7 +73,7 @@ enum CodexDailyTokenUsageReader {
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent
     ) throws -> [String] {
-        try DailyTokenUsageCache.discoverLocalUsageRollouts(
+        try cache.discoverLocalUsageRollouts(
             now: now,
             calendar: calendar
         )
@@ -78,6 +85,11 @@ enum CodexDailyTokenUsageReader {
 
     static func cacheDiagnosticsForTesting() -> DailyTokenUsageCacheDiagnostics {
         cache.diagnostics()
+    }
+
+    static func performanceDiagnosticsForTesting()
+        -> DailyTokenUsagePerformanceDiagnostics {
+        cache.performanceDiagnostics()
     }
 }
 
@@ -99,12 +111,12 @@ private enum DailyUsageRecord {
     case token(DailyTokenEvent)
 }
 
-private enum ActivityBoundaryKind {
+private enum ActivityBoundaryKind: Equatable {
     case subagent
     case fork(sessionID: String)
 }
 
-private struct DailyTokenFileEntry {
+private struct DailyTokenFileEntry: Equatable {
     var fileIdentity: String
     var fileSize: UInt64
     var modifiedAt: Date
@@ -125,6 +137,12 @@ private struct DailyTokenFileEntry {
     var isWaitingForActivityBoundary: Bool
     var activityBoundaryKind: ActivityBoundaryKind?
     var activityBoundarySearchOffset: UInt64?
+}
+
+private struct LocalUsageDiscoveryEntry {
+    var fileSize: UInt64
+    var modifiedAt: Date
+    var isLocalUsageRollout: Bool
 }
 
 private enum DailyTokenUsageError: LocalizedError {
@@ -160,8 +178,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         "inter_agent_communication_metadata".utf8
     )
     private static let freshRunningLookback: TimeInterval = 30 * 60
+    /// Recently active rollouts are checked on every UI tick. Older files are
+    /// metadata-polled less often because they cannot change the live state
+    /// without first receiving a new append.
+    private static let historicalMetadataRefreshInterval: TimeInterval = 30
 
     private let lock = NSLock()
+    private let discoveryLock = NSLock()
     private var dayStart: Date?
     private var nextDayStart: Date?
     private var hourlyRangeStart: Date?
@@ -172,7 +195,18 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private var lastObservedNow: Date?
     private var cachedRolloutPaths: Set<String> = []
     private var entries: [String: DailyTokenFileEntry] = [:]
+    private var nextHistoricalMetadataRefreshAt: Date?
+    private var aggregateTodayTotal: Int64 = 0
+    private var aggregateHourlyTotals: [Date: Int64] = [:]
+    private var aggregateDailyTotals: [Date: Int64] = [:]
+    private var aggregateBilledTodayTotal: Int64 = 0
+    private var aggregateBilledHourlyTotals: [Date: Int64] = [:]
+    private var aggregateBilledDailyTotals: [Date: Int64] = [:]
+    private var aggregatesNeedRebuild = false
     private var baselineScanCount = 0
+    private var metadataCheckCount = 0
+    private var aggregateRebuildCount = 0
+    private var discoveryEntries: [String: LocalUsageDiscoveryEntry] = [:]
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -188,7 +222,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
     func reset() {
         lock.lock()
-        defer { lock.unlock() }
         dayStart = nil
         nextDayStart = nil
         hourlyRangeStart = nil
@@ -199,7 +232,16 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         lastObservedNow = nil
         cachedRolloutPaths.removeAll()
         entries.removeAll()
+        nextHistoricalMetadataRefreshAt = nil
+        resetAggregates()
         baselineScanCount = 0
+        metadataCheckCount = 0
+        aggregateRebuildCount = 0
+        lock.unlock()
+
+        discoveryLock.lock()
+        discoveryEntries.removeAll()
+        discoveryLock.unlock()
     }
 
     func diagnostics() -> DailyTokenUsageCacheDiagnostics {
@@ -210,12 +252,22 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         )
     }
 
+    func performanceDiagnostics() -> DailyTokenUsagePerformanceDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return DailyTokenUsagePerformanceDiagnostics(
+            metadataCheckCount: metadataCheckCount,
+            aggregateRebuildCount: aggregateRebuildCount
+        )
+    }
+
     func readRecentHours(
         from rolloutPaths: [String],
         now: Date,
         calendar: Calendar,
         hourCount: Int,
-        usesChatGPTCredits: Bool
+        usesChatGPTCredits: Bool,
+        priorityRolloutPaths: [String]
     ) throws -> LocalTokenUsageSnapshot {
         guard hourCount > 0,
               let currentHourStart = calendar.dateInterval(
@@ -280,12 +332,16 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
         if mustRebuild {
             entries.removeAll()
+            cachedRolloutPaths.removeAll()
+            nextHistoricalMetadataRefreshAt = nil
+            resetAggregates()
         } else if windowChanged {
             rollCachedEntries(
                 dayStart: resolvedDayStart,
                 hourlyRangeStart: resolvedHourlyRangeStart,
                 dailyRangeStart: resolvedDailyRangeStart
             )
+            aggregatesNeedRebuild = true
         }
         dayStart = resolvedDayStart
         nextDayStart = resolvedNextDayStart
@@ -304,11 +360,23 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 }
         )).sorted()
         let activePathSet = Set(paths)
-        if activePathSet != cachedRolloutPaths {
-            entries = entries.filter { activePathSet.contains($0.key) }
+        let pathSetChanged = activePathSet != cachedRolloutPaths
+        if pathSetChanged {
+            let removedPaths = cachedRolloutPaths.subtracting(activePathSet)
+            for path in removedPaths {
+                guard let removed = entries.removeValue(forKey: path) else {
+                    continue
+                }
+                if !aggregatesNeedRebuild,
+                   !removeFromAggregates(removed) {
+                    aggregatesNeedRebuild = true
+                }
+            }
             cachedRolloutPaths = activePathSet
         }
         guard !paths.isEmpty else {
+            entries.removeAll()
+            resetAggregates()
             let emptyHourlyBuckets = Self.emptyHourlyBuckets(
                 startingAt: resolvedHourlyRangeStart,
                 count: hourCount,
@@ -330,19 +398,44 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             )
         }
 
-        var readableCount = 0
-        var total: Int64 = 0
-        var hourlyTotals: [Date: Int64] = [:]
-        var dailyTotals: [Date: Int64] = [:]
-        var billedTotal: Int64 = 0
-        var billedHourlyTotals: [Date: Int64] = [:]
-        var billedDailyTotals: [Date: Int64] = [:]
-        var recentlyModifiedRolloutPaths: [String] = []
+        let priorityPathSet = Set(
+            priorityRolloutPaths
+                .filter { !$0.isEmpty }
+                .map {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path
+                }
+        )
         let recentModificationCutoff = now.addingTimeInterval(
             -Self.freshRunningLookback
         )
+        let historicalMetadataRefreshDue = nextHistoricalMetadataRefreshAt
+            .map { now >= $0 } ?? true
+        let refreshAllMetadata = mustRebuild
+            || windowChanged
+            || pathSetChanged
+            || historicalMetadataRefreshDue
+        if refreshAllMetadata {
+            nextHistoricalMetadataRefreshAt = now.addingTimeInterval(
+                Self.historicalMetadataRefreshInterval
+            )
+        }
+
+        var readableCount = 0
         for path in paths {
             let url = URL(fileURLWithPath: path).standardizedFileURL
+            let cached = entries[url.path]
+            let shouldRefreshMetadata = cached == nil
+                || refreshAllMetadata
+                || priorityPathSet.contains(url.path)
+                || cached.map {
+                    $0.modifiedAt >= recentModificationCutoff
+                } == true
+            guard shouldRefreshMetadata else {
+                readableCount += 1
+                continue
+            }
+
+            metadataCheckCount += 1
             do {
                 let entry = try refreshedEntry(
                     for: url,
@@ -353,45 +446,34 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     usesChatGPTCredits: usesChatGPTCredits,
                     calendar: calendar
                 )
-                entries[url.path] = entry
                 readableCount += 1
-                if entry.modifiedAt >= recentModificationCutoff {
-                    recentlyModifiedRolloutPaths.append(url.path)
-                }
-                total = Self.clampedAdd(total, entry.todayTotal)
-                for (hourStart, tokens) in entry.hourlyTotals {
-                    hourlyTotals[hourStart] = Self.clampedAdd(
-                        hourlyTotals[hourStart, default: 0],
-                        tokens
-                    )
-                }
-                billedTotal = Self.clampedAdd(
-                    billedTotal,
-                    entry.billedTodayTotal
-                )
-                for (hourStart, tokens) in entry.billedHourlyTotals {
-                    billedHourlyTotals[hourStart] = Self.clampedAdd(
-                        billedHourlyTotals[hourStart, default: 0],
-                        tokens
-                    )
-                }
-                for (dateStart, tokens) in entry.billedDailyTotals {
-                    billedDailyTotals[dateStart] = Self.clampedAdd(
-                        billedDailyTotals[dateStart, default: 0],
-                        tokens
-                    )
-                }
-                for (dateStart, tokens) in entry.dailyTotals {
-                    dailyTotals[dateStart] = Self.clampedAdd(
-                        dailyTotals[dateStart, default: 0],
-                        tokens
+                if cached != entry {
+                    replaceCachedEntry(
+                        at: url.path,
+                        previous: cached,
+                        with: entry
                     )
                 }
             } catch {
                 // A thread may disappear from the state index while it is being
                 // archived. Preserve the rest of the independently readable sum.
+                if let removed = entries.removeValue(forKey: url.path),
+                   !aggregatesNeedRebuild,
+                   !removeFromAggregates(removed) {
+                    aggregatesNeedRebuild = true
+                }
                 continue
             }
+        }
+
+        if aggregatesNeedRebuild {
+            rebuildAggregates()
+        }
+
+        let recentlyModifiedRolloutPaths = paths.filter { path in
+            entries[path].map {
+                $0.modifiedAt >= recentModificationCutoff
+            } == true
         }
 
         guard readableCount > 0 else {
@@ -404,7 +486,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         ).map { bucket in
             HourlyUsageBucket(
                 hourStart: bucket.hourStart,
-                tokens: hourlyTotals[bucket.hourStart] ?? 0
+                tokens: aggregateHourlyTotals[bucket.hourStart] ?? 0
             )
         }
         let dailyBuckets = Self.emptyDailyBuckets(
@@ -415,7 +497,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             DailyUsageBucket(
                 startDate: bucket.startDate,
                 tokens: Self.dayDate(bucket.startDate, calendar: calendar)
-                    .flatMap { dailyTotals[$0] } ?? 0
+                    .flatMap { aggregateDailyTotals[$0] } ?? 0
             )
         }
         let billedBuckets = Self.emptyHourlyBuckets(
@@ -425,7 +507,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         ).map { bucket in
             HourlyUsageBucket(
                 hourStart: bucket.hourStart,
-                tokens: billedHourlyTotals[bucket.hourStart] ?? 0
+                tokens: aggregateBilledHourlyTotals[bucket.hourStart] ?? 0
             )
         }
         let billedDailyBuckets = Self.emptyDailyBuckets(
@@ -436,18 +518,155 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             DailyUsageBucket(
                 startDate: bucket.startDate,
                 tokens: Self.dayDate(bucket.startDate, calendar: calendar)
-                    .flatMap { billedDailyTotals[$0] } ?? 0
+                    .flatMap { aggregateBilledDailyTotals[$0] } ?? 0
             )
         }
         return LocalTokenUsageSnapshot(
-            todayTokens: total,
+            todayTokens: aggregateTodayTotal,
             hourlyBuckets: buckets,
             dailyBuckets: dailyBuckets,
-            billedTodayTokens: billedTotal,
+            billedTodayTokens: aggregateBilledTodayTotal,
             billedHourlyBuckets: billedBuckets,
             billedDailyBuckets: billedDailyBuckets,
             recentlyModifiedRolloutPaths: recentlyModifiedRolloutPaths
         )
+    }
+
+    private func replaceCachedEntry(
+        at path: String,
+        previous: DailyTokenFileEntry?,
+        with entry: DailyTokenFileEntry
+    ) {
+        if let previous,
+           !aggregatesNeedRebuild,
+           !removeFromAggregates(previous) {
+            aggregatesNeedRebuild = true
+        }
+        entries[path] = entry
+        if !aggregatesNeedRebuild {
+            addToAggregates(entry)
+        }
+    }
+
+    private func resetAggregates() {
+        aggregateTodayTotal = 0
+        aggregateHourlyTotals.removeAll(keepingCapacity: true)
+        aggregateDailyTotals.removeAll(keepingCapacity: true)
+        aggregateBilledTodayTotal = 0
+        aggregateBilledHourlyTotals.removeAll(keepingCapacity: true)
+        aggregateBilledDailyTotals.removeAll(keepingCapacity: true)
+        aggregatesNeedRebuild = false
+    }
+
+    private func rebuildAggregates() {
+        resetAggregates()
+        for entry in entries.values {
+            addToAggregates(entry)
+        }
+        aggregateRebuildCount += 1
+    }
+
+    private func addToAggregates(_ entry: DailyTokenFileEntry) {
+        aggregateTodayTotal = Self.clampedAdd(
+            aggregateTodayTotal,
+            entry.todayTotal
+        )
+        Self.add(entry.hourlyTotals, to: &aggregateHourlyTotals)
+        Self.add(entry.dailyTotals, to: &aggregateDailyTotals)
+        aggregateBilledTodayTotal = Self.clampedAdd(
+            aggregateBilledTodayTotal,
+            entry.billedTodayTotal
+        )
+        Self.add(
+            entry.billedHourlyTotals,
+            to: &aggregateBilledHourlyTotals
+        )
+        Self.add(
+            entry.billedDailyTotals,
+            to: &aggregateBilledDailyTotals
+        )
+    }
+
+    private func removeFromAggregates(_ entry: DailyTokenFileEntry) -> Bool {
+        guard Self.canSubtract(
+                entry.todayTotal,
+                from: aggregateTodayTotal
+              ),
+              Self.canSubtract(
+                entry.hourlyTotals,
+                from: aggregateHourlyTotals
+              ),
+              Self.canSubtract(
+                entry.dailyTotals,
+                from: aggregateDailyTotals
+              ),
+              Self.canSubtract(
+                entry.billedTodayTotal,
+                from: aggregateBilledTodayTotal
+              ),
+              Self.canSubtract(
+                entry.billedHourlyTotals,
+                from: aggregateBilledHourlyTotals
+              ),
+              Self.canSubtract(
+                entry.billedDailyTotals,
+                from: aggregateBilledDailyTotals
+              ) else {
+            return false
+        }
+
+        aggregateTodayTotal -= entry.todayTotal
+        Self.subtract(entry.hourlyTotals, from: &aggregateHourlyTotals)
+        Self.subtract(entry.dailyTotals, from: &aggregateDailyTotals)
+        aggregateBilledTodayTotal -= entry.billedTodayTotal
+        Self.subtract(
+            entry.billedHourlyTotals,
+            from: &aggregateBilledHourlyTotals
+        )
+        Self.subtract(
+            entry.billedDailyTotals,
+            from: &aggregateBilledDailyTotals
+        )
+        return true
+    }
+
+    private static func add(
+        _ contribution: [Date: Int64],
+        to aggregate: inout [Date: Int64]
+    ) {
+        for (date, tokens) in contribution {
+            aggregate[date] = clampedAdd(
+                aggregate[date, default: 0],
+                tokens
+            )
+        }
+    }
+
+    private static func canSubtract(_ value: Int64, from total: Int64) -> Bool {
+        value == 0 || (total != Int64.max && total >= value)
+    }
+
+    private static func canSubtract(
+        _ contribution: [Date: Int64],
+        from aggregate: [Date: Int64]
+    ) -> Bool {
+        contribution.allSatisfy { date, tokens in
+            canSubtract(tokens, from: aggregate[date, default: 0])
+        }
+    }
+
+    private static func subtract(
+        _ contribution: [Date: Int64],
+        from aggregate: inout [Date: Int64]
+    ) {
+        for (date, tokens) in contribution {
+            let updated = aggregate[date, default: 0] - tokens
+            if updated == 0 {
+                aggregate.removeValue(forKey: date)
+            } else {
+                aggregate[date] = updated
+            }
+        }
     }
 
     /// Time windows only move forward during normal operation. Preserve the
@@ -479,10 +698,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         }
     }
 
-    static func discoverLocalUsageRollouts(
+    func discoverLocalUsageRollouts(
         now: Date,
         calendar: Calendar
     ) throws -> [String] {
+        discoveryLock.lock()
+        defer { discoveryLock.unlock() }
+
         let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start
             ?? calendar.startOfDay(for: now)
         let historyStart = calendar.date(
@@ -492,7 +714,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         ) ?? currentHourStart
         let cutoff = min(
             historyStart,
-            now.addingTimeInterval(-freshRunningLookback)
+            now.addingTimeInterval(-Self.freshRunningLookback)
         )
         let configuredHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
             .map { ($0 as NSString).expandingTildeInPath }
@@ -503,13 +725,15 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             .resolvingSymlinksInPath()
         let resourceKeys: [URLResourceKey] = [
             .isRegularFileKey,
-            .contentModificationDateKey
+            .contentModificationDateKey,
+            .fileSizeKey
         ]
         let roots = ["sessions", "archived_sessions"].map {
             codexHome.appendingPathComponent($0, isDirectory: true)
         }
 
         var paths: [String] = []
+        var observedPaths: Set<String> = []
         for root in roots {
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
@@ -523,12 +747,35 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 let values = try? url.resourceValues(forKeys: Set(resourceKeys))
                 guard values?.isRegularFile == true,
                       let modifiedAt = values?.contentModificationDate,
-                      modifiedAt >= cutoff,
-                      (try? isLocalUsageRollout(url: url)) == true else {
+                      modifiedAt >= cutoff else {
                     continue
                 }
-                paths.append(url.standardizedFileURL.path)
+                let path = url.standardizedFileURL.path
+                let fileSize = UInt64(max(0, values?.fileSize ?? 0))
+                observedPaths.insert(path)
+
+                let isLocalUsageRollout: Bool
+                if let cached = discoveryEntries[path],
+                   cached.fileSize == fileSize,
+                   cached.modifiedAt == modifiedAt {
+                    isLocalUsageRollout = cached.isLocalUsageRollout
+                } else {
+                    isLocalUsageRollout = (try? Self.isLocalUsageRollout(
+                        url: url
+                    )) == true
+                    discoveryEntries[path] = LocalUsageDiscoveryEntry(
+                        fileSize: fileSize,
+                        modifiedAt: modifiedAt,
+                        isLocalUsageRollout: isLocalUsageRollout
+                    )
+                }
+                if isLocalUsageRollout {
+                    paths.append(path)
+                }
             }
+        }
+        discoveryEntries = discoveryEntries.filter {
+            observedPaths.contains($0.key)
         }
         return Array(Set(paths)).sorted()
     }
@@ -601,12 +848,12 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             guard modifiedAt >= resumedCountingStart else { return cached }
 
             baselineScanCount += 1
-            let records = try Self.scanBackwardToDailyBaseline(
+            try Self.scanDailyBaselineRecords(
                 url: url,
                 fileSize: fileSize,
-                dayStart: resumedCountingStart
-            )
-            for record in records.reversed() {
+                dayStart: resumedCountingStart,
+                baselineSearchUpperBound: search.activityStartOffset
+            ) { record in
                 Self.consume(
                     record,
                     previousTotal: &cached.previousTotal,
@@ -702,6 +949,27 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             dailyRangeStart,
             session.activityStartedAt ?? session.startedAt ?? dailyRangeStart
         )
+        let knownBaselineLowerBound: UInt64?
+        let baselineSearchUpperBound: UInt64?
+        if session.activityStartedAt != nil {
+            // The child inherits model, provider, and Fast settings from the
+            // replayed parent history. Search backwards from the activity
+            // boundary for that reducer baseline, then stream forward without
+            // retaining the copied records in memory.
+            knownBaselineLowerBound = nil
+            baselineSearchUpperBound = session.activityBoundaryOffset
+        } else if session.activityBoundaryKind == nil,
+                  let startedAt = session.startedAt,
+                  startedAt >= dailyRangeStart {
+            // A normal rollout created inside the visible range has no copied
+            // history before its session metadata. Stream it once from byte 0
+            // instead of first walking the same large file backwards.
+            knownBaselineLowerBound = 0
+            baselineSearchUpperBound = nil
+        } else {
+            knownBaselineLowerBound = nil
+            baselineSearchUpperBound = nil
+        }
         var entry = DailyTokenFileEntry(
             fileIdentity: fileIdentity,
             fileSize: fileSize,
@@ -730,12 +998,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         guard !entry.isExcluded, modifiedAt >= countingStart else { return entry }
 
         baselineScanCount += 1
-        let records = try Self.scanBackwardToDailyBaseline(
+        try Self.scanDailyBaselineRecords(
             url: url,
             fileSize: fileSize,
-            dayStart: countingStart
-        )
-        for record in records.reversed() {
+            dayStart: countingStart,
+            knownLowerBound: knownBaselineLowerBound,
+            baselineSearchUpperBound: baselineSearchUpperBound
+        ) { record in
             Self.consume(
                 record,
                 previousTotal: &entry.previousTotal,
@@ -934,21 +1203,57 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         ).map { calendar.startOfDay(for: $0) }
     }
 
-    /// Returns newest-to-oldest events, including the first absolute counter
-    /// before the requested range as the cumulative baseline.
-    private static func scanBackwardToDailyBaseline(
+    /// Finds the oldest baseline record with a bounded backwards pass, then
+    /// streams forward from that byte offset. The previous implementation kept
+    /// every parsed record in an array before reversing it, which made a single
+    /// large rollout temporarily retain hundreds of megabytes of objects.
+    private static func scanDailyBaselineRecords(
+        url: URL,
+        fileSize: UInt64,
+        dayStart: Date,
+        knownLowerBound: UInt64? = nil,
+        baselineSearchUpperBound: UInt64? = nil,
+        consumeRecord: (DailyUsageRecord) -> Void
+    ) throws {
+        let lowerBound: UInt64
+        if let knownLowerBound {
+            lowerBound = min(knownLowerBound, fileSize)
+        } else {
+            let searchUpperBound = min(
+                baselineSearchUpperBound ?? fileSize,
+                fileSize
+            )
+            lowerBound = try dailyBaselineStartOffset(
+                url: url,
+                fileSize: searchUpperBound,
+                dayStart: dayStart
+            )
+        }
+        try scanForward(
+            url: url,
+            from: lowerBound,
+            to: fileSize,
+            consumeRecord: consumeRecord
+        )
+    }
+
+    private static func dailyBaselineStartOffset(
         url: URL,
         fileSize: UInt64,
         dayStart: Date
-    ) throws -> [DailyUsageRecord] {
-        var records: [DailyUsageRecord] = []
+    ) throws -> UInt64 {
+        var earliestRecordOffset = fileSize
         var crossedTokenBaseline = false
         var capturedModelBaseline = false
         var capturedModelProviderBaseline = false
         var capturedServiceTierBaseline = false
-        try scanLinesBackward(url: url, fileSize: fileSize) { line in
-            guard let record = parseUsageRecord(line) else { return true }
-            records.append(record)
+        try scanLinesBackward(url: url, fileSize: fileSize) { line, offset in
+            guard let record = autoreleasepool(invoking: {
+                parseUsageRecord(line)
+            }) else {
+                return true
+            }
+            earliestRecordOffset = offset
             switch record {
             case .token(let event):
                 if event.timestamp < dayStart {
@@ -971,13 +1276,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 && capturedModelProviderBaseline
                 && capturedServiceTierBaseline)
         }
-        return records
+        return earliestRecordOffset
     }
 
     private static func scanLinesBackward(
         url: URL,
         fileSize: UInt64,
-        consumeLine: (Data) -> Bool
+        consumeLine: (Data, UInt64) -> Bool
     ) throws {
         guard fileSize > 0 else { return }
         let handle = try FileHandle(forReadingFrom: url)
@@ -992,61 +1297,80 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         var skippingOversizedLine = !endsWithNewline
 
         while position > 0 {
-            let readCount = min(chunkSize, Int(position))
-            position -= UInt64(readCount)
-            try handle.seek(toOffset: position)
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
+            let readResult = try autoreleasepool { () throws -> Int in
+                let readCount = min(chunkSize, Int(position))
+                position -= UInt64(readCount)
+                try handle.seek(toOffset: position)
+                let chunk = try handle.read(upToCount: readCount) ?? Data()
+                guard !chunk.isEmpty else { return 0 }
 
-            let parts = chunk.split(
-                separator: 0x0A,
-                omittingEmptySubsequences: false
-            )
-            guard parts.count > 1 else {
-                if !skippingOversizedLine {
-                    if chunk.count + suffix.count <= maximumRelevantLineSize {
-                        var combined = Data(capacity: chunk.count + suffix.count)
-                        combined.append(chunk)
-                        combined.append(suffix)
-                        suffix = combined
-                    } else {
-                        suffix.removeAll(keepingCapacity: false)
-                        skippingOversizedLine = true
+                let parts = chunk.split(
+                    separator: 0x0A,
+                    omittingEmptySubsequences: false
+                )
+                guard parts.count > 1 else {
+                    if !skippingOversizedLine {
+                        if chunk.count + suffix.count <= maximumRelevantLineSize {
+                            var combined = Data(
+                                capacity: chunk.count + suffix.count
+                            )
+                            combined.append(chunk)
+                            combined.append(suffix)
+                            suffix = combined
+                        } else {
+                            suffix.removeAll(keepingCapacity: true)
+                            skippingOversizedLine = true
+                        }
+                    }
+                    return 1
+                }
+
+                if skippingOversizedLine {
+                    skippingOversizedLine = false
+                } else if let last = parts.last,
+                          last.count + suffix.count <= maximumRelevantLineSize {
+                    var line = Data(capacity: last.count + suffix.count)
+                    line.append(contentsOf: last)
+                    line.append(suffix)
+                    let lineStart = position + UInt64(last.startIndex)
+                    if !line.isEmpty, !consumeLine(line, lineStart) {
+                        return -1
                     }
                 }
-                continue
-            }
+                suffix.removeAll(keepingCapacity: true)
 
-            if skippingOversizedLine {
-                skippingOversizedLine = false
-            } else if let last = parts.last,
-                      last.count + suffix.count <= maximumRelevantLineSize {
-                var line = Data(capacity: last.count + suffix.count)
-                line.append(contentsOf: last)
-                line.append(suffix)
-                if !line.isEmpty, !consumeLine(line) { return }
-            }
-            suffix.removeAll(keepingCapacity: false)
-
-            if parts.count > 2 {
-                for index in stride(from: parts.count - 2, through: 1, by: -1) {
-                    let part = parts[index]
-                    guard part.count <= maximumRelevantLineSize else { continue }
-                    let line = Data(part)
-                    if !line.isEmpty, !consumeLine(line) { return }
+                if parts.count > 2 {
+                    for index in stride(
+                        from: parts.count - 2,
+                        through: 1,
+                        by: -1
+                    ) {
+                        let part = parts[index]
+                        guard part.count <= maximumRelevantLineSize else {
+                            continue
+                        }
+                        let line = Data(part)
+                        let lineStart = position + UInt64(part.startIndex)
+                        if !line.isEmpty, !consumeLine(line, lineStart) {
+                            return -1
+                        }
+                    }
                 }
-            }
 
-            let first = parts[0]
-            if first.count <= maximumRelevantLineSize {
-                suffix = Data(first)
-            } else {
-                skippingOversizedLine = true
+                let first = parts[0]
+                if first.count <= maximumRelevantLineSize {
+                    suffix = Data(first)
+                } else {
+                    skippingOversizedLine = true
+                }
+                return 1
             }
+            if readResult == 0 { break }
+            if readResult < 0 { return }
         }
 
         if !skippingOversizedLine, !suffix.isEmpty {
-            _ = consumeLine(suffix)
+            _ = consumeLine(suffix, 0)
         }
     }
 
@@ -1065,28 +1389,32 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         var line = Data()
         var skippingOversizedLine = false
         while offset < upperBound {
-            let readCount = min(chunkSize, Int(upperBound - offset))
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-            offset += UInt64(chunk.count)
+            let readResult = try autoreleasepool { () throws -> Bool in
+                let readCount = min(chunkSize, Int(upperBound - offset))
+                let chunk = try handle.read(upToCount: readCount) ?? Data()
+                guard !chunk.isEmpty else { return false }
+                offset += UInt64(chunk.count)
 
-            for byte in chunk {
-                if byte == 0x0A {
-                    if !skippingOversizedLine,
-                       let record = parseUsageRecord(line) {
-                        consumeRecord(record)
-                    }
-                    line.removeAll(keepingCapacity: true)
-                    skippingOversizedLine = false
-                } else if !skippingOversizedLine {
-                    if line.count < maximumRelevantLineSize {
-                        line.append(byte)
-                    } else {
-                        line.removeAll(keepingCapacity: false)
-                        skippingOversizedLine = true
+                for byte in chunk {
+                    if byte == 0x0A {
+                        if !skippingOversizedLine,
+                           let record = parseUsageRecord(line) {
+                            consumeRecord(record)
+                        }
+                        line.removeAll(keepingCapacity: true)
+                        skippingOversizedLine = false
+                    } else if !skippingOversizedLine {
+                        if line.count < maximumRelevantLineSize {
+                            line.append(byte)
+                        } else {
+                            line.removeAll(keepingCapacity: true)
+                            skippingOversizedLine = true
+                        }
                     }
                 }
+                return true
             }
+            guard readResult else { break }
         }
 
         // `line` intentionally remains unconsumed without a newline. The
@@ -1176,6 +1504,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private struct LocalUsageSession {
         var startedAt: Date?
         var activityStartedAt: Date?
+        var activityBoundaryOffset: UInt64?
         var modelProvider: String?
         var isIncluded: Bool
         var isWaitingForActivityBoundary: Bool
@@ -1185,6 +1514,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
     private struct ActivityBoundarySearchResult {
         var activityStartedAt: Date?
+        var activityStartOffset: UInt64?
         var nextSearchOffset: UInt64
     }
 
@@ -1203,6 +1533,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return LocalUsageSession(
                 startedAt: nil,
                 activityStartedAt: nil,
+                activityBoundaryOffset: nil,
                 modelProvider: nil,
                 isIncluded: false,
                 isWaitingForActivityBoundary: false,
@@ -1215,6 +1546,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return LocalUsageSession(
                 startedAt: nil,
                 activityStartedAt: nil,
+                activityBoundaryOffset: nil,
                 modelProvider: nil,
                 isIncluded: containsLocalUsageSourceMarker(line),
                 isWaitingForActivityBoundary: false,
@@ -1245,6 +1577,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         return LocalUsageSession(
             startedAt: object.string("timestamp").flatMap(parseTimestamp),
             activityStartedAt: activityStartedAt,
+            activityBoundaryOffset: activityStartedAt == nil
+                ? nil
+                : boundarySearch?.activityStartOffset,
             modelProvider: payload.string("model_provider"),
             isIncluded: isLocalUsageSession(payload),
             isWaitingForActivityBoundary: boundaryKind != nil
@@ -1345,6 +1680,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         guard fileSize > 0 else {
             return ActivityBoundarySearchResult(
                 activityStartedAt: nil,
+                activityStartOffset: nil,
                 nextSearchOffset: 0
             )
         }
@@ -1389,12 +1725,14 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                         if let boundary = parseSubagentActivityBoundary(line) {
                             return ActivityBoundarySearchResult(
                                 activityStartedAt: boundary,
+                                activityStartOffset: markerOffset,
                                 nextSearchOffset: markerOffset
                             )
                         }
                     case .pending:
                         return ActivityBoundarySearchResult(
                             activityStartedAt: nil,
+                            activityStartOffset: nil,
                             nextSearchOffset: markerOffset
                         )
                     case .skip:
@@ -1418,6 +1756,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         let overlap = UInt64(overlapCount)
         return ActivityBoundarySearchResult(
             activityStartedAt: nil,
+            activityStartOffset: nil,
             nextSearchOffset: max(
                 startingAt,
                 fileSize > overlap ? fileSize - overlap : 0
@@ -1437,6 +1776,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         guard fileSize > 0 else {
             return ActivityBoundarySearchResult(
                 activityStartedAt: nil,
+                activityStartOffset: nil,
                 nextSearchOffset: 0
             )
         }
@@ -1453,7 +1793,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             guard !chunk.isEmpty else { break }
             offset += UInt64(chunk.count)
 
-            for byte in chunk {
+            let chunkStart = offset - UInt64(chunk.count)
+            for (index, byte) in chunk.enumerated() {
                 if byte == 0x0A {
                     if !skippingOversizedLine,
                        let object = sessionMetaObject(line),
@@ -1465,6 +1806,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                             .flatMap(parseTimestamp) {
                             return ActivityBoundarySearchResult(
                                 activityStartedAt: timestamp,
+                                activityStartOffset: chunkStart
+                                    + UInt64(index)
+                                    + 1,
                                 nextSearchOffset: offset
                             )
                         }
@@ -1476,7 +1820,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     if line.count < maximumSessionMetaSize {
                         line.append(byte)
                     } else {
-                        line.removeAll(keepingCapacity: false)
+                        line.removeAll(keepingCapacity: true)
                         skippingOversizedLine = true
                     }
                 }
@@ -1487,6 +1831,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         // metadata row is still available to distinguish from the boundary.
         return ActivityBoundarySearchResult(
             activityStartedAt: nil,
+            activityStartOffset: nil,
             nextSearchOffset: 0
         )
     }

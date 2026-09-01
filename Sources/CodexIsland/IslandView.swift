@@ -98,8 +98,8 @@ enum TokenChartLegendKind: String, Equatable, Sendable {
             )
         case .modeEquivalent:
             return language.text(
-                "开启 Fast 不会改变实际词元用量，但会更快消耗额度。该数值综合考虑对应模型的 Fast 额度倍率，估算关闭 Fast 时的等效词元用量。",
-                "Fast mode does not change actual token usage, but it consumes usage limits faster. This value applies the model's Fast usage multiplier to estimate equivalent usage with Fast mode off."
+                "开启 Fast 不会改变词元用量，但是额度消耗会变快。该数据通过对应模型开启 Fast 时的消耗倍率，估算关闭 Fast 模式时理论上等效可以用多少词元（简单说就是开启 Fast 大概浪费了多少本来可以用的词元）。",
+                "Fast mode does not change token usage, but it makes usage limits drain faster. Using each model's Fast consumption multiplier, this value estimates how many tokens could theoretically be used with Fast mode off—in simple terms, roughly how many otherwise usable tokens were given up by enabling Fast."
             )
         }
     }
@@ -1670,7 +1670,7 @@ struct IslandView: View {
         hovering: Bool,
         pointer: CGPoint?
     ) {
-        if hovering, let pointer {
+        if hovering {
             showPopover(
                 IslandPopoverPresentation(
                     content: .chartLegend(kind),
@@ -3533,9 +3533,9 @@ private struct TokenChartLegendPopover: View {
         case (.actual, .english):
             return CGSize(width: 314, height: 72)
         case (.modeEquivalent, .chinese):
-            return CGSize(width: 344, height: 86)
+            return CGSize(width: 344, height: 120)
         case (.modeEquivalent, .english):
-            return CGSize(width: 358, height: 100)
+            return CGSize(width: 358, height: 146)
         }
     }
 
@@ -3991,6 +3991,9 @@ private struct AccountActivityCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            onLegendHoverChange(kind, hovering, nil)
+        }
         .onContinuousHover(
             coordinateSpace: .named(IslandCoordinateSpace.name)
         ) { phase in
@@ -4783,8 +4786,8 @@ private struct QuotaMetric: View {
 
     private var estimatedRemainingTokenAnnotation: String {
         language.text(
-            "（标准模式 · 近7日等效用量）",
-            "(standard mode · 7-day equivalent usage)"
+            "（根据最近一周使用情况估算）",
+            "(estimated from last 7 days)"
         )
     }
 
