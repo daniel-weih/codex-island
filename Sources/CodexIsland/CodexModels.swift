@@ -4,6 +4,7 @@ typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
     private static let modelFamilyMultipliers: [(family: String, multiplier: Double)] = [
+        ("gpt-6-astra", 2.5),
         ("gpt-5.6", 2.5),
         ("gpt-5.5", 2.5),
         ("gpt-5.4", 2.0)

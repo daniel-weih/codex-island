@@ -903,6 +903,22 @@ struct ParserChecks {
             "GPT-5.6 variants count as 2.5x Standard-mode quota"
         )
         expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-6-astra") == 2.5,
+            "GPT-6 Astra Fast usage counts as 2.5x Standard-mode quota"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: " openai/GPT-6-ASTRA ") == 2.5,
+            "GPT-6 Astra matching handles provider prefixes, whitespace, and case"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-6-astra2") == nil,
+            "Astra support does not match unrelated model names"
+        )
+        expect(
+            CodexFastModeUsagePolicy.multiplier(for: "gpt-6-future") == nil,
+            "Astra support does not assign a multiplier to every GPT-6 model"
+        )
+        expect(
             CodexFastModeUsagePolicy.multiplier(for: "future-model") == nil,
             "models outside the official Fast support list are not guessed"
         )
@@ -1847,15 +1863,21 @@ struct ParserChecks {
                     token(afterMidnight.addingTimeInterval(5), total: 300, last: 100),
                     turnContext(
                         afterMidnight.addingTimeInterval(6),
-                        model: "future-model"
+                        model: "gpt-6-astra",
+                        serviceTier: "fast"
                     ),
                     token(afterMidnight.addingTimeInterval(7), total: 400, last: 100),
                     turnContext(
                         afterMidnight.addingTimeInterval(8),
-                        model: "gpt-5.4",
+                        model: "future-model"
+                    ),
+                    token(afterMidnight.addingTimeInterval(9), total: 500, last: 100),
+                    turnContext(
+                        afterMidnight.addingTimeInterval(10),
+                        model: "gpt-6-astra",
                         serviceTier: "default"
                     ),
-                    token(afterMidnight.addingTimeInterval(9), total: 500, last: 100)
+                    token(afterMidnight.addingTimeInterval(11), total: 600, last: 100)
                 ],
                 name: "model-weighted.jsonl"
             )
@@ -1865,22 +1887,32 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                modelWeightedSnapshot.todayTokens == 500,
+                modelWeightedSnapshot.todayTokens == 600,
                 "model-specific Fast weighting does not change actual Tokens"
             )
             expect(
-                modelWeightedSnapshot.billedTodayTokens == 900,
-                "supported Fast models use official multipliers and unknown models stay 1x"
+                modelWeightedSnapshot.billedTodayTokens == 1_150,
+                "supported Fast models use official multipliers; Standard and unknown models stay 1x"
+            )
+            expect(
+                hourlyTokens(modelWeightedSnapshot.hourlyBuckets, containing: afterMidnight) == 600
+                    && dailyTokens(modelWeightedSnapshot.dailyBuckets, containing: afterMidnight) == 600,
+                "Astra Fast weighting leaves actual hourly and daily chart Tokens unchanged"
+            )
+            expect(
+                hourlyTokens(modelWeightedSnapshot.billedHourlyBuckets, containing: afterMidnight) == 1_150
+                    && dailyTokens(modelWeightedSnapshot.billedDailyBuckets, containing: afterMidnight) == 1_150,
+                "hourly and daily equivalent usage include Astra's 2.5x Fast multiplier"
             )
 
             let modelWeightedHandle = try FileHandle(forWritingTo: modelWeighted)
             try modelWeightedHandle.seekToEnd()
             try modelWeightedHandle.write(contentsOf: Data(([
                 threadSettings(
-                    afterMidnight.addingTimeInterval(10),
+                    afterMidnight.addingTimeInterval(12),
                     serviceTier: "priority"
                 ),
-                token(afterMidnight.addingTimeInterval(11), total: 600, last: 100)
+                token(afterMidnight.addingTimeInterval(13), total: 700, last: 100)
             ].joined(separator: "\n") + "\n").utf8))
             try modelWeightedHandle.close()
             let appendedModelWeightedSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
@@ -1889,8 +1921,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                appendedModelWeightedSnapshot.billedTodayTokens == 1_100,
-                "incremental scans retain the active model when only Fast tier changes"
+                appendedModelWeightedSnapshot.billedTodayTokens == 1_400,
+                "incremental scans retain Astra and apply 2.5x when the tier changes to priority"
             )
 
             let nonChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
@@ -1900,8 +1932,8 @@ struct ParserChecks {
                 usesChatGPTCredits: false
             )
             expect(
-                nonChatGPTSnapshot.todayTokens == 600
-                    && nonChatGPTSnapshot.billedTodayTokens == 600,
+                nonChatGPTSnapshot.todayTokens == 700
+                    && nonChatGPTSnapshot.billedTodayTokens == 700,
                 "non-ChatGPT authentication does not apply ChatGPT Fast multipliers"
             )
             let reenabledChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
@@ -1911,7 +1943,7 @@ struct ParserChecks {
                 usesChatGPTCredits: true
             )
             expect(
-                reenabledChatGPTSnapshot.billedTodayTokens == 1_100,
+                reenabledChatGPTSnapshot.billedTodayTokens == 1_400,
                 "changing the ChatGPT-credit mode safely invalidates cached weighting"
             )
 
@@ -1921,7 +1953,7 @@ struct ParserChecks {
                     sessionMeta(modelProvider: "openai"),
                     threadSettings(
                         afterMidnight,
-                        model: "gpt-5.6-sol",
+                        model: "gpt-6-astra",
                         modelProviderID: "custom-provider",
                         serviceTier: "priority"
                     ),
