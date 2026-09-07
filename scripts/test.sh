@@ -13,6 +13,7 @@ mkdir -p "$SCREENSHOT_OUTPUT_DIR"
 swiftc \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexTokenEstimate.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandDisplaySelection.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \
@@ -22,6 +23,7 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/CodexStatusPayloadParser.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadSettingsReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadActivityReader.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexThreadCreditUsageReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexDailyTokenUsageReader.swift" \
     "$ROOT_DIR/Tests/ParserChecks/main.swift" \
     -o "$OUTPUT"

@@ -16,6 +16,7 @@ final class CodexStatusViewModel: ObservableObject {
     private var nextUsageRefreshAt: Date?
     private var nextProfileRefreshAt: Date?
     private var nextDailyThreadDiscoveryAt: Date?
+    private var tokenEstimateHistoryStart: Date?
     private var localActivityRolloutPaths: [String] = []
     private var hasDiscoveredLocalActivity = false
     private var tokenConsumptionHighWater: Int64?
@@ -46,6 +47,11 @@ final class CodexStatusViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if method == "account/updated" {
+                    if self.snapshot.account != .empty {
+                        // Rollouts do not contain a reliable account ID. Once
+                        // a known account changes, stop borrowing its history.
+                        self.tokenEstimateHistoryStart = Date()
+                    }
                     self.accountGeneration &+= 1
                     self.nextUsageRefreshAt = nil
                     self.nextProfileRefreshAt = nil
@@ -60,6 +66,8 @@ final class CodexStatusViewModel: ObservableObject {
                     self.snapshot.billedTodayThreadTokens = nil
                     self.snapshot.billedHourlyThreadTokens = []
                     self.snapshot.billedDailyThreadTokens = []
+                    self.snapshot.chartCreditTotals = [:]
+                    self.snapshot.remainingTokenEstimate = nil
                     self.tokenConsumptionHighWater = nil
                     self.tokenConsumptionDayStart = nil
                     self.localActivityRolloutPaths = []
@@ -269,6 +277,9 @@ final class CodexStatusViewModel: ObservableObject {
         updated.billedTodayThreadTokens = snapshot.billedTodayThreadTokens
         updated.billedHourlyThreadTokens = snapshot.billedHourlyThreadTokens
         updated.billedDailyThreadTokens = snapshot.billedDailyThreadTokens
+        updated.chartCreditTotals = snapshot.chartCreditTotals
+        updated.remainingTokenEstimate = updated.rateLimit == snapshot.rateLimit
+            ? snapshot.remainingTokenEstimate : nil
         updated.hasRunningSession = snapshot.hasRunningSession
             || updated.recentThreads.contains { $0.executionState == .running }
         if case .disconnected = snapshot.connection {
@@ -415,6 +426,7 @@ final class CodexStatusViewModel: ObservableObject {
     /// The recent candidate rows remain an immediate fallback while a new rollout
     /// awaits discovery.
     private func refreshDailyThreadTokens() async {
+        let generation = accountGeneration
         let now = Date()
         let dayStart = Calendar.autoupdatingCurrent.startOfDay(for: now)
         if tokenConsumptionDayStart != dayStart {
@@ -427,6 +439,7 @@ final class CodexStatusViewModel: ObservableObject {
                     now: now
                 )
             }.value
+            guard generation == accountGeneration else { return }
             if let discovered {
                 localActivityRolloutPaths = discovered
                 hasDiscoveredLocalActivity = true
@@ -448,6 +461,8 @@ final class CodexStatusViewModel: ObservableObject {
         let usesChatGPTCredits = snapshot.account.authType?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() == "chatgpt"
+        let estimateQuota = snapshot.rateLimit
+        let estimateHistoryStart = tokenEstimateHistoryStart
         let recentHasRunningSession = snapshot.recentThreads.contains {
             $0.executionState == .running
         }
@@ -456,7 +471,9 @@ final class CodexStatusViewModel: ObservableObject {
                 from: tokenPaths,
                 now: now,
                 usesChatGPTCredits: usesChatGPTCredits,
-                priorityRolloutPaths: recentPaths
+                priorityRolloutPaths: recentPaths,
+                quota: estimateQuota,
+                estimateHistoryStart: estimateHistoryStart
             )
             let freshPaths: [String]
             if let usage {
@@ -476,6 +493,7 @@ final class CodexStatusViewModel: ObservableObject {
             }
             return (usage, hasRunningSession)
         }.value
+        guard generation == accountGeneration else { return }
         if let usage = localActivity.0 {
             let total = usage.todayTokens
             if total != snapshot.todayThreadTokens {
@@ -493,9 +511,12 @@ final class CodexStatusViewModel: ObservableObject {
             if usage.billedHourlyBuckets != snapshot.billedHourlyThreadTokens {
                 snapshot.billedHourlyThreadTokens = usage.billedHourlyBuckets
             }
+            snapshot.chartCreditTotals = usage.chartCreditTotals
             if usage.billedDailyBuckets != snapshot.billedDailyThreadTokens {
                 snapshot.billedDailyThreadTokens = usage.billedDailyBuckets
             }
+            snapshot.remainingTokenEstimate = estimateQuota == snapshot.rateLimit
+                ? usage.remainingTokenEstimate : nil
             if CodexDisplayPolicy.shouldAnimateTokenConsumption(
                 previous: tokenConsumptionHighWater,
                 current: total
@@ -547,10 +568,15 @@ final class CodexStatusViewModel: ObservableObject {
             for thread in threads {
                 guard let rolloutPath = thread.rolloutPath else { continue }
                 group.addTask(priority: .utility) {
-                    let snapshot = try? CodexThreadActivityReader.readLatest(
+                    var snapshot = try? CodexThreadActivityReader.readLatest(
                         from: rolloutPath,
                         threadID: thread.id
                     )
+                    if let usage = snapshot?.tokenUsage {
+                        snapshot?.tokenUsage?.creditEstimate = try? CodexThreadCreditUsageReader.estimate(
+                            from: rolloutPath, matching: usage, threadID: thread.id
+                        )
+                    }
                     return (thread.id, snapshot)
                 }
             }

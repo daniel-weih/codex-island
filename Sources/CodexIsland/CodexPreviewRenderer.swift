@@ -18,7 +18,7 @@ enum CodexPreviewRenderer {
             try? Data(contentsOf: URL(fileURLWithPath: path))
         }
 
-        let snapshot = CodexSnapshot(
+        var snapshot = CodexSnapshot(
             connection: .connected,
             account: AccountSummary(authType: "chatgpt", planType: "pro", requiresOpenAIAuth: true),
             rateLimit: RateLimitBucket(
@@ -165,6 +165,14 @@ enum CodexPreviewRenderer {
             billedTodayThreadTokens: 146_220_407,
             billedHourlyThreadTokens: previewBilledHourlyUsageBuckets(),
             billedDailyThreadTokens: previewBilledDailyUsageBuckets(),
+            remainingTokenEstimate: CodexRemainingTokenEstimate(
+                tokens: 36_500_000,
+                windowDurationMinutes: 10_080,
+                resetsAt: Date().addingTimeInterval(3 * 24 * 60 * 60),
+                sampleCount: 240,
+                observedQuotaPercent: 30,
+                pricedTokenCoverage: 1
+            ),
             hasRunningSession: true,
             activeModel: ModelSummary(
                 id: "gpt-5.6-sol",
@@ -174,6 +182,18 @@ enum CodexPreviewRenderer {
             lastUpdated: Date(),
             warning: nil
         )
+
+        for index in snapshot.recentThreads.indices {
+            let thread = snapshot.recentThreads[index]
+            if let usage = thread.tokenUsage,
+               let credits = CodexCreditRateCard.credits(
+                model: thread.model, serviceTier: thread.serviceTier,
+                inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens,
+                outputTokens: usage.outputTokens
+               ) {
+                snapshot.recentThreads[index].tokenUsage?.creditEstimate = CodexThreadCreditEstimate(credits: credits)
+            }
+        }
 
         let compactURL = directory.appendingPathComponent("codex-island-compact.png")
         let compactConsumingURL = directory.appendingPathComponent(
@@ -305,6 +325,37 @@ enum CodexPreviewRenderer {
             notchWidth: 185,
             topRegionHeight: 32
         )
+        for bucket in snapshot.dailyThreadTokens {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            if let date = formatter.date(from: bucket.startDate) {
+                snapshot.chartCreditTotals[date] = CodexChartCreditTotal(
+                    tokens: Double(bucket.tokens), credits: Double(bucket.tokens) * 0.000068
+                )
+            }
+        }
+        if let todayTokens = snapshot.todayThreadTokens {
+            snapshot.chartCreditTotals[Calendar.autoupdatingCurrent.startOfDay(for: Date())] =
+                CodexChartCreditTotal(tokens: Double(todayTokens),
+                                      credits: Double(todayTokens) * 0.000068)
+        }
+        // Today's daily and hourly previews use separate synthetic timelines.
+        var hourlyCreditSnapshot = snapshot
+        hourlyCreditSnapshot.chartCreditTotals = Dictionary(uniqueKeysWithValues:
+            snapshot.hourlyThreadTokens.map { bucket in
+                (bucket.hourStart, CodexChartCreditTotal(
+                    tokens: Double(bucket.tokens), credits: Double(bucket.tokens) * 0.000068
+                ))
+            }
+        )
+        for hour in Array(snapshot.chartCreditTotals.keys) {
+            snapshot.chartCreditTotals[hour]?.standardCredits /= 1.5
+        }
+        for hour in Array(hourlyCreditSnapshot.chartCreditTotals.keys) {
+            hourlyCreditSnapshot.chartCreditTotals[hour]?.standardCredits /= 1.5
+        }
+        // Localized previews must use the same fully initialized chart data.
+        englishSnapshot.chartCreditTotals = snapshot.chartCreditTotals
         let expandedSize = CGSize(
             width: IslandLayout.expandedWidth,
             height: IslandLayout.expandedBodyHeight + geometry.topRegionHeight
@@ -380,7 +431,7 @@ enum CodexPreviewRenderer {
             to: expandedSmallFastDeltaURL
         )
         try render(
-            snapshot: snapshot,
+            snapshot: hourlyCreditSnapshot,
             displayGeometry: geometry,
             expanded: true,
             initialTokenChartRange: .hours48,
@@ -576,7 +627,8 @@ enum CodexPreviewRenderer {
             initialHoveredContextThreadID: String? = nil,
             initialResetSummaryHover: Bool = false,
             initialIslandSettingsPresented: Bool = false,
-            previewLanguagePreference: IslandLanguagePreference? = nil
+            previewLanguagePreference: IslandLanguagePreference? = nil,
+            previewColorTheme: IslandColorTheme = .ocean
         ) throws {
             let url = directory.appendingPathComponent(fileName)
             let defaultHeight = expanded
@@ -596,6 +648,7 @@ enum CodexPreviewRenderer {
                 initialResetSummaryHover: initialResetSummaryHover,
                 initialIslandSettingsPresented: initialIslandSettingsPresented,
                 previewLanguagePreference: previewLanguagePreference,
+                previewColorTheme: previewColorTheme,
                 size: CGSize(width: width, height: height ?? defaultHeight),
                 scale: scale,
                 to: url
@@ -642,6 +695,33 @@ enum CodexPreviewRenderer {
         try renderMatrixPreview(
             named: "matrix-expanded-notch-reset-none-scale-2x.png",
             snapshot: noResetSnapshot
+        )
+
+        var partialHistorySnapshot = snapshot
+        if let todayTokens = snapshot.todayThreadTokens {
+            partialHistorySnapshot.chartCreditTotals = [
+                Calendar.autoupdatingCurrent.startOfDay(for: Date()):
+                    CodexChartCreditTotal(tokens: Double(todayTokens / 2), credits: 1234.567)
+            ]
+        }
+        try renderMatrixPreview(
+            named: "matrix-expanded-chart-credits-partial-history.png",
+            snapshot: partialHistorySnapshot
+        )
+
+        var noEstimateSnapshot = snapshot
+        noEstimateSnapshot.remainingTokenEstimate = nil
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-estimate-unavailable.png",
+            snapshot: noEstimateSnapshot
+        )
+        var exhaustedQuotaSnapshot = snapshot
+        exhaustedQuotaSnapshot.rateLimit?.primary?.usedPercent = 100
+        exhaustedQuotaSnapshot.remainingTokenEstimate?.tokens = 0
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-estimate-zero.png",
+            snapshot: exhaustedQuotaSnapshot,
+            previewLanguagePreference: .english
         )
 
         var lightReasoningSnapshot = snapshot
@@ -717,7 +797,8 @@ enum CodexPreviewRenderer {
             reasoningOutputTokens: 1_077_695,
             totalTokens: 1_436_557_562,
             contextTokensUsed: 188_432,
-            contextWindowTokens: 258_400
+            contextWindowTokens: 258_400,
+            creditEstimate: CodexThreadCreditEstimate(credits: 57_251.889875)
         )
         try renderMatrixPreview(
             named: "matrix-expanded-notch-token-popover-large-english-scale-2x.png",
@@ -730,6 +811,42 @@ enum CodexPreviewRenderer {
             snapshot: largeSessionTokenSnapshot,
             initialHoveredTokenThreadID: "preview-2",
             previewLanguagePreference: .chinese
+        )
+
+        var creditScreenshotSnapshot = englishSnapshot
+        creditScreenshotSnapshot.recentThreads[1].model = "gpt-6-astra"
+        creditScreenshotSnapshot.recentThreads[1].serviceTier = "default"
+        creditScreenshotSnapshot.recentThreads[1].serviceTierSource = .recorded
+        creditScreenshotSnapshot.recentThreads[1].tokenUsage = ThreadTokenUsage(
+            inputTokens: 1_266_278, cachedInputTokens: 1_199_104,
+            outputTokens: 6_717, reasoningOutputTokens: 1_835, totalTokens: 1_272_995,
+            creditEstimate: CodexThreadCreditEstimate(credits: 55.16735)
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-credits-screenshot-english-scale-2x.png",
+            snapshot: creditScreenshotSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .english
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-credits-screenshot-chinese-scale-2x.png",
+            snapshot: creditScreenshotSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .chinese
+        )
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-credits-tsinghua-scale-2x.png",
+            snapshot: creditScreenshotSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .chinese,
+            previewColorTheme: .tsinghua
+        )
+        creditScreenshotSnapshot.recentThreads[1].tokenUsage?.creditEstimate = nil
+        try renderMatrixPreview(
+            named: "matrix-expanded-token-credits-unavailable-scale-2x.png",
+            snapshot: creditScreenshotSnapshot,
+            initialHoveredTokenThreadID: "preview-2",
+            previewLanguagePreference: .english
         )
 
         var headerWidthBoundarySnapshot = englishSnapshot

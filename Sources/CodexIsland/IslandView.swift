@@ -1,6 +1,12 @@
 import AppKit
 import SwiftUI
 
+private let creditsGold = Color(red: 1, green: 215.0 / 255, blue: 0)
+
+private func localizedCredits(_ text: String, language: IslandInterfaceLanguage) -> String {
+    text.replacingOccurrences(of: "credits", with: language.text("额度点", "credits"))
+}
+
 enum IslandLayout {
     static let compactMinimumWidth: CGFloat = 300
     static let compactExtraWidth: CGFloat = 115
@@ -80,7 +86,11 @@ enum TokenChartLegendKind: String, Equatable, Sendable {
     case actual
     case modeEquivalent
 
-    func title(for language: IslandInterfaceLanguage) -> String {
+    func title(for language: IslandInterfaceLanguage, credits: Bool = false) -> String {
+        if credits {
+            return self == .actual ? language.text("标准", "Standard")
+                : language.text("⚡实际", "⚡ Actual")
+        }
         switch self {
         case .actual:
             return language.text("实际", "Actual")
@@ -89,7 +99,14 @@ enum TokenChartLegendKind: String, Equatable, Sendable {
         }
     }
 
-    func explanation(for language: IslandInterfaceLanguage) -> String {
+    func explanation(for language: IslandInterfaceLanguage, credits: Bool = false) -> String {
+        if credits {
+            return self == .actual
+                ? language.text("标准是在不开启 Fast 模式时，相同本机用量按各次调用模型费率计算的额度点。实际 − 标准代表开启 Fast 浪费的额度。",
+                                "Standard is the credit cost of the same local usage with Fast off. Actual minus Standard is the extra credit cost of enabling Fast.")
+                : language.text("实际是按本机各次调用的模型和 Fast 模式计算的总消耗，包含标准用量。实际 − 标准代表开启 Fast 浪费的额度。两项同时显示时，实心为标准，空心轮廓为实际总量。",
+                                "Actual is the total local credit cost, including Standard and Fast surcharges. Actual minus Standard is the extra cost of enabling Fast. The solid bar shows Standard; the outline shows the Actual total.")
+        }
         switch self {
         case .actual:
             return language.text(
@@ -98,7 +115,7 @@ enum TokenChartLegendKind: String, Equatable, Sendable {
             )
         case .modeEquivalent:
             return language.text(
-                "开启 Fast 不会改变词元用量，但是额度消耗会变快。该数据通过对应模型开启 Fast 时的消耗倍率，估算关闭 Fast 模式时理论上等效可以用多少词元（简单说就是开启 Fast 大概浪费了多少本来可以用的词元）。",
+                "开启 Fast 不会改变词元用量，但是额度消耗会变快。该数据通过对应模型开启 Fast 时的消耗倍率，估算关闭 Fast 模式时理论上等效可以用多少词元（简单说，等效 − 实际就是开启 Fast 大概浪费了多少本来可以用的词元）。",
                 "Fast mode does not change token usage, but it makes usage limits drain faster. Using each model's Fast consumption multiplier, this value estimates how many tokens could theoretically be used with Fast mode off—in simple terms, roughly how many otherwise usable tokens were given up by enabling Fast."
             )
         }
@@ -1431,7 +1448,9 @@ struct IslandView: View {
             billedTodayTokens: viewModel.snapshot.billedTodayThreadTokens,
             billedHourlyUsage: viewModel.snapshot.billedHourlyThreadTokens,
             billedDailyUsage: viewModel.snapshot.billedDailyThreadTokens,
+            chartCreditTotals: viewModel.snapshot.chartCreditTotals,
             window: viewModel.snapshot.rateLimit?.primary,
+            remainingTokenEstimate: viewModel.snapshot.remainingTokenEstimate,
             resetSummary: viewModel.snapshot.resetCredits,
             onResetHoverChange: { hovering, pointer in
                 updateResetHover(hovering: hovering, pointer: pointer)
@@ -3254,6 +3273,8 @@ private struct ThreadFastStatusIconView: View {
 }
 
 private struct ThreadTokenUsageView: View {
+    @AppStorage("codexIsland.remainingShowsCredits")
+    private var showsRemainingCredits = false
     let usage: ThreadTokenUsage?
     let onHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
@@ -3263,11 +3284,14 @@ private struct ThreadTokenUsageView: View {
         GeometryReader { proxy in
             Group {
                 if let usage {
-                    Text(compactTokenCount(usage.totalTokens))
+                    Text(showsRemainingCredits
+                        ? (usage.creditEstimate?.amountText ?? "—")
+                        : compactTokenCount(usage.totalTokens))
                         .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.31))
+                        .foregroundStyle(showsRemainingCredits ? creditsGold : Color.white.opacity(0.31))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                         .accessibilityLabel(
                             tokenUsageHelp(usage, language: language)
                         )
@@ -3305,6 +3329,8 @@ private struct ThreadTokenUsageView: View {
 }
 
 private struct TokenUsageDetailPopover: View {
+    @AppStorage("codexIsland.remainingShowsCredits")
+    private var showsRemainingCredits = false
     static let minimumWidth: CGFloat = 278
     static let height: CGFloat = 78
 
@@ -3333,7 +3359,11 @@ private struct TokenUsageDetailPopover: View {
             .max() ?? 0
         let baseWidth: CGFloat = language == .english ? 320 : 290
         let overflowCharacters = max(0, longestValue - 13)
-        return min(420, baseWidth + CGFloat(overflowCharacters) * 13)
+        let creditCharacters = (usage.creditEstimate?.displayText.count ?? 9) + 2
+        let headerWidth = CGFloat(language == .english ? 110 : 68)
+            + CGFloat(exactTokenCount(usage.totalTokens).count) * 7
+            + CGFloat(creditCharacters) * 6.5 + 60
+        return min(460, max(headerWidth, baseWidth + CGFloat(overflowCharacters) * 13))
     }
 
     let usage: ThreadTokenUsage
@@ -3345,21 +3375,21 @@ private struct TokenUsageDetailPopover: View {
         let width = Self.width(for: usage, language: language)
 
         VStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Text(language.text("累计词元", "TOTAL TOKENS"))
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(language.text("累计消耗", "TOTAL USAGE"))
                     .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .tracking(0.25)
                     .foregroundStyle(.white.opacity(0.38))
 
-                Spacer(minLength: 4)
-
-                Text(exactTokenCount(usage.totalTokens))
+                Text(consumptionText)
                     .font(.system(size: IslandTypography.body, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .tracking(-0.45)
-                    .foregroundStyle(theme.accent.opacity(0.88))
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: true)
+                    .minimumScaleFactor(0.75)
+                    .help(tokenCreditHelp(usage, language: language))
+
+                Spacer(minLength: 0)
             }
 
             HStack(spacing: 7) {
@@ -3376,8 +3406,7 @@ private struct TokenUsageDetailPopover: View {
                 divider
                 detail(
                     language.text("推理", "Reasoning"),
-                    usage.reasoningOutputTokens,
-                    color: Color(red: 0.72, green: 0.43, blue: 1.0).opacity(0.82)
+                    usage.reasoningOutputTokens
                 )
             }
         }
@@ -3398,6 +3427,17 @@ private struct TokenUsageDetailPopover: View {
         .shadow(color: .black.opacity(0.48), radius: 8, y: 3)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(tokenUsageHelp(usage, language: language))
+    }
+
+    private var consumptionText: AttributedString {
+        let tokenValue = exactTokenCount(usage.totalTokens) + language.text(" 词元", " Tokens")
+        let creditValue = localizedCredits(usage.creditEstimate?.displayText ?? "— credits", language: language)
+        var first = AttributedString(showsRemainingCredits ? creditValue : tokenValue)
+        first.foregroundColor = showsRemainingCredits ? creditsGold : theme.accent.opacity(0.88)
+        var second = AttributedString(" (" + (showsRemainingCredits ? tokenValue : creditValue) + ")")
+        second.foregroundColor = showsRemainingCredits ? theme.accent.opacity(0.88) : creditsGold
+        first.append(second)
+        return first
     }
 
     private func detail(
@@ -3514,6 +3554,8 @@ private struct ContextWindowPopover: View {
 }
 
 private struct TokenChartLegendPopover: View {
+    @AppStorage("codexIsland.remainingShowsCredits")
+    private var showsRemainingCredits = false
     private static let horizontalPadding: CGFloat = 11
     private static let verticalPadding: CGFloat = 9
 
@@ -3552,13 +3594,13 @@ private struct TokenChartLegendPopover: View {
                     height: 10
                 )
 
-                Text(kind.title(for: language))
+                Text(kind.title(for: language, credits: showsRemainingCredits))
                     .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                     .foregroundStyle(titleColor)
                     .lineLimit(1)
             }
 
-            Text(kind.explanation(for: language))
+            Text(kind.explanation(for: language, credits: showsRemainingCredits))
                 .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.62))
                 .lineSpacing(2)
@@ -3585,11 +3627,12 @@ private struct TokenChartLegendPopover: View {
         .shadow(color: .black.opacity(0.52), radius: 8, y: 3)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "\(kind.title(for: language))，\(kind.explanation(for: language))"
+            "\(kind.title(for: language, credits: showsRemainingCredits))，\(kind.explanation(for: language, credits: showsRemainingCredits))"
         )
     }
 
     private var markerColor: Color {
+        if showsRemainingCredits { return creditsGold }
         switch kind {
         case .actual:
             return theme.accent.opacity(0.78)
@@ -3599,6 +3642,7 @@ private struct TokenChartLegendPopover: View {
     }
 
     private var titleColor: Color {
+        if showsRemainingCredits { return creditsGold }
         switch kind {
         case .actual:
             return .white.opacity(0.82)
@@ -3627,6 +3671,8 @@ private struct ThreadSettingBadge: View {
 }
 
 private struct AccountActivityCard: View {
+    @AppStorage("codexIsland.remainingShowsCredits")
+    private var showsRemainingCredits = false
     let identity: ProfileIdentitySummary
     let usage: UsageSummary
     let todayTokens: Int64?
@@ -3635,7 +3681,9 @@ private struct AccountActivityCard: View {
     let billedTodayTokens: Int64?
     let billedHourlyUsage: [HourlyUsageBucket]
     let billedDailyUsage: [DailyUsageBucket]
+    let chartCreditTotals: [Date: CodexChartCreditTotal]
     let window: RateLimitWindow?
+    let remainingTokenEstimate: CodexRemainingTokenEstimate?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     let onLegendHoverChange: (TokenChartLegendKind, Bool, CGPoint?) -> Void
@@ -3662,7 +3710,9 @@ private struct AccountActivityCard: View {
         billedTodayTokens: Int64?,
         billedHourlyUsage: [HourlyUsageBucket],
         billedDailyUsage: [DailyUsageBucket],
+        chartCreditTotals: [Date: CodexChartCreditTotal],
         window: RateLimitWindow?,
+        remainingTokenEstimate: CodexRemainingTokenEstimate?,
         resetSummary: ResetCreditSummary?,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
         onLegendHoverChange: @escaping (
@@ -3681,7 +3731,9 @@ private struct AccountActivityCard: View {
         self.billedTodayTokens = billedTodayTokens
         self.billedHourlyUsage = billedHourlyUsage
         self.billedDailyUsage = billedDailyUsage
+        self.chartCreditTotals = chartCreditTotals
         self.window = window
+        self.remainingTokenEstimate = remainingTokenEstimate
         self.resetSummary = resetSummary
         self.onResetHoverChange = onResetHoverChange
         self.onLegendHoverChange = onLegendHoverChange
@@ -3748,7 +3800,8 @@ private struct AccountActivityCard: View {
 
                 QuotaMetric(
                     window: window,
-                    billedDailyUsageBuckets: billedRecentUsage,
+                    planLabel: planLabel,
+                    tokenEstimate: remainingTokenEstimate,
                     resetSummary: resetSummary,
                     onResetHoverChange: onResetHoverChange
                 )
@@ -3776,7 +3829,11 @@ private struct AccountActivityCard: View {
                             .monospacedDigit()
                             .foregroundStyle(theme.accent.opacity(0.72))
                             .lineLimit(1)
-                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.75)
+                            .help(String(activityDetail.characters) + language.text(
+                                "。额度点 仅按本机日志折算，不包含其他电脑的用量。≥ 表示本机部分调用缺少费率或明细，仅显示可计价部分；— 表示暂无足够本机明细。",
+                                ". Credits are calculated from local logs only, excluding other computers. ≥ indicates some local calls lack pricing details; — means insufficient local records."
+                            ))
                     }
 
                     Spacer(minLength: 4)
@@ -3787,7 +3844,21 @@ private struct AccountActivityCard: View {
                 }
                 .frame(height: 28)
 
-                if chartRange == .days30 {
+                if showsRemainingCredits {
+                    CreditActivityChart(
+                        buckets: creditChartBuckets,
+                        showsStandard: showsActual, showsActualCredits: showsBilled,
+                        hoveredID: chartRange == .days30 ? hoveredBucket?.id : hoveredHourlyBucket.map { String($0.hourStart.timeIntervalSince1970) },
+                        onHover: { id, hovering in
+                            if chartRange == .days30 {
+                                updateHoveredBucket(recentUsage.first { $0.id == id }, hovering: hovering)
+                            } else {
+                                updateHoveredHourlyBucket(hourlyUsage.first { String($0.hourStart.timeIntervalSince1970) == id }, hovering: hovering)
+                            }
+                        }
+                    )
+                    .frame(height: 82)
+                } else if chartRange == .days30 {
                     DailyTokenActivityChart(
                         actualBuckets: recentUsage,
                         billedBuckets: billedRecentUsage,
@@ -3878,39 +3949,28 @@ private struct AccountActivityCard: View {
     }
 
     private var activityTitle: String {
-        if chartRange == .hours48 {
-            if hourlyUsage.allSatisfy({ $0.tokens == 0 }) {
-                return language.text(
-                    "暂无分时用量",
-                    "No hourly token usage"
-                )
-            }
-            return language.text(
-                "分时用量",
-                "Hourly tokens"
-            )
-        }
-        if usage.lifetimeTokens == nil
-            && usage.dailyUsageBuckets.isEmpty
-            && todayTokens == nil {
-            return language.text(
-                "账户统计同步中",
-                "Account statistics are syncing"
-            )
-        }
-        if usage.dailyUsageBuckets.isEmpty && (todayTokens ?? 0) == 0 {
-            return language.text(
-                "暂无每日用量",
-                "No daily token usage"
-            )
-        }
-        return language.text(
-            "每日用量",
-            "Daily tokens"
-        )
+        chartRange == .days30
+            ? language.text("每日", "Daily")
+            : language.text("分时", "Hourly")
     }
 
-    private var activityDetail: String? {
+    private var creditChartBuckets: [CreditChartBucket] {
+        if chartRange == .days30 {
+            let totals = dailyCreditTotals
+            return recentUsage.map { bucket in
+                CreditChartBucket(id: bucket.id,
+                    label: shortUsageDate(bucket.startDate, language: language),
+                    total: totals[bucket.startDate] ?? CodexChartCreditTotal())
+            }
+        }
+        return hourlyUsage.map { bucket in
+            CreditChartBucket(id: String(bucket.hourStart.timeIntervalSince1970),
+                label: hourlyUsageDateText(bucket.hourStart, language: language),
+                total: chartCreditTotals[bucket.hourStart] ?? CodexChartCreditTotal())
+        }
+    }
+
+    private var activityDetail: AttributedString? {
         if chartRange == .hours48,
            let bucket = hoveredHourlyBucket ?? hourlyUsage.last {
             let billed = billedHourlyUsage.first {
@@ -3919,7 +3979,8 @@ private struct AccountActivityCard: View {
             return chartDetail(
                 dateText: hourlyUsageDateText(bucket.hourStart, language: language),
                 actualTokens: bucket.tokens,
-                billedTokens: billed
+                billedTokens: billed,
+                creditTotal: chartCreditTotals[bucket.hourStart] ?? CodexChartCreditTotal()
             )
         }
         if chartRange == .days30,
@@ -3930,36 +3991,77 @@ private struct AccountActivityCard: View {
             return chartDetail(
                 dateText: shortUsageDate(bucket.startDate, language: language),
                 actualTokens: bucket.tokens,
-                billedTokens: billed
+                billedTokens: billed,
+                creditTotal: dailyCreditTotal(for: bucket.startDate)
             )
         }
         return nil
     }
 
+    private func dailyCreditTotal(for date: String) -> CodexChartCreditTotal {
+        dailyCreditTotals[date] ?? CodexChartCreditTotal()
+    }
+
+    private var dailyCreditTotals: [String: CodexChartCreditTotal] {
+        let calendar = Calendar.autoupdatingCurrent
+        var totals: [String: CodexChartCreditTotal] = [:]
+        for (hour, value) in chartCreditTotals {
+            let components = calendar.dateComponents([.year, .month, .day], from: hour)
+            let key = String(format: "%04d-%02d-%02d", components.year ?? 0,
+                             components.month ?? 0, components.day ?? 0)
+            totals[key, default: CodexChartCreditTotal()].merge(value)
+        }
+        return totals
+    }
+
     private func chartDetail(
         dateText: String,
         actualTokens: Int64,
-        billedTokens: Int64
-    ) -> String {
-        if showsActual && showsBilled {
-            return "\(dateText) · \(compactTokenCount(actualTokens)) / \(compactTokenCount(billedTokens))"
+        billedTokens: Int64,
+        creditTotal: CodexChartCreditTotal
+    ) -> AttributedString {
+        if showsRemainingCredits {
+            let values = creditTotal.chartDisplayText(
+                matching: actualTokens, showsStandard: showsActual, showsActual: showsBilled
+            )
+            var detail = AttributedString("\(dateText) · ")
+            detail.foregroundColor = theme.accent.opacity(0.72)
+            var credits = AttributedString(values)
+            credits.foregroundColor = creditsGold
+            detail.append(credits)
+            var tokens = AttributedString(" (\(compactTokenCount(actualTokens)))")
+            tokens.foregroundColor = theme.accent.opacity(0.72)
+            detail.append(tokens)
+            return detail
         }
-        let tokens = showsActual ? actualTokens : billedTokens
-        return "\(dateText) · \(compactTokenCount(tokens))"
+        let tokenText: String
+        if showsActual && showsBilled {
+            tokenText = "\(dateText) · \(compactTokenCount(actualTokens)) / \(compactTokenCount(billedTokens))"
+        } else {
+            let tokens = showsActual ? actualTokens : billedTokens
+            tokenText = "\(dateText) · \(compactTokenCount(tokens))"
+        }
+        var detail = AttributedString(tokenText)
+        let creditAmount = creditTotal.displayText(matching: actualTokens)
+            .replacingOccurrences(of: " credits", with: "")
+        var credits = AttributedString(" (\(creditAmount))")
+        credits.foregroundColor = creditsGold
+        detail.append(credits)
+        return detail
     }
 
     private var chartLegend: some View {
         HStack(spacing: 7) {
             chartLegendItem(
                 kind: .actual,
-                color: theme.accent.opacity(0.78),
+                color: (showsRemainingCredits ? creditsGold : theme.accent).opacity(0.78),
                 isVisible: showsActual
             ) {
                 toggleActualSeries()
             }
             chartLegendItem(
                 kind: .modeEquivalent,
-                color: theme.accent.opacity(0.86),
+                color: (showsRemainingCredits ? creditsGold : theme.accent).opacity(0.86),
                 isVisible: showsBilled
             ) {
                 toggleBilledSeries()
@@ -3983,7 +4085,7 @@ private struct AccountActivityCard: View {
                     width: 5,
                     height: 8
                 )
-                Text(kind.title(for: language))
+                Text(kind.title(for: language, credits: showsRemainingCredits))
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(isVisible ? 0.38 : 0.18))
             }
@@ -4004,8 +4106,8 @@ private struct AccountActivityCard: View {
                 onLegendHoverChange(kind, false, nil)
             }
         }
-        .accessibilityLabel(kind.title(for: language))
-        .accessibilityHint(kind.explanation(for: language))
+        .accessibilityLabel(kind.title(for: language, credits: showsRemainingCredits))
+        .accessibilityHint(kind.explanation(for: language, credits: showsRemainingCredits))
     }
 
     private func toggleActualSeries() {
@@ -4426,6 +4528,59 @@ private struct TokenChartCombinedBar: View {
     }
 }
 
+private struct CreditChartBucket: Identifiable {
+    var id: String
+    var label: String
+    var total: CodexChartCreditTotal
+}
+
+private struct CreditActivityChart: View {
+    let buckets: [CreditChartBucket]
+    let showsStandard: Bool
+    let showsActualCredits: Bool
+    let hoveredID: String?
+    let onHover: (String?, Bool) -> Void
+    @Environment(\.islandInterfaceLanguage) private var language
+
+    private func visibleCost(_ bucket: CreditChartBucket) -> Double {
+        max(showsStandard ? bucket.total.standardCredits : 0,
+            showsActualCredits ? bucket.total.credits : 0)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let maximum = max(0.01, buckets.map(visibleCost).max() ?? 0)
+            HStack(alignment: .bottom, spacing: IslandLayout.activityChartBarSpacing) {
+                ForEach(buckets) { bucket in
+                    let standard = showsStandard ? bucket.total.standardCredits : 0
+                    let actual = showsActualCredits ? bucket.total.credits : 0
+                    ZStack(alignment: .bottom) {
+                        Color.clear
+                        TokenChartCombinedBar(
+                            actualHeight: CGFloat(standard / maximum) * proxy.size.height,
+                            billedHeight: CGFloat(actual / maximum) * proxy.size.height,
+                            width: 6.25, color: creditsGold,
+                            showsActual: showsStandard, showsBilled: showsActualCredits,
+                            isHovered: hoveredID == bucket.id,
+                            seed: tokenChartSketchSeed(bucket.id)
+                        )
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .contentShape(Rectangle())
+                    .onHover { onHover(bucket.id, $0) }
+                    .help(bucket.total.tokens == 0
+                        ? bucket.label + language.text("：暂无本机用量记录", ": no local usage records")
+                        : bucket.label + (bucket.total.unpricedCalls > 0
+                            ? language.text("（仅可计价部分）", " (priced portion only)") : "") + language.text(
+                        "：本机标准 \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) 额度点；⚡实际 \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) 额度点。标准为不开启 Fast 时的用量；实际 − 标准为开启 Fast 浪费的额度。",
+                        ": local Standard \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) credits; ⚡ Actual \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) credits. Standard assumes Fast off; Actual minus Standard is the extra Fast cost."
+                    ))
+                }
+            }
+        }
+    }
+}
+
 private struct DailyTokenActivityChart: View {
     let actualBuckets: [DailyUsageBucket]
     let billedBuckets: [DailyUsageBucket]
@@ -4644,7 +4799,10 @@ private struct HourlyTokenActivityChart: View {
 
 private struct QuotaMetric: View {
     let window: RateLimitWindow?
-    let billedDailyUsageBuckets: [DailyUsageBucket]
+    let planLabel: String?
+    @AppStorage("codexIsland.remainingShowsCredits")
+    private var showsRemainingCredits = false
+    let tokenEstimate: CodexRemainingTokenEstimate?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
@@ -4688,47 +4846,25 @@ private struct QuotaMetric: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .lineLimit(1)
 
-            GeometryReader { proxy in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(remainingText)
-                        .font(.system(size: IslandTypography.display, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.94))
-                        .fixedSize(horizontal: true, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(remainingText)
+                    .font(.system(size: IslandTypography.display, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.94))
+                    .fixedSize(horizontal: true, vertical: true)
 
-                    if let estimatedRemainingTokenText {
-                        Text(estimatedRemainingTokenText)
-                            .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(theme.accent.opacity(0.78))
-                            .fixedSize(horizontal: true, vertical: true)
-                            .help(estimatedRemainingTokenHelp)
-                            .accessibilityLabel(estimatedRemainingTokenHelp)
-                    }
-                }
-                .frame(
-                    width: proxy.size.width,
-                    height: proxy.size.height,
-                    alignment: .leading
-                )
-                .overlay(alignment: .leading) {
-                    if estimatedRemainingTokenText != nil {
-                        Canvas { context, size in
-                            let annotation = context.resolve(
-                                Text(estimatedRemainingTokenAnnotation)
-                                    .font(.system(size: 8, weight: .medium, design: .rounded))
-                                    .foregroundColor(.white.opacity(0.30))
-                            )
-                            context.draw(
-                                annotation,
-                                at: CGPoint(x: 152, y: size.height / 2 + 4),
-                                anchor: .leading
-                            )
-                        }
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                    }
-                }
+                Text(remainingAmountDisplay)
+                    .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(showsRemainingCredits ? creditsGold : theme.accent.opacity(0.78))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .help(showsRemainingCredits ? remainingCreditsHelp : estimatedRemainingTokenHelp)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 0)
+                remainingUnitPicker
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
             }
             .frame(height: 30)
 
@@ -4743,7 +4879,6 @@ private struct QuotaMetric: View {
             .frame(height: 9)
         }
         .padding(.leading, IslandLayout.metricCenterGutter)
-        .padding(.trailing, IslandLayout.contentHorizontalInset)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -4770,10 +4905,8 @@ private struct QuotaMetric: View {
     }
 
     private var estimatedRemainingTokens: Int64? {
-        CodexDisplayPolicy.estimatedRemainingTokens(
-            window: window,
-            dailyUsageBuckets: billedDailyUsageBuckets
-        )
+        guard let tokenEstimate, tokenEstimate.resetsAt > Date() else { return nil }
+        return tokenEstimate.tokens
     }
 
     private var estimatedRemainingTokenText: String? {
@@ -4784,17 +4917,80 @@ private struct QuotaMetric: View {
         )
     }
 
-    private var estimatedRemainingTokenAnnotation: String {
+    private var remainingAmountDisplay: AttributedString {
+        let amount = remainingAmountText
+        guard !amount.hasPrefix("—") else { return AttributedString(amount) }
+        var prefix = AttributedString("≈")
+        prefix.foregroundColor = .white.opacity(0.94)
+        prefix.append(AttributedString(amount))
+        return prefix
+    }
+
+    private var remainingAmountText: String {
+        if showsRemainingCredits {
+            guard let credits = CodexDisplayPolicy.remainingCredits(
+                planLabel: planLabel, remainingPercent: window?.remainingPercent
+            ) else { return language.text("— 额度点", "— credits") }
+            return localizedCredits(CodexThreadCreditEstimate(credits: credits).displayText, language: language)
+        }
+        return estimatedRemainingTokenText.map { String($0.dropFirst()) }
+            ?? language.text("— 词元", "— Tokens")
+    }
+
+    private var remainingCreditsHelp: String {
         language.text(
-            "（根据最近一周使用情况估算）",
-            "(estimated from last 7 days)"
+            "按 Plus 2,750 额度点、Pro 5X 13,750 额度点、Pro 20X 55,000 额度点 乘以当前剩余额度比例计算",
+            "Calculated from the remaining quota percentage: Plus 2,750 credits, Pro 5X 13,750, Pro 20X 55,000"
         )
     }
 
+    private var remainingUnitPicker: some View {
+        HStack(spacing: 0) {
+            remainingUnitButton(language.text("词元", "Tokens"), credits: false)
+            remainingUnitButton(language.text("额度点", "Credits"), credits: true)
+        }
+        .padding(2)
+        .background(alignment: .leading) {
+            Capsule()
+                .fill((showsRemainingCredits ? creditsGold : theme.accent).opacity(0.16))
+                .frame(width: 39, height: 18)
+                .offset(x: showsRemainingCredits ? 41 : 2)
+        }
+        .background(Capsule().fill(Color.white.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+        .fixedSize()
+    }
+
+    private func remainingUnitButton(_ title: String, credits: Bool) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                showsRemainingCredits = credits
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .foregroundStyle(showsRemainingCredits == credits
+                    ? (credits ? creditsGold : theme.accent)
+                    : Color.white.opacity(0.38))
+                .frame(width: 39, height: 18)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(credits
+            ? language.text("显示剩余额度点", "Show remaining credits")
+            : language.text("显示剩余 Token", "Show remaining tokens"))
+        .accessibilityAddTraits(showsRemainingCredits == credits ? .isSelected : [])
+    }
+
     private var estimatedRemainingTokenHelp: String {
-        return language.text(
-            "根据最近 7 个完整自然日的模式等效词元、额度周期长度与剩余比例估算；假设后续全部使用标准模式",
-            "Estimated from equivalent tokens over the previous 7 complete days, the quota window, and remaining percentage; assumes standard mode for future use"
+        let explanation = language.text(
+            "根据最近 7 天本机调用的模型、缓存、输出及各会话 Fast 使用比例，结合官方费率与实际额度变化估算；假设后续使用习惯相近，取可用额度中先耗尽的一项。跨设备和其他共享额度的使用可能影响准确性",
+            "Estimated from the last 7 days of local model, cache, output, and per-session Fast usage, official rates, and observed quota changes. Assumes similar future usage and uses the first allowance to run out. Other devices and shared usage can affect accuracy"
+        )
+        guard tokenEstimate?.usesHistoricalCalibration == true else { return explanation }
+        return explanation + language.text(
+            "。当前周期样本较少，容量参考近期同套餐的已校准周期",
+            ". This cycle has limited data; capacity is based on recent calibrated cycles on the same plan"
         )
     }
 
@@ -5321,7 +5517,30 @@ private func tokenUsageHelp(
         Input: \(exactTokenCount(usage.inputTokens)) (cached: \(exactTokenCount(usage.cachedInputTokens)))
         Output: \(exactTokenCount(usage.outputTokens)) (reasoning: \(exactTokenCount(usage.reasoningOutputTokens)))
         """
+    ) + "\n" + tokenCreditHelp(usage, language: language)
+}
+
+private func tokenCreditHelp(
+    _ usage: ThreadTokenUsage,
+    language: IslandInterfaceLanguage
+) -> String {
+    guard let estimate = usage.creditEstimate else {
+        return language.text(
+            "额度点暂无法估算：历史用量、模型或费率记录不完整。",
+            "Credits estimate unavailable: historical usage, model, or rate information is incomplete."
+        )
+    }
+    var text = language.text(
+        "估算消耗：\(localizedCredits(estimate.displayText, language: language))。按官方费率分别计算普通输入（输入减缓存）、缓存输入和输出，再应用各次调用的 Fast 倍率。推理已包含在输出中。此值是费用参考，不代表实际扣费。",
+        "Estimated usage: \(estimate.displayText). Official rates are applied to uncached input (Input − Cache), cached input, and output, with each call's Fast multiplier. Reasoning is already included in Output. This is a cost reference, not an actual charge."
     )
+    if estimate.assumesStandardTier {
+        text += language.text(
+            " 未记录 Fast 状态的调用按 Standard 估算。",
+            " Calls without a recorded Fast setting are estimated at the Standard rate."
+        )
+    }
+    return text
 }
 
 private func contextWindowValues(

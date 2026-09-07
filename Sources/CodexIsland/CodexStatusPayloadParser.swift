@@ -142,6 +142,29 @@ enum CodexStatusPayloadParser {
         )
     }
 
+    /// The rollout protocol uses snake_case while app-server uses camelCase.
+    static func parseRecordedRateLimit(_ payload: JSONObject?) -> RateLimitBucket? {
+        guard let payload, let id = payload.string("limit_id") else { return nil }
+        func window(_ value: JSONObject?) -> RateLimitWindow? {
+            guard let value, let used = value.double("used_percent"), used.isFinite else {
+                return nil
+            }
+            return RateLimitWindow(
+                usedPercent: used,
+                windowDurationMinutes: value.int("window_minutes"),
+                resetsAt: value.unixDate("resets_at")
+            )
+        }
+        return RateLimitBucket(
+            id: id,
+            name: nil,
+            planType: payload.string("plan_type"),
+            primary: window(payload.dictionary("primary")),
+            secondary: window(payload.dictionary("secondary")),
+            reachedType: payload.string("rate_limit_reached_type")
+        )
+    }
+
     private static func parseThread(_ payload: JSONObject, id: String) -> ThreadSummary {
         let status = payload.dictionary("status")?.string("type") ?? "unknown"
         let title = payload.string("name")

@@ -158,64 +158,6 @@ enum CodexDisplayPolicy {
         return .healthy
     }
 
-    /// Converts the remaining allowance into a personalized Token estimate.
-    /// The baseline is the user's average daily volume over the previous 7
-    /// complete calendar days, including inactive days, scaled to the quota
-    /// window and its remaining percentage.
-    static func estimatedRemainingTokens(
-        window: RateLimitWindow?,
-        dailyUsageBuckets: [DailyUsageBucket],
-        now: Date = Date(),
-        calendar: Calendar = .autoupdatingCurrent
-    ) -> Int64? {
-        guard let window,
-              let durationMinutes = window.windowDurationMinutes,
-              durationMinutes > 0,
-              let resetsAt = window.resetsAt else {
-            return nil
-        }
-
-        let remainingPercent = window.remainingPercent
-        guard remainingPercent > 0 else { return nil }
-
-        let duration = TimeInterval(durationMinutes) * 60
-        let lastResetAt = resetsAt.addingTimeInterval(-duration)
-        guard now >= lastResetAt, now < resetsAt else { return nil }
-
-        let today = calendar.startOfDay(for: now)
-        guard let historyStart = calendar.date(
-            byAdding: .day,
-            value: -usageHabitDayCount,
-            to: today
-        ) else {
-            return nil
-        }
-
-        var historicalTokens = 0.0
-
-        for bucket in dailyUsageBuckets {
-            guard let bucketDay = usageDay(
-                from: bucket.startDate,
-                calendar: calendar
-            ),
-            bucketDay >= historyStart,
-            bucketDay < today else {
-                continue
-            }
-            historicalTokens += Double(max(0, bucket.tokens))
-        }
-
-        guard historicalTokens > 0 else { return nil }
-        let averageDailyTokens = historicalTokens / Double(usageHabitDayCount)
-        let windowDays = Double(durationMinutes) / (24 * 60)
-        let estimate = averageDailyTokens
-            * windowDays
-            * remainingPercent
-            / 100
-        guard estimate.isFinite, estimate > 0 else { return nil }
-        return Int64(min(estimate.rounded(), Double(Int64.max)))
-    }
-
     static func isFastServiceTier(_ serviceTier: String?) -> Bool {
         guard let normalized = serviceTier?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -335,24 +277,6 @@ enum CodexDisplayPolicy {
         scaledValue >= 99.95
     }
 
-    private static func usageDay(
-        from value: String,
-        calendar: Calendar
-    ) -> Date? {
-        let parts = value.split(separator: "-")
-        guard parts.count == 3,
-              let year = Int(parts[0]),
-              let month = Int(parts[1]),
-              let day = Int(parts[2]) else {
-            return nil
-        }
-        return calendar.date(from: DateComponents(
-            year: year,
-            month: month,
-            day: day
-        )).map { calendar.startOfDay(for: $0) }
-    }
-
     /// `account/read` reports both Pro tiers as `pro`. The Codex quota bucket
     /// currently distinguishes the lower tier as `prolite`; keep an explicit
     /// fallback because that subtype is not a documented public contract.
@@ -373,6 +297,19 @@ enum CodexDisplayPolicy {
         }
 
         return (accountPlan ?? quotaPlan)?.uppercased()
+    }
+
+    /// User-defined display allowance: Plus baseline with the plan's multiplier.
+    static func remainingCredits(planLabel: String?, remainingPercent: Double?) -> Double? {
+        guard let remainingPercent, remainingPercent.isFinite else { return nil }
+        let multiplier: Double
+        switch planLabel?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+        case "PLUS": multiplier = 1
+        case "PRO 5X": multiplier = 5
+        case "PRO 20X": multiplier = 20
+        default: return nil
+        }
+        return 2_750 * multiplier * min(100, max(0, remainingPercent)) / 100
     }
 
     private static func normalizedPlanType(_ value: String?) -> String? {
@@ -405,7 +342,7 @@ struct AccountSummary: Equatable {
     static let empty = AccountSummary(authType: nil, planType: nil, requiresOpenAIAuth: false)
 }
 
-struct RateLimitWindow: Equatable {
+struct RateLimitWindow: Equatable, Sendable {
     var usedPercent: Double
     var windowDurationMinutes: Int?
     var resetsAt: Date?
@@ -440,7 +377,7 @@ struct QuotaConsumptionPaceAssessment: Equatable, Sendable {
     var nextResetAt: Date
 }
 
-struct RateLimitBucket: Equatable {
+struct RateLimitBucket: Equatable, Sendable {
     var id: String
     var name: String?
     var planType: String?
@@ -535,6 +472,9 @@ struct ThreadTokenUsage: Equatable, Sendable {
     var contextTokensUsed: Int64? = nil
     /// The model context capacity reported alongside the latest token count.
     var contextWindowTokens: Int64? = nil
+    /// Estimated cost of this exact cumulative usage, priced with each call's
+    /// recorded model and tier rather than the thread's latest settings.
+    var creditEstimate: CodexThreadCreditEstimate? = nil
 }
 
 enum ThreadExecutionState: Equatable, Sendable {
@@ -592,6 +532,10 @@ struct CodexSnapshot: Equatable {
     var billedTodayThreadTokens: Int64? = nil
     var billedHourlyThreadTokens: [HourlyUsageBucket] = []
     var billedDailyThreadTokens: [DailyUsageBucket] = []
+    var chartCreditTotals: [Date: CodexChartCreditTotal] = [:]
+    /// Calibrated from quota changes and priced local calls, independently of
+    /// the display chart's account/local daily-history merge.
+    var remainingTokenEstimate: CodexRemainingTokenEstimate? = nil
     /// Compact-island activity state. This intentionally differs from the
     /// expanded header's app-server connection indicator.
     var hasRunningSession: Bool = false
@@ -613,4 +557,55 @@ struct CodexSnapshot: Equatable {
         lastUpdated: nil,
         warning: nil
     )
+}
+
+/// Numeric per-hour costs; incomplete history retains its known priced subtotal.
+struct CodexChartCreditTotal: Equatable, Sendable {
+    var tokens: Double = 0
+    var credits: Double = 0
+    var unpricedCalls: Int = 0
+
+    var standardCredits: Double = 0
+    var wastedCredits: Double { max(0, credits - standardCredits) }
+
+    init(tokens: Double = 0, credits: Double = 0,
+         standardCredits: Double? = nil, unpricedCalls: Int = 0) {
+        self.tokens = tokens
+        self.credits = credits
+        self.standardCredits = standardCredits ?? credits
+        self.unpricedCalls = unpricedCalls
+    }
+
+    mutating func merge(_ other: Self, sign: Double = 1) {
+        tokens += sign * other.tokens
+        credits += sign * other.credits
+        standardCredits += sign * other.standardCredits
+        unpricedCalls += Int(sign) * other.unpricedCalls
+    }
+
+    func displayText(matching actualTokens: Int64) -> String {
+        // Account tokens can include other computers. Price local history
+        // independently; only absent local records or missing local prices
+        // affect the availability/completeness of this amount.
+        guard tokens > 0 || actualTokens == 0 else { return "— credits" }
+        return amountText(for: credits) + " credits"
+    }
+
+    func chartDisplayText(matching actualTokens: Int64, showsStandard: Bool, showsActual: Bool) -> String {
+        guard tokens > 0 || actualTokens == 0 else { return "—" }
+        var amounts: [String] = []
+        if showsStandard { amounts.append(amountText(for: standardCredits)) }
+        if showsActual { amounts.append(amountText(for: credits)) }
+        return amounts.isEmpty ? "—" : amounts.joined(separator: " / ")
+    }
+
+    private func amountText(for cost: Double) -> String {
+        guard cost.isFinite else { return "—" }
+        let complete = unpricedCalls == 0
+        guard complete || cost >= 0.1 else { return "—" }
+        // A lower bound must never round above the known subtotal.
+        let displayed = complete ? max(0, cost) : floor(cost * 10) / 10
+        let amount = CodexThreadCreditEstimate(credits: displayed).amountText
+        return complete ? amount : "≥" + amount
+    }
 }

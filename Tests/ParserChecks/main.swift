@@ -6,6 +6,53 @@ struct ParserChecks {
     private static var failures = 0
 
     static func main() {
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PLUS", remainingPercent: 100) == 2750,
+               "Plus credits use the requested 2750 baseline")
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO 5X", remainingPercent: 50) == 6875,
+               "5X credits scale the baseline and remaining percentage")
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO 20X", remainingPercent: 99) == 54450,
+               "20X credits scale the baseline and remaining percentage")
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO", remainingPercent: 99) == nil,
+               "unknown Pro tier does not guess a credits allowance")
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PLUS", remainingPercent: nil) == nil,
+               "missing quota cannot show a credits balance")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 12.346, unpricedCalls: 1)
+            .displayText(matching: 100) == "≥12.3 credits",
+               "unknown historical calls preserve the priced subtotal rounded down")
+        expect(CodexChartCreditTotal().displayText(matching: 100) == "— credits",
+               "account-only historical tokens cannot invent credits")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 12.346)
+            .displayText(matching: 100) == "12.3 credits",
+               "complete historical costs keep their normal rounded total")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 12.346)
+            .displayText(matching: 1000) == "12.3 credits",
+               "other computers do not mark complete local credits as partial")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 12.346)
+            .displayText(matching: 50) == "12.3 credits",
+               "delayed account totals do not hide complete local credits")
+        expect(CodexThreadCreditEstimate(credits: 0).displayText == "0 credits",
+               "zero credits omit the decimal fraction")
+        expect(CodexThreadCreditEstimate(credits: 1).displayText == "1.0 credits",
+               "nonzero credits retain one decimal place")
+        let partialCredits = CodexChartCreditTotal(
+            tokens: 100, credits: 1.26, standardCredits: 0.56, unpricedCalls: 1
+        )
+        expect(partialCredits.chartDisplayText(matching: 100, showsStandard: true, showsActual: true)
+            == "≥0.5 / ≥1.2", "both credit series show conservative, separately labeled lower bounds")
+        expect(partialCredits.chartDisplayText(matching: 100, showsStandard: false, showsActual: true)
+            == "≥1.2", "actual-only credits do not round a lower bound upward")
+        expect(partialCredits.chartDisplayText(matching: 100, showsStandard: true, showsActual: false)
+            == "≥0.5", "standard-only credits do not round a lower bound upward")
+        expect(partialCredits.displayText(matching: 100) == "≥1.2 credits",
+               "token mode uses the same conservative lower bound")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 1.26, standardCredits: 0.56)
+            .chartDisplayText(matching: 100, showsStandard: true, showsActual: true) == "0.6 / 1.3",
+               "fully priced credit totals retain normal rounding")
+        expect(CodexChartCreditTotal(tokens: 100, credits: 0.04, unpricedCalls: 1)
+            .chartDisplayText(matching: 100, showsStandard: false, showsActual: true) == "—",
+               "tiny incomplete costs do not claim a positive lower bound")
+        expect(CodexChartCreditTotal().chartDisplayText(matching: 100, showsStandard: true, showsActual: true)
+            == "—", "credit mode does not invent costs for account-only history")
         checkRateLimitsAndResetCredits()
         checkResetCreditExpiryWarning()
         checkCodexBucketPreference()
@@ -13,6 +60,7 @@ struct ParserChecks {
         checkQuotaConsumptionPace()
         checkQuotaRemainingLevels()
         checkEstimatedRemainingTokens()
+        checkTokenEstimateRollouts()
         checkFastModeUsageMultipliers()
         checkDisplayModelNames()
         checkReasoningEffortLabels()
@@ -30,6 +78,7 @@ struct ParserChecks {
         checkEffectiveServiceTier()
         checkThreadRuntimeSettings()
         checkThreadActivityStates()
+        checkThreadCreditUsage()
         checkDailyTokenUsage()
 
         guard failures == 0 else {
@@ -794,95 +843,292 @@ struct ParserChecks {
     }
 
     private static func checkEstimatedRemainingTokens() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let now = calendar.date(from: DateComponents(
-            year: 2026,
-            month: 2,
-            day: 1,
-            hour: 12
-        ))!
-        let nextReset = calendar.date(byAdding: .day, value: 2, to: now)!
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "yyyy-MM-dd"
-        var buckets = (1...CodexDisplayPolicy.usageHabitDayCount).map { offset in
-            DailyUsageBucket(
-                startDate: formatter.string(
-                    from: calendar.date(byAdding: .day, value: -offset, to: now)!
-                ),
-                tokens: 100
+        // The official example has 20K uncached + 80K cached + 5K output.
+        // Rollouts express the first two together as input_tokens = 100K.
+        let credits = CodexCreditRateCard.credits(
+            model: "gpt-5.5", serviceTier: "default",
+            inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
+        )
+        expect(credits == 7.25, "official credit example excludes cached input from the full input rate")
+        expect(
+            CodexCreditRateCard.credits(
+                model: "gpt-5.5", serviceTier: "priority",
+                inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
+            ) == 18.125,
+            "Fast multiplies all three token rates"
+        )
+        expect(CodexCreditRateCard.rate(for: "openai/gpt-6-astra-2026-09-01")?.input == 250,
+               "dated model IDs resolve the exact documented model")
+        expect(CodexCreditRateCard.rate(for: "gpt-5.3-codex-spark") == nil,
+               "Spark is never assigned the Codex rate or shared quota")
+        expect(CodexCreditRateCard.rate(for: "gpt-5.4-mini")?.input == 18.75,
+               "mini uses its own documented rate")
+        expect(CodexCreditRateCard.rate(for: "gpt-6-astra-unknown") == nil,
+               "undocumented variants stay unpriced")
+        expect(CodexCreditRateCard.credits(
+            model: "gpt-5.5", serviceTier: "default",
+            inputTokens: 100, cachedInputTokens: 101, outputTokens: 0
+        ) == nil, "invalid cache counts cannot become negative credit cost")
+
+        let now = Date(timeIntervalSince1970: 1_789_000_000)
+        let reset = now.addingTimeInterval(4 * 60 * 60)
+        func quota(_ used: Double, resetAt: Date = reset) -> RateLimitBucket {
+            RateLimitBucket(
+                id: "codex", name: nil, planType: "pro",
+                primary: RateLimitWindow(usedPercent: used, windowDurationMinutes: 300, resetsAt: resetAt),
+                secondary: nil, reachedType: nil
             )
         }
-        buckets.append(
-            DailyUsageBucket(startDate: "2026-02-01", tokens: 100_000)
+        // A known 100M-token allowance: twelve 1M-token calls use 12%.
+        // Calendar-day activity has no part in deriving that capacity.
+        var samples: [CodexTokenCostSample] = []
+        for index in 0...12 {
+            let timestamp = now.addingTimeInterval(Double(index - 60))
+            let count: Int64 = index == 0 ? 0 : 1_000_000
+            let cost: Double? = index == 0 ? nil : 100.0
+            let observed = quota(Double(index), resetAt: reset)
+            let sample = CodexTokenCostSample(
+                timestamp: timestamp, tokens: count, credits: cost, quota: observed
+            )
+            samples.append(sample)
+        }
+        let estimate = CodexTokenEstimator.estimate(quota: quota(12), samples: samples, now: now)
+        expect(abs((estimate?.tokens ?? 0) - 88_000_000) <= 1,
+               "observed quota changes recover a known capacity independently of calendar-day volume")
+        expect(estimate?.sampleCount == 12 && estimate?.observedQuotaPercent == 10,
+               "estimate requires multiple meaningful quota intervals")
+        let pausedSamples = samples.map { sample -> CodexTokenCostSample in
+            var result = sample
+            result.timestamp = result.timestamp.addingTimeInterval(-1_000)
+            return result
+        }
+        expect(abs((CodexTokenEstimator.estimate(quota: quota(12), samples: pausedSamples, now: now)?.tokens ?? 0) - 88_000_000) <= 1,
+               "idle time does not reduce inferred allowance capacity")
+        let fastSamples = samples.map { sample -> CodexTokenCostSample in
+            var result = sample
+            result.credits = sample.credits.map { $0 * 2.5 }
+            return result
+        }
+        expect(abs((CodexTokenEstimator.estimate(quota: quota(12), samples: fastSamples, now: now)?.tokens ?? 0) - 88_000_000) <= 1,
+               "continuing the observed Fast mix does not manufacture extra remaining tokens")
+        expect(CodexTokenEstimator.estimate(quota: quota(12), samples: Array(samples.prefix(5)), now: now) == nil,
+               "small percentage changes do not define the whole allowance")
+        let unknown = samples.map { sample -> CodexTokenCostSample in
+            var result = sample
+            result.credits = nil
+            return result
+        }
+        expect(CodexTokenEstimator.estimate(quota: quota(12), samples: unknown, now: now) == nil,
+               "unknown model costs do not receive a guessed price")
+        let newReset = reset.addingTimeInterval(300)
+        let resetEstimate = CodexTokenEstimator.estimate(
+            quota: quota(0, resetAt: newReset), samples: samples, now: now
         )
-        buckets.append(
-            DailyUsageBucket(startDate: "2025-12-31", tokens: 100_000)
+        expect(abs((resetEstimate?.tokens ?? 0) - 100_000_000) <= 1
+               && resetEstimate?.usesHistoricalCalibration == true,
+               "a reset can reuse recent calibrated capacity without carrying over old consumption")
+        expect(CodexTokenEstimator.estimate(
+            quota: quota(0, resetAt: newReset), samples: samples, now: now,
+            historyNotBefore: now
+        ) == nil, "an account change prevents borrowing the previous account's history")
+        var changedCapacity = samples
+        for index in 0...12 {
+            changedCapacity.append(CodexTokenCostSample(
+                timestamp: now.addingTimeInterval(Double(index - 30)),
+                tokens: index == 0 ? 0 : 1_000_000,
+                credits: index == 0 ? nil : 100.0,
+                quota: quota(Double(index * 2), resetAt: newReset)
+            ))
+        }
+        let recalibrated = CodexTokenEstimator.estimate(
+            quota: quota(24, resetAt: newReset), samples: changedCapacity, now: now
         )
-        let estimate = CodexDisplayPolicy.estimatedRemainingTokens(
-            window: RateLimitWindow(
-                usedPercent: 50,
-                windowDurationMinutes: 7 * 24 * 60,
-                resetsAt: nextReset
-            ),
-            dailyUsageBuckets: buckets,
-            now: now,
-            calendar: calendar
-        )
-        expect(
-            estimate == 350,
-            "remaining Token estimate uses the previous 7 complete days"
-        )
-        let weightedHistory = CodexUsageTimeline.lastDaysIncludingToday(
-            from: buckets,
-            localDailyBuckets: buckets.map {
-                DailyUsageBucket(
-                    startDate: $0.startDate,
-                    tokens: min($0.tokens * 5 / 2, 250)
-                )
-            },
-            count: 30,
-            now: now,
-            calendar: calendar
-        )
-        let weightedEstimate = CodexDisplayPolicy.estimatedRemainingTokens(
-            window: RateLimitWindow(
-                usedPercent: 50,
-                windowDurationMinutes: 7 * 24 * 60,
-                resetsAt: nextReset
-            ),
-            dailyUsageBuckets: weightedHistory,
-            now: now,
-            calendar: calendar
-        )
-        expect(
-            weightedEstimate == 875,
-            "remaining estimate uses billed history without dividing future standard-mode Tokens"
-        )
-        expect(
-            CodexDisplayPolicy.isFastServiceTier("priority"),
-            "priority service tier enables the Fast budget multiplier"
-        )
-        expect(
-            CodexDisplayPolicy.isFastServiceTier("FAST"),
-            "Fast service tier matching is case-insensitive"
-        )
-        expect(
-            !CodexDisplayPolicy.isFastServiceTier("default"),
-            "default service tier keeps the standard budget multiplier"
-        )
-        expect(
-            CodexDisplayPolicy.estimatedRemainingTokens(
-                window: nil,
-                dailyUsageBuckets: buckets,
-                now: now,
-                calendar: calendar
-            ) == nil,
-            "remaining Token estimate stays hidden without quota metadata"
-        )
+        expect(abs((recalibrated?.tokens ?? 0) - 38_000_000) <= 1
+               && recalibrated?.usesHistoricalCalibration == false,
+               "enough current-cycle data replaces older capacity without cross-reset percentage deltas")
+        var otherPlan = quota(12)
+        otherPlan.planType = "plus"
+        expect(CodexTokenEstimator.estimate(quota: otherPlan, samples: samples, now: now) == nil,
+               "plan changes invalidate the observed capacity")
+        expect(CodexTokenEstimator.estimate(quota: quota(12, resetAt: now), samples: samples, now: now) == nil,
+               "expired windows cannot display an estimate")
+        var blocked = quota(12)
+        blocked.secondary = RateLimitWindow(usedPercent: 100, windowDurationMinutes: 10_080, resetsAt: reset)
+        expect(CodexTokenEstimator.estimate(quota: blocked, samples: samples, now: now)?.tokens == 0,
+               "an exhausted secondary quota overrides a healthy primary quota")
+        blocked.secondary?.usedPercent = 50
+        expect(CodexTokenEstimator.estimate(quota: blocked, samples: samples, now: now) == nil,
+               "an uncalibrated secondary constraint is not ignored")
+        let constrainedSamples = samples.map { sample -> CodexTokenCostSample in
+            var result = sample
+            result.quota.secondary = RateLimitWindow(
+                usedPercent: sample.quota.primary!.usedPercent * 2,
+                windowDurationMinutes: 10_080, resetsAt: reset
+            )
+            return result
+        }
+        blocked.secondary?.usedPercent = 24
+        expect(abs((CodexTokenEstimator.estimate(quota: blocked, samples: constrainedSamples, now: now)?.tokens ?? 0) - 38_000_000) <= 1,
+               "the smaller calibrated allowance determines remaining tokens")
+        expect(CodexTokenEstimator.estimate(quota: quota(100), samples: [], now: now)?.tokens == 0,
+               "exhausted included quota reports zero even without history")
+        expect(CodexTokenEstimator.estimate(quota: nil, samples: samples, now: now) == nil,
+               "missing quota metadata stays unavailable")
+    }
+
+    private static func checkTokenEstimateRollouts() {
+        let now = Date()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = now.addingTimeInterval(-3_600)
+        let reset = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + 14_400)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-priced-usage-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+        }
+        func line(_ type: String, _ payload: JSONObject, _ date: Date = start) throws -> String {
+            let object: JSONObject = [
+                "type": type, "timestamp": formatter.string(from: date), "payload": payload
+            ]
+            return String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+        }
+        func quota(_ used: Double) -> RateLimitBucket {
+            RateLimitBucket(
+                id: "codex", name: nil, planType: "pro",
+                primary: RateLimitWindow(usedPercent: used, windowDurationMinutes: 300, resetsAt: reset),
+                secondary: nil, reachedType: nil
+            )
+        }
+        func token(total: Int64, last: Int64, used: Double, at date: Date) throws -> String {
+            let lastUsage: JSONObject = [
+                "total_tokens": last,
+                "input_tokens": last * 9 / 10,
+                "cached_input_tokens": last * 8 / 10,
+                "output_tokens": last / 10,
+                "reasoning_output_tokens": last / 20
+            ]
+            return try line("event_msg", [
+                "type": "token_count",
+                "info": [
+                    "total_token_usage": ["total_tokens": total],
+                    "last_token_usage": lastUsage
+                ],
+                "rate_limits": [
+                    "limit_id": "codex", "plan_type": "pro",
+                    "primary": [
+                        "used_percent": used, "window_minutes": 300,
+                        "resets_at": reset.timeIntervalSince1970
+                    ]
+                ]
+            ], date)
+        }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let meta = try line("session_meta", ["source": "cli", "model_provider": "openai"])
+            let settings = try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": "default"])
+            var lines = [[meta, settings], [meta, settings]]
+            var totals: [Int64] = [0, 0]
+            for index in 0...12 {
+                let slot = index % 2
+                let delta: Int64 = index == 0 ? 0 : 1_000_000
+                totals[slot] += delta
+                let event = try token(total: totals[slot], last: delta, used: Double(index),
+                                      at: start.addingTimeInterval(Double(index * 60)))
+                lines[slot].append(contentsOf: [event, event])
+            }
+            let urls = (0...1).map { directory.appendingPathComponent("usage-\($0).jsonl") }
+            for index in 0...1 {
+                try Data((lines[index].joined(separator: "\n") + "\n").utf8).write(to: urls[index])
+            }
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let usage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: urls.map(\.path), now: now, calendar: calendar, quota: quota(12)
+            )
+            expect(abs(usage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 816) < 0.000001,
+                   "chart credits sum concurrent calls without charging duplicate notifications")
+            expect(usage.chartCreditTotals.values.allSatisfy { $0.unpricedCalls == 0 },
+                   "complete token breakdowns produce fully priced chart buckets")
+            expect(usage.remainingTokenEstimate?.sampleCount == 12,
+                   "priced usage excludes repeated token_count notifications")
+            expect(abs((usage.remainingTokenEstimate?.tokens ?? 0) - 88_000_000) <= 1,
+                   "concurrent rollouts combine their costs before calibrating account quota")
+
+            let customURL = directory.appendingPathComponent("custom-provider.jsonl")
+            let customMeta = try line("session_meta", ["source": "cli", "model_provider": "custom"])
+            let customCall = try token(total: 100_000_000, last: 100_000_000, used: 12,
+                                       at: start.addingTimeInterval(800))
+            try Data(([customMeta, settings, customCall].joined(separator: "\n") + "\n").utf8).write(to: customURL)
+            let customUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: urls.map(\.path) + [customURL.path], now: now.addingTimeInterval(31),
+                calendar: calendar, quota: quota(12)
+            )
+            expect(abs((customUsage.remainingTokenEstimate?.tokens ?? 0) - 88_000_000) <= 1,
+                   "third-party providers do not inflate ChatGPT allowance estimates")
+
+            lines[0].append(try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": "priority"], start.addingTimeInterval(900)))
+            totals[0] += 1_000_000
+            lines[0].append(try token(total: totals[0], last: 1_000_000, used: 14.5, at: start.addingTimeInterval(901)))
+            lines[0].append(try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": NSNull()], start.addingTimeInterval(960)))
+            totals[0] += 1_000_000
+            lines[0].append(try token(total: totals[0], last: 1_000_000, used: 15.5, at: start.addingTimeInterval(961)))
+            let handle = try FileHandle(forWritingTo: urls[0])
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data((lines[0].suffix(4).joined(separator: "\n") + "\n").utf8))
+            try handle.close()
+            let resumed = try CodexDailyTokenUsageReader.readRecentHours(
+                from: urls.map(\.path), now: now.addingTimeInterval(32), calendar: calendar,
+                quota: quota(15.5)
+            )
+            expect(resumed.billedDailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 15_500_000,
+                   "explicit null service tier clears a previously recorded Fast setting")
+            expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 1054) < 0.000001,
+                   "incremental chart credits retain Standard calls and apply Fast only to new calls")
+            expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits } - 952) < 0.000001,
+                   "credit chart Standard prices every call without its Fast multiplier")
+            expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.wastedCredits } - 102) < 0.000001,
+                   "credit chart Wasted includes only the extra Fast cost")
+            expect(resumed.remainingTokenEstimate?.sampleCount == 14,
+                   "incremental scans retain history and price each new call once")
+            expect((resumed.remainingTokenEstimate?.tokens ?? Int64.max) < 84_500_000,
+                   "recent Fast usage increases future cost instead of assuming every session becomes Standard")
+            let apiUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: urls.map(\.path), now: now.addingTimeInterval(33), calendar: calendar,
+                usesChatGPTCredits: false, quota: quota(15.5)
+            )
+            expect(apiUsage.chartCreditTotals.values.contains { $0.unpricedCalls > 0 },
+                   "non-ChatGPT chart usage cannot silently display zero credits")
+            expect(apiUsage.remainingTokenEstimate == nil,
+                   "API-key usage cannot calibrate ChatGPT included allowance")
+            let historyURL = directory.appendingPathComponent("chart-history.jsonl")
+            let old = start.addingTimeInterval(-10 * 86_400)
+            let oldSettings = try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": "default"], old)
+            let first = try token(total: 1_000_000, last: 1_000_000, used: 1, at: old)
+            let newSettings = try line("turn_context", ["model": "gpt-6-astra", "service_tier": "priority"])
+            let second = try token(total: 2_000_000, last: 1_000_000, used: 2, at: start)
+            let oldMeta = try line("session_meta", ["source": "cli", "model_provider": "openai"], old)
+            try Data(([oldMeta, oldSettings, first, newSettings, second].joined(separator: "\n") + "\n").utf8).write(to: historyURL)
+            let history = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [historyURL.path], now: now, calendar: calendar
+            )
+            let oldHour = calendar.dateInterval(of: .hour, for: old)!.start
+            let newHour = calendar.dateInterval(of: .hour, for: start)!.start
+            expect(history.chartCreditTotals[oldHour]?.credits == 68,
+                   "30-day chart retains priced calls older than estimator history")
+            expect(history.chartCreditTotals[newHour]?.standardCredits == 170
+                   && history.chartCreditTotals[newHour]?.wastedCredits == 255,
+                   "Astra Fast splits into Standard 170 plus extra 255 credits")
+            expect(history.chartCreditTotals[newHour]?.credits == 425,
+                   "switching models in one rollout prices each hour with its recorded model")
+            expect(history.chartCreditTotals[newHour]?.displayText(matching: 1_000_001) == "425.0 credits",
+                   "historical credits use local logs even when account history includes another computer")
+
+        } catch {
+            expect(false, "priced rollout estimates: \(error.localizedDescription)")
+        }
     }
 
     private static func checkFastModeUsageMultipliers() {
@@ -1646,6 +1892,124 @@ struct ParserChecks {
             expect(false, "stale thread activity guard: \(error.localizedDescription)")
         }
         try? FileManager.default.removeItem(at: staleURL)
+    }
+
+    private static func checkThreadCreditUsage() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("island-credit-checks-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        func line(_ object: JSONObject) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) + "\n"
+        }
+        func settings(_ model: String, tier: Any? = "default") throws -> String {
+            var payload: JSONObject = ["model": model]
+            if let tier { payload["service_tier"] = tier }
+            return try line(["type": "turn_context", "payload": payload])
+        }
+        func count(input: Int64, cache: Int64, output: Int64) -> JSONObject {
+            ["input_tokens": input, "cached_input_tokens": cache,
+             "output_tokens": output, "reasoning_output_tokens": output / 2,
+             "total_tokens": input + output]
+        }
+        let officialCounts = count(input: 100_000, cache: 80_000, output: 5_000)
+        func token(_ total: JSONObject, last: JSONObject?) throws -> String {
+            var info: JSONObject = ["total_token_usage": total]
+            if let last { info["last_token_usage"] = last }
+            return try line(["type": "event_msg", "payload": ["type": "token_count", "info": info]])
+        }
+        func write(_ content: String, to url: URL) throws {
+            try Data(content.utf8).write(to: url, options: .atomic)
+        }
+        func append(_ content: String, to url: URL) throws {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(content.utf8))
+        }
+        func estimate(_ url: URL) throws -> CodexThreadCreditEstimate? {
+            guard let usage = try CodexThreadActivityReader.readLatest(
+                from: url.path, validatePath: false
+            ).tokenUsage else { return nil }
+            return try CodexThreadCreditUsageReader.estimate(
+                from: url.path, matching: usage, validatePath: false
+            )
+        }
+        func expectCredits(_ value: CodexThreadCreditEstimate?, _ expected: Double, _ message: String) {
+            expect(value.map { abs($0.credits - expected) < 0.000_001 } == true, message)
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("mixed.jsonl")
+            let official = try token(officialCounts, last: officialCounts)
+            try write(settings("gpt-5.5") + official, to: url)
+            expectCredits(try estimate(url), 7.25, "thread credits match the official 7.25 example without charging reasoning twice")
+            try append(official, to: url)
+            expectCredits(try estimate(url), 7.25, "duplicate token notifications do not increase credits")
+
+            let astraCall = count(input: 10_000, cache: 8_000, output: 1_000)
+            let afterAstra = count(input: 110_000, cache: 88_000, output: 6_000)
+            try append(settings("gpt-6-astra", tier: "priority") + token(afterAstra, last: astraCall), to: url)
+            expectCredits(try estimate(url), 12.125, "model changes and Fast apply only to their own calls")
+            let afterSol = count(input: 120_000, cache: 96_000, output: 7_000)
+            try append(settings("gpt-5.6-sol", tier: NSNull()) + token(afterSol, last: astraCall), to: url)
+            expectCredits(try estimate(url), 12.905, "explicit null returns to Standard without repricing past Fast calls")
+
+            let hugeResponse = try line(["type": "response_item", "payload": ["text": String(repeating: "x", count: 1_100_000)]])
+            let afterAnotherSol = count(input: 130_000, cache: 104_000, output: 8_000)
+            let next = try token(afterAnotherSol, last: astraCall)
+            try append(hugeResponse + String(next.prefix(next.count / 2)), to: url)
+            expectCredits(try estimate(url), 12.905, "large tool output and an incomplete token line preserve prior credits")
+            try append(String(next.dropFirst(next.count / 2)), to: url)
+            expectCredits(try estimate(url), 13.685, "completed appended token lines are charged once")
+
+            let afterUnknown = count(input: 140_000, cache: 112_000, output: 9_000)
+            try append(settings("unknown-model") + token(afterUnknown, last: astraCall), to: url)
+            let unknownEstimate = try estimate(url)
+            expect(unknownEstimate == nil, "unknown model cost is not shown as a complete total")
+            try append(settings("gpt-5.5") + official, to: url)
+            expectCredits(try estimate(url), 7.25, "counter resets keep credits aligned with the displayed token total")
+
+            try write(settings("gpt-5.5", tier: "priority") + official, to: url)
+            expectCredits(try estimate(url), 18.125, "file replacement invalidates the credit cache")
+            let standardURL = directory.appendingPathComponent("standard.jsonl")
+            try write(settings("gpt-5.5", tier: nil) + official, to: standardURL)
+            let standard = try estimate(standardURL)
+            expectCredits(standard, 7.25, "separate sessions retain independent Fast settings")
+            expect(standard?.assumesStandardTier == true, "missing tier is disclosed as a Standard assumption")
+
+            let jumpURL = directory.appendingPathComponent("jump.jsonl")
+            try write(settings("gpt-5.5") + token(afterAstra, last: astraCall), to: jumpURL)
+            let jumpEstimate = try estimate(jumpURL)
+            expect(jumpEstimate == nil, "unattributed inherited usage is not priced using the latest model")
+            try write(settings("gpt-5.5") + token(officialCounts, last: nil), to: jumpURL)
+            let missingEstimate = try estimate(jumpURL)
+            expect(missingEstimate == nil, "missing per-call details do not fabricate historical pricing")
+            let customMeta = try line(["type": "session_meta", "payload": ["model_provider": "custom"]])
+            try write(customMeta + settings("gpt-5.5") + official, to: jumpURL)
+            let customEstimate = try estimate(jumpURL)
+            expect(customEstimate == nil, "custom provider does not inherit OpenAI credit prices")
+            try write(settings("gpt-5.5", tier: "flex") + official, to: jumpURL)
+            let flexEstimate = try estimate(jumpURL)
+            expect(flexEstimate == nil, "unlisted service tiers do not inherit Standard pricing")
+
+            let screenshotURL = directory.appendingPathComponent("screenshot.jsonl")
+            let screenshotCounts = count(input: 1_266_278, cache: 1_199_104, output: 6_717)
+            try write(settings("gpt-6-astra") + token(screenshotCounts, last: screenshotCounts), to: screenshotURL)
+            let screenshot = try estimate(screenshotURL)
+            expectCredits(screenshot, 55.16735, "user screenshot tokens cost 55.16735 Astra Standard credits")
+            expect(screenshot?.displayText == "55.2 credits", "credit label rounds only the final sum")
+            let mismatched = ThreadTokenUsage(inputTokens: 1, cachedInputTokens: 0, outputTokens: 0,
+                                             reasoningOutputTokens: 0, totalTokens: 1)
+            let stale = try CodexThreadCreditUsageReader.estimate(
+                from: screenshotURL.path, matching: mismatched, validatePath: false
+            )
+            expect(stale == nil, "credits from a newer scan cannot be paired with an older token snapshot")
+            expect(CodexThreadCreditEstimate(credits: 0.001).displayText == "<0.1 credits", "small positive costs do not round to zero")
+        } catch {
+            expect(false, "thread credit usage: \(error.localizedDescription)")
+        }
     }
 
     private static func checkDailyTokenUsage() {
