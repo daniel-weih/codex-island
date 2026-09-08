@@ -219,21 +219,20 @@ enum CodexDisplayPolicy {
         }
     }
 
-    /// Matches the effort names shown by Codex App. Historical `minimal`
-    /// records are folded into Light; Extra High is the only abbreviated
-    /// label so the row remains compact.
+    /// Uses lowercase effort labels, folding historical `minimal` and `light`
+    /// records into `low` and abbreviating extra high to keep rows compact.
     static func reasoningEffortLabel(_ rawValue: String) -> String {
         let normalized = rawValue.trimmingCharacters(
             in: .whitespacesAndNewlines
         ).lowercased()
         switch normalized {
-        case "minimal", "low", "light": return "Light"
-        case "medium": return "Medium"
-        case "high": return "High"
-        case "xhigh", "extra-high", "extra_high", "extra high": return "xHigh"
-        case "max": return "Max"
-        case "ultra": return "Ultra"
-        default: return normalized.capitalized
+        case "minimal", "low", "light": return "low"
+        case "medium": return "medium"
+        case "high": return "high"
+        case "xhigh", "extra-high", "extra_high", "extra high": return "xhigh"
+        case "max": return "max"
+        case "ultra": return "ultra"
+        default: return normalized
         }
     }
 
@@ -287,10 +286,12 @@ enum CodexDisplayPolicy {
         let accountPlan = normalizedPlanType(accountPlanType)
         let quotaPlan = normalizedPlanType(rateLimitPlanType)
 
+        if accountPlan == "prolite" { return "PRO5X" }
+
         if accountPlan == "pro"
             || (accountPlan == nil && (quotaPlan == "prolite" || quotaPlan == "pro")) {
             switch quotaPlan {
-            case "prolite": return "PRO 5X"
+            case "prolite": return "PRO5X"
             case "pro": return "PRO 20X"
             default: return "PRO"
             }
@@ -305,7 +306,7 @@ enum CodexDisplayPolicy {
         let multiplier: Double
         switch planLabel?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "PLUS": multiplier = 1
-        case "PRO 5X": multiplier = 5
+        case "PRO5X": multiplier = 5
         case "PRO 20X": multiplier = 20
         default: return nil
         }

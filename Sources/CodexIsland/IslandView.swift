@@ -3130,11 +3130,11 @@ private struct ThreadConfigurationView: View {
 
     private func reasoningBadgeColor(for displayLabel: String) -> Color {
         switch displayLabel {
-        case "Max":
+        case "max":
             // Codex CLI Max uses a warm gold-to-orange ignition palette.
             return Color(red: 1.0, green: 178.0 / 255.0, blue: 66.0 / 255.0)
                 .opacity(0.94)
-        case "Ultra":
+        case "ultra":
             // Codex CLI Ultra uses a violet-to-magenta ignition palette.
             return Color(red: 186.0 / 255.0, green: 130.0 / 255.0, blue: 1.0)
                 .opacity(0.94)
@@ -4029,17 +4029,17 @@ private struct AccountActivityCard: View {
             var credits = AttributedString(values)
             credits.foregroundColor = creditsGold
             detail.append(credits)
-            var tokens = AttributedString(" (\(compactTokenCount(actualTokens)))")
+            var tokens = AttributedString(" (\(chartTokenCount(actualTokens)))")
             tokens.foregroundColor = theme.accent.opacity(0.72)
             detail.append(tokens)
             return detail
         }
         let tokenText: String
         if showsActual && showsBilled {
-            tokenText = "\(dateText) · \(compactTokenCount(actualTokens)) / \(compactTokenCount(billedTokens))"
+            tokenText = "\(dateText) · \(chartTokenCount(actualTokens)) / \(chartTokenCount(billedTokens))"
         } else {
             let tokens = showsActual ? actualTokens : billedTokens
-            tokenText = "\(dateText) · \(compactTokenCount(tokens))"
+            tokenText = "\(dateText) · \(chartTokenCount(tokens))"
         }
         var detail = AttributedString(tokenText)
         let creditAmount = creditTotal.displayText(matching: actualTokens)
@@ -4920,7 +4920,7 @@ private struct QuotaMetric: View {
     private var remainingAmountDisplay: AttributedString {
         let amount = remainingAmountText
         guard !amount.hasPrefix("—") else { return AttributedString(amount) }
-        var prefix = AttributedString("≈")
+        var prefix = AttributedString("≈ ")
         prefix.foregroundColor = .white.opacity(0.94)
         prefix.append(AttributedString(amount))
         return prefix
@@ -4931,7 +4931,7 @@ private struct QuotaMetric: View {
             guard let credits = CodexDisplayPolicy.remainingCredits(
                 planLabel: planLabel, remainingPercent: window?.remainingPercent
             ) else { return language.text("— 额度点", "— credits") }
-            return localizedCredits(CodexThreadCreditEstimate(credits: credits).displayText, language: language)
+            return localizedCredits(String(format: "%.0f credits", credits), language: language)
         }
         return estimatedRemainingTokenText.map { String($0.dropFirst()) }
             ?? language.text("— 词元", "— Tokens")
@@ -4939,8 +4939,8 @@ private struct QuotaMetric: View {
 
     private var remainingCreditsHelp: String {
         language.text(
-            "按 Plus 2,750 额度点、Pro 5X 13,750 额度点、Pro 20X 55,000 额度点 乘以当前剩余额度比例计算",
-            "Calculated from the remaining quota percentage: Plus 2,750 credits, Pro 5X 13,750, Pro 20X 55,000"
+            "按 Plus 2,750 额度点、PRO5X 13,750 额度点、Pro 20X 55,000 额度点 乘以当前剩余额度比例计算",
+            "Calculated from the remaining quota percentage: Plus 2,750 credits, PRO5X 13,750, Pro 20X 55,000"
         )
     }
 
@@ -5414,6 +5414,19 @@ private func conversationUpdatedLabel(
         for: date,
         relativeTo: Date()
     )
+}
+
+private func chartTokenCount(_ value: Int64) -> String {
+    var count = Double(max(0, value))
+    guard count >= 1_000 else { return String(max(0, value)) }
+    let units = ["K", "M", "B", "T", "P", "E"]
+    count /= 1_000
+    var unitIndex = 0
+    while count >= 999.95, unitIndex < units.count - 1 {
+        count /= 1_000
+        unitIndex += 1
+    }
+    return String(format: "%.1f%@", count, units[unitIndex])
 }
 
 private func compactTokenCount(_ value: Int64) -> String {

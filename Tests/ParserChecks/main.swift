@@ -6,9 +6,21 @@ struct ParserChecks {
     private static var failures = 0
 
     static func main() {
+        for (account, quota, expected) in [
+            ("plus", "plus", 2_750.0),
+            ("pro", "prolite", 13_750.0),
+            ("prolite", "prolite", 13_750.0),
+            ("pro", "pro", 55_000.0)
+        ] {
+            let label = CodexDisplayPolicy.planBadgeLabel(
+                accountPlanType: account, rateLimitPlanType: quota
+            )
+            expect(CodexDisplayPolicy.remainingCredits(planLabel: label, remainingPercent: 100) == expected,
+                   "account and quota plan types resolve the correct credits allowance: \(account)/\(quota)")
+        }
         expect(CodexDisplayPolicy.remainingCredits(planLabel: "PLUS", remainingPercent: 100) == 2750,
                "Plus credits use the requested 2750 baseline")
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO 5X", remainingPercent: 50) == 6875,
+        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO5X", remainingPercent: 50) == 6875,
                "5X credits scale the baseline and remaining percentage")
         expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO 20X", remainingPercent: 99) == 54450,
                "20X credits scale the baseline and remaining percentage")
@@ -194,7 +206,7 @@ struct ParserChecks {
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: "pro",
                 rateLimitPlanType: "prolite"
-            ) == "PRO 5X",
+            ) == "PRO5X",
             "Pro Lite quota bucket displays 5X"
         )
         expect(
@@ -215,7 +227,7 @@ struct ParserChecks {
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: nil,
                 rateLimitPlanType: " PROLITE "
-            ) == "PRO 5X",
+            ) == "PRO5X",
             "quota bucket can supply plan while account data is unavailable"
         )
         expect(
@@ -1195,35 +1207,35 @@ struct ParserChecks {
 
     private static func checkReasoningEffortLabels() {
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("low") == "Light",
-            "low reasoning uses the Codex App Light label"
+            CodexDisplayPolicy.reasoningEffortLabel("low") == "low",
+            "low reasoning uses the lowercase low label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("minimal") == "Light",
-            "legacy minimal reasoning is folded into Light"
+            CodexDisplayPolicy.reasoningEffortLabel("minimal") == "low",
+            "legacy minimal reasoning is folded into low"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("medium") == "Medium",
+            CodexDisplayPolicy.reasoningEffortLabel("medium") == "medium",
             "medium reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("high") == "High",
+            CodexDisplayPolicy.reasoningEffortLabel("high") == "high",
             "high reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("extra high") == "xHigh",
+            CodexDisplayPolicy.reasoningEffortLabel("extra high") == "xhigh",
             "Extra High is the only abbreviated effort label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("xhigh") == "xHigh",
+            CodexDisplayPolicy.reasoningEffortLabel("xhigh") == "xhigh",
             "the runtime xhigh value uses the Codex App spelling"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("max") == "Max",
+            CodexDisplayPolicy.reasoningEffortLabel("max") == "max",
             "max reasoning keeps its full label"
         )
         expect(
-            CodexDisplayPolicy.reasoningEffortLabel("ultra") == "Ultra",
+            CodexDisplayPolicy.reasoningEffortLabel("ultra") == "ultra",
             "ultra reasoning keeps its full label"
         )
     }
