@@ -13,7 +13,7 @@ mkdir -p "$SCREENSHOT_OUTPUT_DIR"
 swiftc \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
-    "$ROOT_DIR/Sources/CodexIsland/CodexTokenEstimate.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexCreditRateCard.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandDisplaySelection.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \

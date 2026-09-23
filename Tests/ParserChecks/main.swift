@@ -71,8 +71,8 @@ struct ParserChecks {
         checkTokenConsumptionPolicy()
         checkQuotaConsumptionPace()
         checkQuotaRemainingLevels()
-        checkEstimatedRemainingTokens()
-        checkTokenEstimateRollouts()
+        checkCreditRateCard()
+        checkCreditUsageRollouts()
         checkFastModeUsageMultipliers()
         checkDisplayModelNames()
         checkReasoningEffortLabels()
@@ -854,7 +854,7 @@ struct ParserChecks {
         )
     }
 
-    private static func checkEstimatedRemainingTokens() {
+    private static func checkCreditRateCard() {
         // The official example has 20K uncached + 80K cached + 5K output.
         // Rollouts express the first two together as input_tokens = 100K.
         let credits = CodexCreditRateCard.credits(
@@ -877,123 +877,28 @@ struct ParserChecks {
                "mini uses its own documented rate")
         expect(CodexCreditRateCard.rate(for: "gpt-6-astra-unknown") == nil,
                "undocumented variants stay unpriced")
+        for (model, rate) in [
+            ("gpt-6-sol", CodexCreditRateCard.Rate(input: 50, cachedInput: 5, output: 250)),
+            ("gpt-6-luna", CodexCreditRateCard.Rate(input: 2.5, cachedInput: 0.25, output: 12.5))
+        ] {
+            expect(CodexCreditRateCard.rate(for: model) == rate,
+                   "\(model) uses its own official input, cache, and output rates")
+            expect(CodexCreditRateCard.rate(for: " openai/\(model.uppercased())-2026-09-23 ") == rate,
+                   "\(model) rates resolve provider-prefixed dated snapshots")
+            expect(CodexCreditRateCard.rate(for: "\(model)-unknown") == nil,
+                   "\(model) rates do not price undocumented variants")
+        }
         expect(CodexCreditRateCard.credits(
             model: "gpt-5.5", serviceTier: "default",
             inputTokens: 100, cachedInputTokens: 101, outputTokens: 0
         ) == nil, "invalid cache counts cannot become negative credit cost")
-
-        let now = Date(timeIntervalSince1970: 1_789_000_000)
-        let reset = now.addingTimeInterval(4 * 60 * 60)
-        func quota(_ used: Double, resetAt: Date = reset) -> RateLimitBucket {
-            RateLimitBucket(
-                id: "codex", name: nil, planType: "pro",
-                primary: RateLimitWindow(usedPercent: used, windowDurationMinutes: 300, resetsAt: resetAt),
-                secondary: nil, reachedType: nil
-            )
-        }
-        // A known 100M-token allowance: twelve 1M-token calls use 12%.
-        // Calendar-day activity has no part in deriving that capacity.
-        var samples: [CodexTokenCostSample] = []
-        for index in 0...12 {
-            let timestamp = now.addingTimeInterval(Double(index - 60))
-            let count: Int64 = index == 0 ? 0 : 1_000_000
-            let cost: Double? = index == 0 ? nil : 100.0
-            let observed = quota(Double(index), resetAt: reset)
-            let sample = CodexTokenCostSample(
-                timestamp: timestamp, tokens: count, credits: cost, quota: observed
-            )
-            samples.append(sample)
-        }
-        let estimate = CodexTokenEstimator.estimate(quota: quota(12), samples: samples, now: now)
-        expect(abs((estimate?.tokens ?? 0) - 88_000_000) <= 1,
-               "observed quota changes recover a known capacity independently of calendar-day volume")
-        expect(estimate?.sampleCount == 12 && estimate?.observedQuotaPercent == 10,
-               "estimate requires multiple meaningful quota intervals")
-        let pausedSamples = samples.map { sample -> CodexTokenCostSample in
-            var result = sample
-            result.timestamp = result.timestamp.addingTimeInterval(-1_000)
-            return result
-        }
-        expect(abs((CodexTokenEstimator.estimate(quota: quota(12), samples: pausedSamples, now: now)?.tokens ?? 0) - 88_000_000) <= 1,
-               "idle time does not reduce inferred allowance capacity")
-        let fastSamples = samples.map { sample -> CodexTokenCostSample in
-            var result = sample
-            result.credits = sample.credits.map { $0 * 2.5 }
-            return result
-        }
-        expect(abs((CodexTokenEstimator.estimate(quota: quota(12), samples: fastSamples, now: now)?.tokens ?? 0) - 88_000_000) <= 1,
-               "continuing the observed Fast mix does not manufacture extra remaining tokens")
-        expect(CodexTokenEstimator.estimate(quota: quota(12), samples: Array(samples.prefix(5)), now: now) == nil,
-               "small percentage changes do not define the whole allowance")
-        let unknown = samples.map { sample -> CodexTokenCostSample in
-            var result = sample
-            result.credits = nil
-            return result
-        }
-        expect(CodexTokenEstimator.estimate(quota: quota(12), samples: unknown, now: now) == nil,
-               "unknown model costs do not receive a guessed price")
-        let newReset = reset.addingTimeInterval(300)
-        let resetEstimate = CodexTokenEstimator.estimate(
-            quota: quota(0, resetAt: newReset), samples: samples, now: now
-        )
-        expect(abs((resetEstimate?.tokens ?? 0) - 100_000_000) <= 1
-               && resetEstimate?.usesHistoricalCalibration == true,
-               "a reset can reuse recent calibrated capacity without carrying over old consumption")
-        expect(CodexTokenEstimator.estimate(
-            quota: quota(0, resetAt: newReset), samples: samples, now: now,
-            historyNotBefore: now
-        ) == nil, "an account change prevents borrowing the previous account's history")
-        var changedCapacity = samples
-        for index in 0...12 {
-            changedCapacity.append(CodexTokenCostSample(
-                timestamp: now.addingTimeInterval(Double(index - 30)),
-                tokens: index == 0 ? 0 : 1_000_000,
-                credits: index == 0 ? nil : 100.0,
-                quota: quota(Double(index * 2), resetAt: newReset)
-            ))
-        }
-        let recalibrated = CodexTokenEstimator.estimate(
-            quota: quota(24, resetAt: newReset), samples: changedCapacity, now: now
-        )
-        expect(abs((recalibrated?.tokens ?? 0) - 38_000_000) <= 1
-               && recalibrated?.usesHistoricalCalibration == false,
-               "enough current-cycle data replaces older capacity without cross-reset percentage deltas")
-        var otherPlan = quota(12)
-        otherPlan.planType = "plus"
-        expect(CodexTokenEstimator.estimate(quota: otherPlan, samples: samples, now: now) == nil,
-               "plan changes invalidate the observed capacity")
-        expect(CodexTokenEstimator.estimate(quota: quota(12, resetAt: now), samples: samples, now: now) == nil,
-               "expired windows cannot display an estimate")
-        var blocked = quota(12)
-        blocked.secondary = RateLimitWindow(usedPercent: 100, windowDurationMinutes: 10_080, resetsAt: reset)
-        expect(CodexTokenEstimator.estimate(quota: blocked, samples: samples, now: now)?.tokens == 0,
-               "an exhausted secondary quota overrides a healthy primary quota")
-        blocked.secondary?.usedPercent = 50
-        expect(CodexTokenEstimator.estimate(quota: blocked, samples: samples, now: now) == nil,
-               "an uncalibrated secondary constraint is not ignored")
-        let constrainedSamples = samples.map { sample -> CodexTokenCostSample in
-            var result = sample
-            result.quota.secondary = RateLimitWindow(
-                usedPercent: sample.quota.primary!.usedPercent * 2,
-                windowDurationMinutes: 10_080, resetsAt: reset
-            )
-            return result
-        }
-        blocked.secondary?.usedPercent = 24
-        expect(abs((CodexTokenEstimator.estimate(quota: blocked, samples: constrainedSamples, now: now)?.tokens ?? 0) - 38_000_000) <= 1,
-               "the smaller calibrated allowance determines remaining tokens")
-        expect(CodexTokenEstimator.estimate(quota: quota(100), samples: [], now: now)?.tokens == 0,
-               "exhausted included quota reports zero even without history")
-        expect(CodexTokenEstimator.estimate(quota: nil, samples: samples, now: now) == nil,
-               "missing quota metadata stays unavailable")
     }
 
-    private static func checkTokenEstimateRollouts() {
+    private static func checkCreditUsageRollouts() {
         let now = Date()
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let start = now.addingTimeInterval(-3_600)
-        let reset = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + 14_400)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let directory = FileManager.default.temporaryDirectory
@@ -1008,14 +913,7 @@ struct ParserChecks {
             ]
             return String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
         }
-        func quota(_ used: Double) -> RateLimitBucket {
-            RateLimitBucket(
-                id: "codex", name: nil, planType: "pro",
-                primary: RateLimitWindow(usedPercent: used, windowDurationMinutes: 300, resetsAt: reset),
-                secondary: nil, reachedType: nil
-            )
-        }
-        func token(total: Int64, last: Int64, used: Double, at date: Date) throws -> String {
+        func token(total: Int64, last: Int64, at date: Date) throws -> String {
             let lastUsage: JSONObject = [
                 "total_tokens": last,
                 "input_tokens": last * 9 / 10,
@@ -1028,13 +926,6 @@ struct ParserChecks {
                 "info": [
                     "total_token_usage": ["total_tokens": total],
                     "last_token_usage": lastUsage
-                ],
-                "rate_limits": [
-                    "limit_id": "codex", "plan_type": "pro",
-                    "primary": [
-                        "used_percent": used, "window_minutes": 300,
-                        "resets_at": reset.timeIntervalSince1970
-                    ]
                 ]
             ], date)
         }
@@ -1048,7 +939,7 @@ struct ParserChecks {
                 let slot = index % 2
                 let delta: Int64 = index == 0 ? 0 : 1_000_000
                 totals[slot] += delta
-                let event = try token(total: totals[slot], last: delta, used: Double(index),
+                let event = try token(total: totals[slot], last: delta,
                                       at: start.addingTimeInterval(Double(index * 60)))
                 lines[slot].append(contentsOf: [event, event])
             }
@@ -1058,69 +949,60 @@ struct ParserChecks {
             }
             CodexDailyTokenUsageReader.resetCacheForTesting()
             let usage = try CodexDailyTokenUsageReader.readRecentHours(
-                from: urls.map(\.path), now: now, calendar: calendar, quota: quota(12)
+                from: urls.map(\.path), now: now, calendar: calendar
             )
             expect(abs(usage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 816) < 0.000001,
                    "chart credits sum concurrent calls without charging duplicate notifications")
             expect(usage.chartCreditTotals.values.allSatisfy { $0.unpricedCalls == 0 },
                    "complete token breakdowns produce fully priced chart buckets")
-            expect(usage.remainingTokenEstimate?.sampleCount == 12,
-                   "priced usage excludes repeated token_count notifications")
-            expect(abs((usage.remainingTokenEstimate?.tokens ?? 0) - 88_000_000) <= 1,
-                   "concurrent rollouts combine their costs before calibrating account quota")
 
             let customURL = directory.appendingPathComponent("custom-provider.jsonl")
             let customMeta = try line("session_meta", ["source": "cli", "model_provider": "custom"])
-            let customCall = try token(total: 100_000_000, last: 100_000_000, used: 12,
+            let customCall = try token(total: 100_000_000, last: 100_000_000,
                                        at: start.addingTimeInterval(800))
             try Data(([customMeta, settings, customCall].joined(separator: "\n") + "\n").utf8).write(to: customURL)
             let customUsage = try CodexDailyTokenUsageReader.readRecentHours(
                 from: urls.map(\.path) + [customURL.path], now: now.addingTimeInterval(31),
-                calendar: calendar, quota: quota(12)
+                calendar: calendar
             )
-            expect(abs((customUsage.remainingTokenEstimate?.tokens ?? 0) - 88_000_000) <= 1,
-                   "third-party providers do not inflate ChatGPT allowance estimates")
+            expect(abs(customUsage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 816) < 0.000001,
+                   "third-party providers do not add invented ChatGPT credit costs")
+            expect(customUsage.chartCreditTotals.values.reduce(0) { $0 + $1.unpricedCalls } == 1,
+                   "third-party usage is marked unpriced without losing the known credit subtotal")
 
             lines[0].append(try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": "priority"], start.addingTimeInterval(900)))
             totals[0] += 1_000_000
-            lines[0].append(try token(total: totals[0], last: 1_000_000, used: 14.5, at: start.addingTimeInterval(901)))
+            lines[0].append(try token(total: totals[0], last: 1_000_000, at: start.addingTimeInterval(901)))
             lines[0].append(try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": NSNull()], start.addingTimeInterval(960)))
             totals[0] += 1_000_000
-            lines[0].append(try token(total: totals[0], last: 1_000_000, used: 15.5, at: start.addingTimeInterval(961)))
+            lines[0].append(try token(total: totals[0], last: 1_000_000, at: start.addingTimeInterval(961)))
             let handle = try FileHandle(forWritingTo: urls[0])
             try handle.seekToEnd()
             try handle.write(contentsOf: Data((lines[0].suffix(4).joined(separator: "\n") + "\n").utf8))
             try handle.close()
             let resumed = try CodexDailyTokenUsageReader.readRecentHours(
-                from: urls.map(\.path), now: now.addingTimeInterval(32), calendar: calendar,
-                quota: quota(15.5)
+                from: urls.map(\.path), now: now.addingTimeInterval(32), calendar: calendar
             )
-            expect(resumed.billedDailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 15_500_000,
-                   "explicit null service tier clears a previously recorded Fast setting")
+            expect(resumed.dailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 14_000_000,
+                   "switching Fast off keeps actual tokens unweighted")
             expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 1054) < 0.000001,
                    "incremental chart credits retain Standard calls and apply Fast only to new calls")
             expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits } - 952) < 0.000001,
                    "credit chart Standard prices every call without its Fast multiplier")
             expect(abs(resumed.chartCreditTotals.values.reduce(0) { $0 + $1.wastedCredits } - 102) < 0.000001,
                    "credit chart Wasted includes only the extra Fast cost")
-            expect(resumed.remainingTokenEstimate?.sampleCount == 14,
-                   "incremental scans retain history and price each new call once")
-            expect((resumed.remainingTokenEstimate?.tokens ?? Int64.max) < 84_500_000,
-                   "recent Fast usage increases future cost instead of assuming every session becomes Standard")
             let apiUsage = try CodexDailyTokenUsageReader.readRecentHours(
                 from: urls.map(\.path), now: now.addingTimeInterval(33), calendar: calendar,
-                usesChatGPTCredits: false, quota: quota(15.5)
+                usesChatGPTCredits: false
             )
             expect(apiUsage.chartCreditTotals.values.contains { $0.unpricedCalls > 0 },
                    "non-ChatGPT chart usage cannot silently display zero credits")
-            expect(apiUsage.remainingTokenEstimate == nil,
-                   "API-key usage cannot calibrate ChatGPT included allowance")
             let historyURL = directory.appendingPathComponent("chart-history.jsonl")
             let old = start.addingTimeInterval(-10 * 86_400)
             let oldSettings = try line("turn_context", ["model": "gpt-5.6-sol", "service_tier": "default"], old)
-            let first = try token(total: 1_000_000, last: 1_000_000, used: 1, at: old)
+            let first = try token(total: 1_000_000, last: 1_000_000, at: old)
             let newSettings = try line("turn_context", ["model": "gpt-6-astra", "service_tier": "priority"])
-            let second = try token(total: 2_000_000, last: 1_000_000, used: 2, at: start)
+            let second = try token(total: 2_000_000, last: 1_000_000, at: start)
             let oldMeta = try line("session_meta", ["source": "cli", "model_provider": "openai"], old)
             try Data(([oldMeta, oldSettings, first, newSettings, second].joined(separator: "\n") + "\n").utf8).write(to: historyURL)
             let history = try CodexDailyTokenUsageReader.readRecentHours(
@@ -1129,7 +1011,7 @@ struct ParserChecks {
             let oldHour = calendar.dateInterval(of: .hour, for: old)!.start
             let newHour = calendar.dateInterval(of: .hour, for: start)!.start
             expect(history.chartCreditTotals[oldHour]?.credits == 68,
-                   "30-day chart retains priced calls older than estimator history")
+                   "30-day chart retains historical priced calls")
             expect(history.chartCreditTotals[newHour]?.standardCredits == 170
                    && history.chartCreditTotals[newHour]?.wastedCredits == 255,
                    "Astra Fast splits into Standard 170 plus extra 255 credits")
@@ -1138,8 +1020,35 @@ struct ParserChecks {
             expect(history.chartCreditTotals[newHour]?.displayText(matching: 1_000_001) == "425.0 credits",
                    "historical credits use local logs even when account history includes another computer")
 
+            let gpt6URL = directory.appendingPathComponent("gpt6-sol-luna.jsonl")
+            var gpt6Lines = [meta]
+            let calls = [
+                ("gpt-6-sol", "default"), ("gpt-6-sol", "priority"),
+                ("openai/gpt-6-luna-2026-09-23", "fast"), ("gpt-6-luna", "standard")
+            ]
+            for (index, call) in calls.enumerated() {
+                let date = start.addingTimeInterval(Double(index * 60))
+                gpt6Lines.append(try line("turn_context", ["model": call.0, "service_tier": call.1], date))
+                gpt6Lines.append(try token(total: Int64(index + 1) * 1_000_000, last: 1_000_000,
+                                          at: date.addingTimeInterval(1)))
+            }
+            try Data((gpt6Lines.joined(separator: "\n") + "\n").utf8).write(to: gpt6URL)
+            let gpt6Usage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [gpt6URL.path], now: now, calendar: calendar
+            )
+            // Each call has 100K uncached input, 800K cache, and 100K output:
+            // Sol costs 34 / 85 credits; Luna costs 1.7 / 4.25 (Standard / Fast).
+            expect(abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 124.95) < 0.000001
+                   && abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits } - 71.4) < 0.000001,
+                   "Sol and Luna chart credits price each call using its own model and Fast setting")
+            expect(gpt6Usage.chartCreditTotals.values.allSatisfy { $0.unpricedCalls == 0 },
+                   "Sol and Luna calls no longer leave gaps in chart credit coverage")
+            expect(gpt6Usage.hourlyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 4_000_000
+                   && gpt6Usage.dailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 4_000_000,
+                   "Sol and Luna Fast usage leaves actual hourly and daily tokens unchanged")
+
         } catch {
-            expect(false, "priced rollout estimates: \(error.localizedDescription)")
+            expect(false, "priced rollout credits: \(error.localizedDescription)")
         }
     }
 
@@ -1168,6 +1077,14 @@ struct ParserChecks {
             CodexFastModeUsagePolicy.multiplier(for: " openai/GPT-6-ASTRA ") == 2.5,
             "GPT-6 Astra matching handles provider prefixes, whitespace, and case"
         )
+        for model in ["gpt-6-sol", "gpt-6-luna"] {
+            expect(CodexFastModeUsagePolicy.multiplier(for: model) == 2.5,
+                   "\(model) Fast usage counts as 2.5x Standard-mode quota")
+            expect(CodexFastModeUsagePolicy.multiplier(for: " openai/\(model.uppercased())-2026-09-23 ") == 2.5,
+                   "\(model) Fast matching handles provider prefixes, case, whitespace, and dated snapshots")
+            expect(CodexFastModeUsagePolicy.multiplier(for: "\(model)2") == nil,
+                   "\(model) Fast support does not match unrelated names")
+        }
         expect(
             CodexFastModeUsagePolicy.multiplier(for: "gpt-6-astra2") == nil,
             "Astra support does not match unrelated model names"
@@ -1991,6 +1908,16 @@ struct ParserChecks {
             expectCredits(standard, 7.25, "separate sessions retain independent Fast settings")
             expect(standard?.assumesStandardTier == true, "missing tier is disclosed as a Standard assumption")
 
+            let gpt6URL = directory.appendingPathComponent("gpt6-sol-luna.jsonl")
+            try write(settings("gpt-6-sol", tier: "priority") + official, to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 6.625, "Sol Fast uses its own credit rates")
+            let doubled = count(input: 200_000, cache: 160_000, output: 10_000)
+            try append(settings("gpt-6-luna", tier: "fast") + token(doubled, last: officialCounts), to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 6.95625, "switching to Luna Fast preserves earlier Sol costs")
+            let tripled = count(input: 300_000, cache: 240_000, output: 15_000)
+            try append(settings("gpt-6-luna", tier: NSNull()) + token(tripled, last: officialCounts), to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 7.08875, "disabling Luna Fast prices only the new call at Standard")
+
             let jumpURL = directory.appendingPathComponent("jump.jsonl")
             try write(settings("gpt-5.5") + token(afterAstra, last: astraCall), to: jumpURL)
             let jumpEstimate = try estimate(jumpURL)
@@ -2204,17 +2131,17 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                weightedSnapshot.billedTodayTokens == 260,
-                "Fast messages without model metadata remain unweighted"
+                weightedSnapshot.todayTokens == 260,
+                "Fast messages without model metadata keep their actual token count"
             )
             expect(
                 weightedSnapshot.hourlyBuckets.reduce(Int64(0)) {
                     $0 + $1.tokens
                 } == 260
-                    && weightedSnapshot.billedHourlyBuckets.reduce(Int64(0)) {
+                    && weightedSnapshot.dailyBuckets.reduce(Int64(0)) {
                         $0 + $1.tokens
                     } == 260,
-                "hourly charts do not guess an unsupported Fast multiplier"
+                "hourly and daily charts retain actual tokens without model metadata"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2264,21 +2191,12 @@ struct ParserChecks {
             )
             expect(
                 modelWeightedSnapshot.todayTokens == 600,
-                "model-specific Fast weighting does not change actual Tokens"
-            )
-            expect(
-                modelWeightedSnapshot.billedTodayTokens == 1_150,
-                "supported Fast models use official multipliers; Standard and unknown models stay 1x"
+                "switching models and Fast settings does not change actual tokens"
             )
             expect(
                 hourlyTokens(modelWeightedSnapshot.hourlyBuckets, containing: afterMidnight) == 600
                     && dailyTokens(modelWeightedSnapshot.dailyBuckets, containing: afterMidnight) == 600,
-                "Astra Fast weighting leaves actual hourly and daily chart Tokens unchanged"
-            )
-            expect(
-                hourlyTokens(modelWeightedSnapshot.billedHourlyBuckets, containing: afterMidnight) == 1_150
-                    && dailyTokens(modelWeightedSnapshot.billedDailyBuckets, containing: afterMidnight) == 1_150,
-                "hourly and daily equivalent usage include Astra's 2.5x Fast multiplier"
+                "Fast usage leaves actual hourly and daily chart tokens unchanged"
             )
 
             let modelWeightedHandle = try FileHandle(forWritingTo: modelWeighted)
@@ -2297,8 +2215,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                appendedModelWeightedSnapshot.billedTodayTokens == 1_400,
-                "incremental scans retain Astra and apply 2.5x when the tier changes to priority"
+                appendedModelWeightedSnapshot.todayTokens == 700,
+                "incremental scans count actual tokens when switching to priority"
             )
 
             let nonChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
@@ -2308,9 +2226,8 @@ struct ParserChecks {
                 usesChatGPTCredits: false
             )
             expect(
-                nonChatGPTSnapshot.todayTokens == 700
-                    && nonChatGPTSnapshot.billedTodayTokens == 700,
-                "non-ChatGPT authentication does not apply ChatGPT Fast multipliers"
+                nonChatGPTSnapshot.todayTokens == 700,
+                "API-key usage retains the same actual token count"
             )
             let reenabledChatGPTSnapshot = try CodexDailyTokenUsageReader.readRecentHours(
                 from: [modelWeighted.path],
@@ -2319,8 +2236,8 @@ struct ParserChecks {
                 usesChatGPTCredits: true
             )
             expect(
-                reenabledChatGPTSnapshot.billedTodayTokens == 1_400,
-                "changing the ChatGPT-credit mode safely invalidates cached weighting"
+                reenabledChatGPTSnapshot.todayTokens == 700,
+                "switching back to ChatGPT preserves the actual token count"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2348,9 +2265,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                providerWeightedSnapshot.todayTokens == 200
-                    && providerWeightedSnapshot.billedTodayTokens == 350,
-                "only the OpenAI provider receives ChatGPT Fast weighting"
+                providerWeightedSnapshot.todayTokens == 200,
+                "provider switches do not multiply actual token counts"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2372,8 +2288,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                customSessionProviderSnapshot.billedTodayTokens == 100,
-                "session metadata prevents weighting custom model providers"
+                customSessionProviderSnapshot.todayTokens == 100,
+                "custom providers retain actual token counts"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2414,8 +2330,8 @@ struct ParserChecks {
                 calendar: calendar
             )
             expect(
-                baselineWeightedSnapshot.billedTodayTokens == 200,
-                "pre-range model and Fast tier remain active for the first counted call"
+                baselineWeightedSnapshot.todayTokens == 100,
+                "a pre-range Fast setting does not multiply the first counted call"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2576,13 +2492,6 @@ struct ParserChecks {
                 "the same cache rolls across an hour boundary without losing usage"
             )
             expect(
-                hourlyTokens(
-                    afterHourRollover.billedHourlyBuckets,
-                    containing: rolloverEvent
-                ) == 80,
-                "billed hourly usage rolls across an hour boundary with actual usage"
-            )
-            expect(
                 beforeHourDiagnostics.baselineScanCount == 1
                     && afterHourDiagnostics == beforeHourDiagnostics,
                 "hour rollover reuses the reducer without another baseline scan"
@@ -2673,10 +2582,10 @@ struct ParserChecks {
                 afterMidnightRollover.hourlyBuckets.reduce(Int64(0)) {
                     $0 + $1.tokens
                 } == 105
-                    && afterMidnightRollover.billedDailyBuckets.reduce(Int64(0)) {
+                    && afterMidnightRollover.dailyBuckets.reduce(Int64(0)) {
                         $0 + $1.tokens
                     } == 105,
-                "hourly and billed histories remain intact across midnight"
+                "hourly and daily histories remain intact across midnight"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -2930,8 +2839,8 @@ struct ParserChecks {
                 usesChatGPTCredits: true
             )
             expect(
-                forkUsage.billedTodayTokens == 248,
-                "forked usage inherits the pre-boundary Fast baseline"
+                forkUsage.todayTokens == 99,
+                "forked Fast usage counts only actual tokens after the activity boundary"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -3007,10 +2916,10 @@ struct ParserChecks {
                 subagentHourlyValue.hourlyBuckets.reduce(Int64(0)) {
                     $0 + $1.tokens
                 } == 70
-                    && subagentHourlyValue.billedHourlyBuckets.reduce(Int64(0)) {
+                    && subagentHourlyValue.dailyBuckets.reduce(Int64(0)) {
                         $0 + $1.tokens
-                    } == 175,
-                "subagent usage inherits the pre-boundary Fast baseline without counting replayed Tokens"
+                    } == 70,
+                "subagent Fast usage keeps actual tokens without counting replayed history"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -3060,8 +2969,8 @@ struct ParserChecks {
                 usesChatGPTCredits: true
             )
             expect(
-                readyUsage.billedTodayTokens == 200,
-                "appended subagent activity restores the inherited Fast baseline"
+                readyUsage.todayTokens == 80,
+                "appended subagent activity counts actual tokens after the boundary"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()
@@ -3115,6 +3024,12 @@ struct ParserChecks {
             try delimiterHandle.seekToEnd()
             try delimiterHandle.write(contentsOf: Data("\n".utf8))
             try delimiterHandle.close()
+            // Appending resets mtime to wall-clock time. Keep this fixture on
+            // the test clock so it stays eligible for the next metadata poll.
+            try FileManager.default.setAttributes(
+                [.modificationDate: now],
+                ofItemAtPath: completeWithoutNewline.path
+            )
             let committedValue = try CodexDailyTokenUsageReader.readToday(
                 from: [completeWithoutNewline.path],
                 now: now,

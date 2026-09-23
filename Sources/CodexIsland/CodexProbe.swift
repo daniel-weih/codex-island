@@ -38,20 +38,10 @@ enum CodexProbe {
                 from: localPaths,
                 usesChatGPTCredits: account.authType?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased() == "chatgpt",
-                quota: limits.bucket
+                    .lowercased() == "chatgpt"
                ) {
                 let populatedDays = localUsage.dailyBuckets.filter { $0.tokens > 0 }
                 print("local_daily_buckets=\(populatedDays.count)/\(localUsage.dailyBuckets.count)")
-                if let estimate = localUsage.remainingTokenEstimate {
-                    print("estimated_remaining_tokens=\(estimate.tokens)")
-                    print("estimate_priced_calls=\(estimate.sampleCount)")
-                    print("estimate_observed_quota_percent=\(estimate.observedQuotaPercent)")
-                    print("estimate_priced_token_coverage=\(estimate.pricedTokenCoverage)")
-                    print("estimate_calibration=\(estimate.usesHistoricalCalibration ? "recent_cycles" : "current_cycle")")
-                } else {
-                    print("estimated_remaining_tokens=insufficient_calibration")
-                }
             }
 
             let authResult = try? await client.request(

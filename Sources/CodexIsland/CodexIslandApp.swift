@@ -1,12 +1,17 @@
-import SwiftUI
+import AppKit
 
 @main
-struct CodexIslandApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+enum CodexIslandApp {
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
 
-    var body: some Scene {
-        Settings {
-            EmptyView()
+        // All UI is hosted by IslandPanelController, including settings.
+        // A placeholder SwiftUI Settings scene creates a blank window on macOS 27.
+        withExtendedLifetime(delegate) {
+            application.run()
         }
     }
 }

@@ -3,15 +3,18 @@ import Foundation
 typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
+    // https://learn.chatgpt.com/docs/agent-configuration/speed (verified 2026-09-23)
     private static let modelFamilyMultipliers: [(family: String, multiplier: Double)] = [
         ("gpt-6-astra", 2.5),
+        ("gpt-6-sol", 2.5),
+        ("gpt-6-luna", 2.5),
         ("gpt-5.6", 2.5),
         ("gpt-5.5", 2.5),
         ("gpt-5.4", 2.0)
     ]
 
     /// Returns the official ChatGPT Fast-to-Standard credit multiplier.
-    /// Models outside the documented Fast support list are left unweighted
+    /// Models outside the documented Fast support list are left unpriced
     /// instead of guessing a multiplier.
     static func multiplier(for model: String?) -> Double? {
         guard let model else { return nil }
@@ -30,7 +33,6 @@ enum CodexFastModeUsagePolicy {
 enum CodexDisplayPolicy {
     static let recentThreadLimit = 3
     static let recentThreadFetchLimit = 12
-    static let usageHabitDayCount = 7
     static let resetCreditExpiryWarningInterval: TimeInterval = 7 * 24 * 60 * 60
 
     /// Keeps active work visible when the compact dashboard has fewer rows than
@@ -528,15 +530,7 @@ struct CodexSnapshot: Equatable {
     var hourlyThreadTokens: [HourlyUsageBucket] = []
     /// Local message-level Token increments for the last 30 calendar days.
     var dailyThreadTokens: [DailyUsageBucket] = []
-    /// The same local activity expressed as Standard-mode quota, using each
-    /// Fast call's model-specific quota multiplier.
-    var billedTodayThreadTokens: Int64? = nil
-    var billedHourlyThreadTokens: [HourlyUsageBucket] = []
-    var billedDailyThreadTokens: [DailyUsageBucket] = []
     var chartCreditTotals: [Date: CodexChartCreditTotal] = [:]
-    /// Calibrated from quota changes and priced local calls, independently of
-    /// the display chart's account/local daily-history merge.
-    var remainingTokenEstimate: CodexRemainingTokenEstimate? = nil
     /// Compact-island activity state. This intentionally differs from the
     /// expanded header's app-server connection indicator.
     var hasRunningSession: Bool = false

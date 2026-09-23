@@ -162,17 +162,6 @@ enum CodexPreviewRenderer {
             todayThreadTokens: 84_350_271,
             hourlyThreadTokens: previewHourlyUsageBuckets(),
             dailyThreadTokens: previewDailyUsageBuckets(),
-            billedTodayThreadTokens: 146_220_407,
-            billedHourlyThreadTokens: previewBilledHourlyUsageBuckets(),
-            billedDailyThreadTokens: previewBilledDailyUsageBuckets(),
-            remainingTokenEstimate: CodexRemainingTokenEstimate(
-                tokens: 36_500_000,
-                windowDurationMinutes: 10_080,
-                resetsAt: Date().addingTimeInterval(3 * 24 * 60 * 60),
-                sampleCount: 240,
-                observedQuotaPercent: 30,
-                pricedTokenCoverage: 1
-            ),
             hasRunningSession: true,
             activeModel: ModelSummary(
                 id: "gpt-5.6-sol",
@@ -208,9 +197,6 @@ enum CodexPreviewRenderer {
         let expandedURL = directory.appendingPathComponent("codex-island-expanded.png")
         let expandedHourlyURL = directory.appendingPathComponent(
             "codex-island-expanded-hourly.png"
-        )
-        let expandedSmallFastDeltaURL = directory.appendingPathComponent(
-            "codex-island-expanded-small-fast-delta.png"
         )
         let expandedTsinghuaURL = directory.appendingPathComponent(
             "codex-island-expanded-tsinghua.png"
@@ -282,7 +268,6 @@ enum CodexPreviewRenderer {
             compactConsuming1xURL,
             expandedURL,
             expandedHourlyURL,
-            expandedSmallFastDeltaURL,
             expandedTsinghuaURL,
             settingsURL,
             expandedEnglishURL,
@@ -412,23 +397,6 @@ enum CodexPreviewRenderer {
             expanded: true,
             size: expandedSize,
             to: expandedURL
-        )
-        var smallFastDeltaSnapshot = snapshot
-        smallFastDeltaSnapshot.billedDailyThreadTokens = snapshot.dailyThreadTokens.map {
-            DailyUsageBucket(
-                startDate: $0.startDate,
-                tokens: Int64((Double($0.tokens) * 1.02).rounded())
-            )
-        }
-        smallFastDeltaSnapshot.billedTodayThreadTokens = Int64(
-            (Double(snapshot.todayThreadTokens ?? 0) * 1.02).rounded()
-        )
-        try render(
-            snapshot: smallFastDeltaSnapshot,
-            displayGeometry: geometry,
-            expanded: true,
-            size: expandedSize,
-            to: expandedSmallFastDeltaURL
         )
         try render(
             snapshot: hourlyCreditSnapshot,
@@ -600,7 +568,7 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredChartLegend: .modeEquivalent,
+            initialHoveredChartLegend: .actual,
             previewLanguagePreference: .chinese,
             size: expandedSize,
             to: chartLegendHoverURL
@@ -609,7 +577,7 @@ enum CodexPreviewRenderer {
             snapshot: englishSnapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredChartLegend: .modeEquivalent,
+            initialHoveredChartLegend: .actual,
             previewLanguagePreference: .english,
             size: expandedSize,
             to: chartLegendHoverEnglishURL
@@ -709,17 +677,10 @@ enum CodexPreviewRenderer {
             snapshot: partialHistorySnapshot
         )
 
-        var noEstimateSnapshot = snapshot
-        noEstimateSnapshot.remainingTokenEstimate = nil
-        try renderMatrixPreview(
-            named: "matrix-expanded-token-estimate-unavailable.png",
-            snapshot: noEstimateSnapshot
-        )
         var exhaustedQuotaSnapshot = snapshot
         exhaustedQuotaSnapshot.rateLimit?.primary?.usedPercent = 100
-        exhaustedQuotaSnapshot.remainingTokenEstimate?.tokens = 0
         try renderMatrixPreview(
-            named: "matrix-expanded-token-estimate-zero.png",
+            named: "matrix-expanded-quota-exhausted.png",
             snapshot: exhaustedQuotaSnapshot,
             previewLanguagePreference: .english
         )
@@ -951,30 +912,6 @@ enum CodexPreviewRenderer {
         }
     }
 
-    private static func previewBilledDailyUsageBuckets(
-        now: Date = Date()
-    ) -> [DailyUsageBucket] {
-        previewDailyUsageBuckets(now: now).enumerated().map { index, bucket in
-            let multiplier = index.isMultiple(of: 3) ? 2.5 : 1.45
-            return DailyUsageBucket(
-                startDate: bucket.startDate,
-                tokens: Int64((Double(bucket.tokens) * multiplier).rounded())
-            )
-        }
-    }
-
-    private static func previewBilledHourlyUsageBuckets(
-        now: Date = Date()
-    ) -> [HourlyUsageBucket] {
-        previewHourlyUsageBuckets(now: now).enumerated().map { index, bucket in
-            let multiplier = index.isMultiple(of: 4) ? 2.5 : 1.35
-            return HourlyUsageBucket(
-                hourStart: bucket.hourStart,
-                tokens: Int64((Double(bucket.tokens) * multiplier).rounded())
-            )
-        }
-    }
-
     private static func render(
         snapshot: CodexSnapshot,
         displayGeometry: IslandDisplayGeometry,
@@ -982,7 +919,7 @@ enum CodexPreviewRenderer {
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
-        initialHoveredChartLegend: TokenChartLegendKind? = nil,
+        initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
@@ -1020,7 +957,8 @@ enum CodexPreviewRenderer {
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
             initialHoveredContextThreadID: initialHoveredContextThreadID,
             initialResetSummaryHover: initialResetSummaryHover,
-            initialHoveredChartLegend: initialHoveredChartLegend,
+            initialHoveredChartLegend: UserDefaults.standard.bool(forKey: "codexIsland.remainingShowsCredits")
+                ? initialHoveredChartLegend : nil,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,
             initialHoveredHeaderAction: initialHoveredHeaderAction,

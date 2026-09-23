@@ -5,16 +5,10 @@ struct LocalTokenUsageSnapshot: Equatable, Sendable {
     var todayTokens: Int64
     var hourlyBuckets: [HourlyUsageBucket]
     var dailyBuckets: [DailyUsageBucket]
-    /// Standard-mode-equivalent tokens for ChatGPT-credit usage, with OpenAI
-    /// Fast calls weighted by the model that was active for each call.
-    var billedTodayTokens: Int64
-    var billedHourlyBuckets: [HourlyUsageBucket]
-    var billedDailyBuckets: [DailyUsageBucket]
     /// Rollouts whose metadata was already observed as recently modified while
     /// reducing usage. Reusing this list avoids a second stat pass when
     /// resolving live execution state.
     var recentlyModifiedRolloutPaths: [String]
-    var remainingTokenEstimate: CodexRemainingTokenEstimate? = nil
     var chartCreditTotals: [Date: CodexChartCreditTotal] = [:]
 }
 
@@ -27,11 +21,8 @@ struct DailyTokenUsagePerformanceDiagnostics: Equatable, Sendable {
     var aggregateRebuildCount: Int
 }
 
-/// Computes actual and Standard-mode-equivalent Token increments for local
-/// CLI/App calls.
-/// Each new `last_token_usage` is counted once at message granularity; only the
-/// equivalent series weights eligible Fast calls by their model-specific quota
-/// cost.
+/// Computes actual Token increments and per-call credit costs for local CLI/App calls.
+/// Each new `last_token_usage` is counted once at message granularity.
 /// Fork and subagent boundaries exclude timestamp-rewritten parent history.
 enum CodexDailyTokenUsageReader {
     static let recentHourCount = 48
@@ -57,9 +48,7 @@ enum CodexDailyTokenUsageReader {
         now: Date = Date(),
         calendar: Calendar = .autoupdatingCurrent,
         usesChatGPTCredits: Bool = true,
-        priorityRolloutPaths: [String] = [],
-        quota: RateLimitBucket? = nil,
-        estimateHistoryStart: Date? = nil
+        priorityRolloutPaths: [String] = []
     ) throws -> LocalTokenUsageSnapshot {
         try cache.readRecentHours(
             from: rolloutPaths,
@@ -67,9 +56,7 @@ enum CodexDailyTokenUsageReader {
             calendar: calendar,
             hourCount: recentHourCount,
             usesChatGPTCredits: usesChatGPTCredits,
-            priorityRolloutPaths: priorityRolloutPaths,
-            quota: quota,
-            estimateHistoryStart: estimateHistoryStart
+            priorityRolloutPaths: priorityRolloutPaths
         )
     }
 
@@ -106,7 +93,6 @@ private struct DailyTokenEvent {
     var inputTokens: Int64?
     var cachedInputTokens: Int64?
     var outputTokens: Int64?
-    var quota: RateLimitBucket?
 }
 
 private struct DailyRuntimeSettingsEvent {
@@ -138,16 +124,12 @@ private struct DailyTokenFileEntry: Equatable {
     var todayTotal: Int64
     var hourlyTotals: [Date: Int64]
     var dailyTotals: [Date: Int64]
-    var billedTodayTotal: Int64
-    var billedHourlyTotals: [Date: Int64]
-    var billedDailyTotals: [Date: Int64]
     var trailingLineStartOffset: UInt64?
     var countingStart: Date
     var isExcluded: Bool
     var isWaitingForActivityBoundary: Bool
     var activityBoundaryKind: ActivityBoundaryKind?
     var activityBoundarySearchOffset: UInt64?
-    var estimateSamples: [CodexTokenCostSample] = []
     var chartCreditTotals: [Date: CodexChartCreditTotal] = [:]
 }
 
@@ -211,19 +193,12 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private var aggregateTodayTotal: Int64 = 0
     private var aggregateHourlyTotals: [Date: Int64] = [:]
     private var aggregateDailyTotals: [Date: Int64] = [:]
-    private var aggregateBilledTodayTotal: Int64 = 0
-    private var aggregateBilledHourlyTotals: [Date: Int64] = [:]
-    private var aggregateBilledDailyTotals: [Date: Int64] = [:]
     private var aggregateChartCredits: [Date: CodexChartCreditTotal] = [:]
     private var aggregatesNeedRebuild = false
     private var baselineScanCount = 0
     private var metadataCheckCount = 0
     private var aggregateRebuildCount = 0
     private var discoveryEntries: [String: LocalUsageDiscoveryEntry] = [:]
-    private var cachedEstimate: CodexRemainingTokenEstimate?
-    private var estimatedQuota: RateLimitBucket?
-    private var estimatedHistoryStart: Date?
-    private var nextEstimateRefreshAt: Date?
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -251,10 +226,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         entries.removeAll()
         nextHistoricalMetadataRefreshAt = nil
         resetAggregates()
-        cachedEstimate = nil
-        estimatedQuota = nil
-        estimatedHistoryStart = nil
-        nextEstimateRefreshAt = nil
         baselineScanCount = 0
         metadataCheckCount = 0
         aggregateRebuildCount = 0
@@ -288,9 +259,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         calendar: Calendar,
         hourCount: Int,
         usesChatGPTCredits: Bool,
-        priorityRolloutPaths: [String],
-        quota: RateLimitBucket?,
-        estimateHistoryStart: Date?
+        priorityRolloutPaths: [String]
     ) throws -> LocalTokenUsageSnapshot {
         guard hourCount > 0,
               let currentHourStart = calendar.dateInterval(
@@ -358,7 +327,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             cachedRolloutPaths.removeAll()
             nextHistoricalMetadataRefreshAt = nil
             resetAggregates()
-            nextEstimateRefreshAt = nil
         } else if windowChanged {
             rollCachedEntries(
                 dayStart: resolvedDayStart,
@@ -415,9 +383,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 todayTokens: 0,
                 hourlyBuckets: emptyHourlyBuckets,
                 dailyBuckets: emptyDailyBuckets,
-                billedTodayTokens: 0,
-                billedHourlyBuckets: emptyHourlyBuckets,
-                billedDailyBuckets: emptyDailyBuckets,
                 recentlyModifiedRolloutPaths: []
             )
         }
@@ -529,66 +494,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     .flatMap { aggregateDailyTotals[$0] } ?? 0
             )
         }
-        let billedBuckets = Self.emptyHourlyBuckets(
-            startingAt: resolvedHourlyRangeStart,
-            count: hourCount,
-            calendar: calendar
-        ).map { bucket in
-            HourlyUsageBucket(
-                hourStart: bucket.hourStart,
-                tokens: aggregateBilledHourlyTotals[bucket.hourStart] ?? 0
-            )
-        }
-        let billedDailyBuckets = Self.emptyDailyBuckets(
-            startingAt: resolvedDailyRangeStart,
-            count: CodexDailyTokenUsageReader.recentDayCount,
-            calendar: calendar
-        ).map { bucket in
-            DailyUsageBucket(
-                startDate: bucket.startDate,
-                tokens: Self.dayDate(bucket.startDate, calendar: calendar)
-                    .flatMap { aggregateBilledDailyTotals[$0] } ?? 0
-            )
-        }
         return LocalTokenUsageSnapshot(
             todayTokens: aggregateTodayTotal,
             hourlyBuckets: buckets,
             dailyBuckets: dailyBuckets,
-            billedTodayTokens: aggregateBilledTodayTotal,
-            billedHourlyBuckets: billedBuckets,
-            billedDailyBuckets: billedDailyBuckets,
             recentlyModifiedRolloutPaths: recentlyModifiedRolloutPaths,
-            remainingTokenEstimate: remainingTokenEstimate(
-                quota: usesChatGPTCredits ? quota : nil,
-                now: now,
-                historyStart: estimateHistoryStart
-            ),
             chartCreditTotals: aggregateChartCredits
         )
-    }
-
-    private func remainingTokenEstimate(
-        quota: RateLimitBucket?,
-        now: Date,
-        historyStart: Date?
-    ) -> CodexRemainingTokenEstimate? {
-        // The one-second activity poll must not sort a week of samples on
-        // every tick. Quota changes invalidate immediately; habits refresh
-        // every 30 seconds using the already-parsed numeric records.
-        if estimatedQuota != quota || estimatedHistoryStart != historyStart
-            || (nextEstimateRefreshAt.map({ now >= $0 }) ?? true) {
-            cachedEstimate = CodexTokenEstimator.estimate(
-                quota: quota,
-                samples: quota == nil ? [] : entries.values.flatMap(\.estimateSamples),
-                now: now,
-                historyNotBefore: historyStart
-            )
-            estimatedQuota = quota
-            estimatedHistoryStart = historyStart
-            nextEstimateRefreshAt = now.addingTimeInterval(30)
-        }
-        guard let cachedEstimate, cachedEstimate.resetsAt > now else { return nil }
-        return cachedEstimate
     }
 
     private func replaceCachedEntry(
@@ -612,9 +524,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         aggregateTodayTotal = 0
         aggregateHourlyTotals.removeAll(keepingCapacity: true)
         aggregateDailyTotals.removeAll(keepingCapacity: true)
-        aggregateBilledTodayTotal = 0
-        aggregateBilledHourlyTotals.removeAll(keepingCapacity: true)
-        aggregateBilledDailyTotals.removeAll(keepingCapacity: true)
         aggregatesNeedRebuild = false
     }
 
@@ -636,18 +545,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         )
         Self.add(entry.hourlyTotals, to: &aggregateHourlyTotals)
         Self.add(entry.dailyTotals, to: &aggregateDailyTotals)
-        aggregateBilledTodayTotal = Self.clampedAdd(
-            aggregateBilledTodayTotal,
-            entry.billedTodayTotal
-        )
-        Self.add(
-            entry.billedHourlyTotals,
-            to: &aggregateBilledHourlyTotals
-        )
-        Self.add(
-            entry.billedDailyTotals,
-            to: &aggregateBilledDailyTotals
-        )
     }
 
     private func removeFromAggregates(_ entry: DailyTokenFileEntry) -> Bool {
@@ -662,18 +559,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
               Self.canSubtract(
                 entry.dailyTotals,
                 from: aggregateDailyTotals
-              ),
-              Self.canSubtract(
-                entry.billedTodayTotal,
-                from: aggregateBilledTodayTotal
-              ),
-              Self.canSubtract(
-                entry.billedHourlyTotals,
-                from: aggregateBilledHourlyTotals
-              ),
-              Self.canSubtract(
-                entry.billedDailyTotals,
-                from: aggregateBilledDailyTotals
               ) else {
             return false
         }
@@ -684,15 +569,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         aggregateTodayTotal -= entry.todayTotal
         Self.subtract(entry.hourlyTotals, from: &aggregateHourlyTotals)
         Self.subtract(entry.dailyTotals, from: &aggregateDailyTotals)
-        aggregateBilledTodayTotal -= entry.billedTodayTotal
-        Self.subtract(
-            entry.billedHourlyTotals,
-            from: &aggregateBilledHourlyTotals
-        )
-        Self.subtract(
-            entry.billedDailyTotals,
-            from: &aggregateBilledDailyTotals
-        )
         return true
     }
 
@@ -748,22 +624,12 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             entry.hourlyTotals = entry.hourlyTotals.filter {
                 $0.key >= hourlyRangeStart
             }
-            entry.billedHourlyTotals = entry.billedHourlyTotals.filter {
-                $0.key >= hourlyRangeStart
-            }
             entry.chartCreditTotals = entry.chartCreditTotals.filter { $0.key >= dailyRangeStart }
             entry.dailyTotals = entry.dailyTotals.filter {
                 $0.key >= dailyRangeStart
             }
-            entry.billedDailyTotals = entry.billedDailyTotals.filter {
-                $0.key >= dailyRangeStart
-            }
             entry.todayTotal = entry.dailyTotals[dayStart] ?? 0
-            entry.billedTodayTotal = entry.billedDailyTotals[dayStart] ?? 0
             entry.countingStart = max(entry.countingStart, dailyRangeStart)
-            entry.estimateSamples.removeAll {
-                $0.timestamp < dayStart.addingTimeInterval(-CodexTokenEstimator.historyInterval)
-            }
             entries[path] = entry
         }
     }
@@ -911,10 +777,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             cached.todayTotal = 0
             cached.hourlyTotals = [:]
             cached.dailyTotals = [:]
-            cached.billedTodayTotal = 0
-            cached.billedHourlyTotals = [:]
-            cached.billedDailyTotals = [:]
-            cached.estimateSamples = []
             cached.chartCreditTotals = [:]
             let resumedCountingStart = cached.countingStart
             guard modifiedAt >= resumedCountingStart else { return cached }
@@ -935,10 +797,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     todayTotal: &cached.todayTotal,
                     hourlyTotals: &cached.hourlyTotals,
                     dailyTotals: &cached.dailyTotals,
-                    billedTodayTotal: &cached.billedTodayTotal,
-                    billedHourlyTotals: &cached.billedHourlyTotals,
-                    billedDailyTotals: &cached.billedDailyTotals,
-                    estimateSamples: &cached.estimateSamples,
                     chartCreditTotals: &cached.chartCreditTotals,
                     countingStart: resumedCountingStart,
                     dayStart: dayStart,
@@ -971,10 +829,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 var todayTotal = cached.todayTotal
                 var hourlyTotals = cached.hourlyTotals
                 var dailyTotals = cached.dailyTotals
-                var billedTodayTotal = cached.billedTodayTotal
-                var billedHourlyTotals = cached.billedHourlyTotals
-                var billedDailyTotals = cached.billedDailyTotals
-                var estimateSamples = cached.estimateSamples
                 var chartCreditTotals = cached.chartCreditTotals
                 try Self.scanForward(
                     url: url,
@@ -990,10 +844,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                         todayTotal: &todayTotal,
                         hourlyTotals: &hourlyTotals,
                         dailyTotals: &dailyTotals,
-                        billedTodayTotal: &billedTodayTotal,
-                        billedHourlyTotals: &billedHourlyTotals,
-                        billedDailyTotals: &billedDailyTotals,
-                        estimateSamples: &estimateSamples,
                         chartCreditTotals: &chartCreditTotals,
                         countingStart: cached.countingStart,
                         dayStart: dayStart,
@@ -1011,10 +861,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 cached.todayTotal = todayTotal
                 cached.hourlyTotals = hourlyTotals
                 cached.dailyTotals = dailyTotals
-                cached.billedTodayTotal = billedTodayTotal
-                cached.billedHourlyTotals = billedHourlyTotals
-                cached.billedDailyTotals = billedDailyTotals
-                cached.estimateSamples = estimateSamples
                 cached.chartCreditTotals = chartCreditTotals
                 cached.trailingLineStartOffset = try Self.findTrailingLineStartOffset(
                     url: url,
@@ -1062,9 +908,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             todayTotal: 0,
             hourlyTotals: [:],
             dailyTotals: [:],
-            billedTodayTotal: 0,
-            billedHourlyTotals: [:],
-            billedDailyTotals: [:],
             trailingLineStartOffset: try Self.findTrailingLineStartOffset(
                 url: url,
                 fileSize: fileSize
@@ -1094,10 +937,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 todayTotal: &entry.todayTotal,
                 hourlyTotals: &entry.hourlyTotals,
                 dailyTotals: &entry.dailyTotals,
-                billedTodayTotal: &entry.billedTodayTotal,
-                billedHourlyTotals: &entry.billedHourlyTotals,
-                billedDailyTotals: &entry.billedDailyTotals,
-                estimateSamples: &entry.estimateSamples,
                 chartCreditTotals: &entry.chartCreditTotals,
                 countingStart: countingStart,
                 dayStart: dayStart,
@@ -1120,10 +959,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         todayTotal: inout Int64,
         hourlyTotals: inout [Date: Int64],
         dailyTotals: inout [Date: Int64],
-        billedTodayTotal: inout Int64,
-        billedHourlyTotals: inout [Date: Int64],
-        billedDailyTotals: inout [Date: Int64],
-        estimateSamples: inout [CodexTokenCostSample],
         chartCreditTotals: inout [Date: CodexChartCreditTotal],
         countingStart: Date,
         dayStart: Date,
@@ -1168,14 +1003,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             rawDelta = max(0, event.lastTokens ?? event.totalTokens)
         }
         previousTotal = event.totalTokens
-        let billedDelta = budgetWeightedTokens(
-            rawDelta,
-            model: model,
-            modelProvider: modelProvider,
-            serviceTier: serviceTier,
-            usesChatGPTCredits: usesChatGPTCredits
-        )
-
         guard event.timestamp >= countingStart else { return }
         let credits: Double?
         if usesChatGPTCredits,
@@ -1201,22 +1028,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                                       unpricedCalls: credits == nil ? 1 : 0)
             )
         }
-        if usesChatGPTCredits,
-           normalizedModelProvider(modelProvider) == "openai",
-           event.timestamp >= dayStart.addingTimeInterval(-CodexTokenEstimator.historyInterval),
-           let quota = event.quota ?? estimateSamples.last?.quota {
-            if rawDelta > 0 || estimateSamples.last?.quota != quota {
-                estimateSamples.append(CodexTokenCostSample(
-                    timestamp: event.timestamp,
-                    tokens: rawDelta,
-                    credits: credits,
-                    quota: quota
-                ))
-            }
-        }
         if event.timestamp >= dayStart, event.timestamp < nextDayStart {
             todayTotal = clampedAdd(todayTotal, rawDelta)
-            billedTodayTotal = clampedAdd(billedTodayTotal, billedDelta)
         }
         // Keep already-parsed future buckets. A file can receive the first
         // record of the next hour after `now` was captured but before this
@@ -1231,10 +1044,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 hourlyTotals[hourStart, default: 0],
                 rawDelta
             )
-            billedHourlyTotals[hourStart] = clampedAdd(
-                billedHourlyTotals[hourStart, default: 0],
-                billedDelta
-            )
         }
         if event.timestamp >= dailyRangeStart {
             let dateStart = calendar.startOfDay(for: event.timestamp)
@@ -1242,34 +1051,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 dailyTotals[dateStart, default: 0],
                 rawDelta
             )
-            billedDailyTotals[dateStart] = clampedAdd(
-                billedDailyTotals[dateStart, default: 0],
-                billedDelta
-            )
         }
-    }
-
-    private static func budgetWeightedTokens(
-        _ tokens: Int64,
-        model: String?,
-        modelProvider: String?,
-        serviceTier: String?,
-        usesChatGPTCredits: Bool
-    ) -> Int64 {
-        guard tokens > 0 else { return 0 }
-        guard usesChatGPTCredits else { return tokens }
-        guard normalizedModelProvider(modelProvider) == "openai" else {
-            return tokens
-        }
-        guard CodexDisplayPolicy.isFastServiceTier(serviceTier) else {
-            return tokens
-        }
-        guard let multiplier = CodexFastModeUsagePolicy.multiplier(for: model) else {
-            return tokens
-        }
-        let weighted = Double(tokens) * multiplier
-        guard weighted.isFinite else { return Int64.max }
-        return Int64(min(weighted.rounded(), Double(Int64.max)))
     }
 
     private static func normalizedModelProvider(_ value: String?) -> String? {
@@ -1566,8 +1348,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             lastTokens: lastTokens,
             inputTokens: info.dictionary("last_token_usage")?.int64("input_tokens"),
             cachedInputTokens: info.dictionary("last_token_usage")?.int64("cached_input_tokens"),
-            outputTokens: info.dictionary("last_token_usage")?.int64("output_tokens"),
-            quota: CodexStatusPayloadParser.parseRecordedRateLimit(payload.dictionary("rate_limits"))
+            outputTokens: info.dictionary("last_token_usage")?.int64("output_tokens")
         )
     }
 

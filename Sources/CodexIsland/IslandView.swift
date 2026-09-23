@@ -82,43 +82,21 @@ enum IslandHeaderAction: Sendable {
     case quit
 }
 
-enum TokenChartLegendKind: String, Equatable, Sendable {
+enum CreditChartLegendKind: String, Equatable, Sendable {
+    case standard
     case actual
-    case modeEquivalent
 
-    func title(for language: IslandInterfaceLanguage, credits: Bool = false) -> String {
-        if credits {
-            return self == .actual ? language.text("标准", "Standard")
-                : language.text("⚡实际", "⚡ Actual")
-        }
-        switch self {
-        case .actual:
-            return language.text("实际", "Actual")
-        case .modeEquivalent:
-            return language.text("⚡等效", "⚡ Equivalent")
-        }
+    func title(for language: IslandInterfaceLanguage) -> String {
+        self == .standard ? language.text("标准", "Standard")
+            : language.text("⚡实际", "⚡ Actual")
     }
 
-    func explanation(for language: IslandInterfaceLanguage, credits: Bool = false) -> String {
-        if credits {
-            return self == .actual
-                ? language.text("标准是在不开启 Fast 模式时，相同本机用量按各次调用模型费率计算的额度点。实际 − 标准代表开启 Fast 浪费的额度。",
-                                "Standard is the credit cost of the same local usage with Fast off. Actual minus Standard is the extra credit cost of enabling Fast.")
-                : language.text("实际是按本机各次调用的模型和 Fast 模式计算的总消耗，包含标准用量。实际 − 标准代表开启 Fast 浪费的额度。两项同时显示时，实心为标准，空心轮廓为实际总量。",
-                                "Actual is the total local credit cost, including Standard and Fast surcharges. Actual minus Standard is the extra cost of enabling Fast. The solid bar shows Standard; the outline shows the Actual total.")
-        }
-        switch self {
-        case .actual:
-            return language.text(
-                "模型的实际词元用量，开启或关闭 Fast 模式都相同。",
-                "The number of tokens processed by the model. Fast mode does not change this value."
-            )
-        case .modeEquivalent:
-            return language.text(
-                "开启 Fast 不会改变词元用量，但是额度消耗会变快。该数据通过对应模型开启 Fast 时的消耗倍率，估算关闭 Fast 模式时理论上等效可以用多少词元（简单说，等效 − 实际就是开启 Fast 大概浪费了多少本来可以用的词元）。",
-                "Fast mode does not change token usage, but it makes usage limits drain faster. Using each model's Fast consumption multiplier, this value estimates how many tokens could theoretically be used with Fast mode off—in simple terms, roughly how many otherwise usable tokens were given up by enabling Fast."
-            )
-        }
+    func explanation(for language: IslandInterfaceLanguage) -> String {
+        self == .standard
+            ? language.text("标准是在不开启 Fast 模式时，相同本机用量按各次调用模型费率计算的额度点。实际 − 标准代表开启 Fast 浪费的额度。",
+                            "Standard is the credit cost of the same local usage with Fast off. Actual minus Standard is the extra credit cost of enabling Fast.")
+            : language.text("实际是按本机各次调用的模型和 Fast 模式计算的总消耗，包含标准用量。实际 − 标准代表开启 Fast 浪费的额度。两项同时显示时，实心为标准，空心轮廓为实际总量。",
+                            "Actual is the total local credit cost, including Standard and Fast surcharges. Actual minus Standard is the extra cost of enabling Fast. The solid bar shows Standard; the outline shows the Actual total.")
     }
 }
 
@@ -183,7 +161,7 @@ private enum IslandPopoverContent: Equatable {
     case token(threadID: String, rank: Int, usage: ThreadTokenUsage)
     case context(threadID: String, rank: Int, usage: ThreadTokenUsage?)
     case reset(ResetCreditSummary)
-    case chartLegend(TokenChartLegendKind)
+    case chartLegend(CreditChartLegendKind)
 
     var identity: String {
         switch self {
@@ -208,7 +186,7 @@ private enum IslandPopoverContent: Equatable {
                 language: language
             )
         case .chartLegend(let kind):
-            return TokenChartLegendPopover.size(for: kind, language: language)
+            return CreditChartLegendPopover.size(for: kind, language: language)
         }
     }
 }
@@ -543,7 +521,7 @@ struct IslandView: View {
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
-        initialHoveredChartLegend: TokenChartLegendKind? = nil,
+        initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
@@ -872,7 +850,7 @@ struct IslandView: View {
         case .reset(let summary):
             ResetExpirationPopover(summary: summary)
         case .chartLegend(let kind):
-            TokenChartLegendPopover(kind: kind)
+            CreditChartLegendPopover(kind: kind)
         }
     }
 
@@ -1445,12 +1423,8 @@ struct IslandView: View {
             todayTokens: viewModel.snapshot.todayThreadTokens,
             hourlyUsage: viewModel.snapshot.hourlyThreadTokens,
             dailyUsage: viewModel.snapshot.dailyThreadTokens,
-            billedTodayTokens: viewModel.snapshot.billedTodayThreadTokens,
-            billedHourlyUsage: viewModel.snapshot.billedHourlyThreadTokens,
-            billedDailyUsage: viewModel.snapshot.billedDailyThreadTokens,
             chartCreditTotals: viewModel.snapshot.chartCreditTotals,
             window: viewModel.snapshot.rateLimit?.primary,
-            remainingTokenEstimate: viewModel.snapshot.remainingTokenEstimate,
             resetSummary: viewModel.snapshot.resetCredits,
             onResetHoverChange: { hovering, pointer in
                 updateResetHover(hovering: hovering, pointer: pointer)
@@ -1685,7 +1659,7 @@ struct IslandView: View {
     }
 
     private func updateChartLegendHover(
-        kind: TokenChartLegendKind,
+        kind: CreditChartLegendKind,
         hovering: Bool,
         pointer: CGPoint?
     ) {
@@ -3553,30 +3527,26 @@ private struct ContextWindowPopover: View {
     }
 }
 
-private struct TokenChartLegendPopover: View {
-    @AppStorage("codexIsland.remainingShowsCredits")
-    private var showsRemainingCredits = false
+private struct CreditChartLegendPopover: View {
     private static let horizontalPadding: CGFloat = 11
     private static let verticalPadding: CGFloat = 9
 
-    let kind: TokenChartLegendKind
+    let kind: CreditChartLegendKind
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
-    @Environment(\.islandColorTheme) private var theme
-
     static func size(
-        for kind: TokenChartLegendKind,
+        for kind: CreditChartLegendKind,
         language: IslandInterfaceLanguage
     ) -> CGSize {
         switch (kind, language) {
+        case (.standard, .chinese):
+            return CGSize(width: 320, height: 104)
+        case (.standard, .english):
+            return CGSize(width: 344, height: 112)
         case (.actual, .chinese):
-            return CGSize(width: 272, height: 68)
-        case (.actual, .english):
-            return CGSize(width: 314, height: 72)
-        case (.modeEquivalent, .chinese):
             return CGSize(width: 344, height: 120)
-        case (.modeEquivalent, .english):
+        case (.actual, .english):
             return CGSize(width: 358, height: 146)
         }
     }
@@ -3586,21 +3556,21 @@ private struct TokenChartLegendPopover: View {
 
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                TokenChartLegendMarker(
+                CreditChartLegendMarker(
                     kind: kind,
-                    color: markerColor,
+                    color: creditsGold,
                     isVisible: true,
                     width: 5,
                     height: 10
                 )
 
-                Text(kind.title(for: language, credits: showsRemainingCredits))
+                Text(kind.title(for: language))
                     .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
-                    .foregroundStyle(titleColor)
+                    .foregroundStyle(creditsGold)
                     .lineLimit(1)
             }
 
-            Text(kind.explanation(for: language, credits: showsRemainingCredits))
+            Text(kind.explanation(for: language))
                 .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.62))
                 .lineSpacing(2)
@@ -3627,29 +3597,10 @@ private struct TokenChartLegendPopover: View {
         .shadow(color: .black.opacity(0.52), radius: 8, y: 3)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "\(kind.title(for: language, credits: showsRemainingCredits))，\(kind.explanation(for: language, credits: showsRemainingCredits))"
+            "\(kind.title(for: language))，\(kind.explanation(for: language))"
         )
     }
 
-    private var markerColor: Color {
-        if showsRemainingCredits { return creditsGold }
-        switch kind {
-        case .actual:
-            return theme.accent.opacity(0.78)
-        case .modeEquivalent:
-            return theme.accent.opacity(0.90)
-        }
-    }
-
-    private var titleColor: Color {
-        if showsRemainingCredits { return creditsGold }
-        switch kind {
-        case .actual:
-            return .white.opacity(0.82)
-        case .modeEquivalent:
-            return theme.accent.opacity(0.92)
-        }
-    }
 }
 
 private struct ThreadSettingBadge: View {
@@ -3678,24 +3629,22 @@ private struct AccountActivityCard: View {
     let todayTokens: Int64?
     let hourlyUsage: [HourlyUsageBucket]
     let dailyUsage: [DailyUsageBucket]
-    let billedTodayTokens: Int64?
-    let billedHourlyUsage: [HourlyUsageBucket]
-    let billedDailyUsage: [DailyUsageBucket]
     let chartCreditTotals: [Date: CodexChartCreditTotal]
     let window: RateLimitWindow?
-    let remainingTokenEstimate: CodexRemainingTokenEstimate?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
-    let onLegendHoverChange: (TokenChartLegendKind, Bool, CGPoint?) -> Void
+    let onLegendHoverChange: (CreditChartLegendKind, Bool, CGPoint?) -> Void
     let planLabel: String?
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
+    // Keep the existing preference keys for credit-series visibility.
+    // Token charts always show actual usage, independently of these settings.
     @AppStorage("codexIsland.tokenChartShowsActual")
-    private var showsActual = true
+    private var showsStandardCredits = true
     @AppStorage("codexIsland.tokenChartShowsBilled")
-    private var showsBilled = true
+    private var showsActualCredits = true
     @State private var hoveredBucket: DailyUsageBucket?
     @State private var hoveredHourlyBucket: HourlyUsageBucket?
     @Binding private var chartRange: TokenChartRange
@@ -3707,16 +3656,12 @@ private struct AccountActivityCard: View {
         todayTokens: Int64?,
         hourlyUsage: [HourlyUsageBucket],
         dailyUsage: [DailyUsageBucket],
-        billedTodayTokens: Int64?,
-        billedHourlyUsage: [HourlyUsageBucket],
-        billedDailyUsage: [DailyUsageBucket],
         chartCreditTotals: [Date: CodexChartCreditTotal],
         window: RateLimitWindow?,
-        remainingTokenEstimate: CodexRemainingTokenEstimate?,
         resetSummary: ResetCreditSummary?,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
         onLegendHoverChange: @escaping (
-            TokenChartLegendKind,
+            CreditChartLegendKind,
             Bool,
             CGPoint?
         ) -> Void,
@@ -3728,12 +3673,8 @@ private struct AccountActivityCard: View {
         self.todayTokens = todayTokens
         self.hourlyUsage = hourlyUsage
         self.dailyUsage = dailyUsage
-        self.billedTodayTokens = billedTodayTokens
-        self.billedHourlyUsage = billedHourlyUsage
-        self.billedDailyUsage = billedDailyUsage
         self.chartCreditTotals = chartCreditTotals
         self.window = window
-        self.remainingTokenEstimate = remainingTokenEstimate
         self.resetSummary = resetSummary
         self.onResetHoverChange = onResetHoverChange
         self.onLegendHoverChange = onLegendHoverChange
@@ -3747,14 +3688,6 @@ private struct AccountActivityCard: View {
             from: usage.dailyUsageBuckets,
             todayTokens: todayTokens,
             localDailyBuckets: dailyUsage
-        )
-    }
-
-    private var billedRecentUsage: [DailyUsageBucket] {
-        CodexUsageTimeline.lastDaysIncludingToday(
-            from: usage.dailyUsageBuckets,
-            todayTokens: billedTodayTokens,
-            localDailyBuckets: billedDailyUsage
         )
     }
 
@@ -3801,7 +3734,6 @@ private struct AccountActivityCard: View {
                 QuotaMetric(
                     window: window,
                     planLabel: planLabel,
-                    tokenEstimate: remainingTokenEstimate,
                     resetSummary: resetSummary,
                     onResetHoverChange: onResetHoverChange
                 )
@@ -3847,7 +3779,7 @@ private struct AccountActivityCard: View {
                 if showsRemainingCredits {
                     CreditActivityChart(
                         buckets: creditChartBuckets,
-                        showsStandard: showsActual, showsActualCredits: showsBilled,
+                        showsStandard: showsStandardCredits, showsActualCredits: showsActualCredits,
                         hoveredID: chartRange == .days30 ? hoveredBucket?.id : hoveredHourlyBucket.map { String($0.hourStart.timeIntervalSince1970) },
                         onHover: { id, hovering in
                             if chartRange == .days30 {
@@ -3860,20 +3792,14 @@ private struct AccountActivityCard: View {
                     .frame(height: 82)
                 } else if chartRange == .days30 {
                     DailyTokenActivityChart(
-                        actualBuckets: recentUsage,
-                        billedBuckets: billedRecentUsage,
-                        showsActual: showsActual,
-                        showsBilled: showsBilled,
+                        buckets: recentUsage,
                         hoveredBucket: hoveredBucket,
                         onHover: updateHoveredBucket
                     )
                     .frame(height: 82)
                 } else {
                     HourlyTokenActivityChart(
-                        actualBuckets: hourlyUsage,
-                        billedBuckets: billedHourlyUsage,
-                        showsActual: showsActual,
-                        showsBilled: showsBilled,
+                        buckets: hourlyUsage,
                         hoveredBucket: hoveredHourlyBucket,
                         onHover: updateHoveredHourlyBucket
                     )
@@ -3891,9 +3817,13 @@ private struct AccountActivityCard: View {
         .onChange(of: identity.avatarData) { data in
             avatarImage = data.flatMap(NSImage.init(data:))
         }
+        .onChange(of: showsRemainingCredits) { _ in
+            onLegendHoverChange(.standard, false, nil)
+            onLegendHoverChange(.actual, false, nil)
+        }
         .onAppear {
-            if !showsActual && !showsBilled {
-                showsBilled = true
+            if !showsStandardCredits && !showsActualCredits {
+                showsActualCredits = true
             }
         }
     }
@@ -3973,25 +3903,17 @@ private struct AccountActivityCard: View {
     private var activityDetail: AttributedString? {
         if chartRange == .hours48,
            let bucket = hoveredHourlyBucket ?? hourlyUsage.last {
-            let billed = billedHourlyUsage.first {
-                $0.hourStart == bucket.hourStart
-            }?.tokens ?? bucket.tokens
             return chartDetail(
                 dateText: hourlyUsageDateText(bucket.hourStart, language: language),
                 actualTokens: bucket.tokens,
-                billedTokens: billed,
                 creditTotal: chartCreditTotals[bucket.hourStart] ?? CodexChartCreditTotal()
             )
         }
         if chartRange == .days30,
            let bucket = hoveredBucket ?? recentUsage.last {
-            let billed = billedRecentUsage.first {
-                $0.startDate == bucket.startDate
-            }?.tokens ?? bucket.tokens
             return chartDetail(
                 dateText: shortUsageDate(bucket.startDate, language: language),
                 actualTokens: bucket.tokens,
-                billedTokens: billed,
                 creditTotal: dailyCreditTotal(for: bucket.startDate)
             )
         }
@@ -4017,12 +3939,11 @@ private struct AccountActivityCard: View {
     private func chartDetail(
         dateText: String,
         actualTokens: Int64,
-        billedTokens: Int64,
         creditTotal: CodexChartCreditTotal
     ) -> AttributedString {
         if showsRemainingCredits {
             let values = creditTotal.chartDisplayText(
-                matching: actualTokens, showsStandard: showsActual, showsActual: showsBilled
+                matching: actualTokens, showsStandard: showsStandardCredits, showsActual: showsActualCredits
             )
             var detail = AttributedString("\(dateText) · ")
             detail.foregroundColor = theme.accent.opacity(0.72)
@@ -4034,14 +3955,7 @@ private struct AccountActivityCard: View {
             detail.append(tokens)
             return detail
         }
-        let tokenText: String
-        if showsActual && showsBilled {
-            tokenText = "\(dateText) · \(chartTokenCount(actualTokens)) / \(chartTokenCount(billedTokens))"
-        } else {
-            let tokens = showsActual ? actualTokens : billedTokens
-            tokenText = "\(dateText) · \(chartTokenCount(tokens))"
-        }
-        var detail = AttributedString(tokenText)
+        var detail = AttributedString("\(dateText) · \(chartTokenCount(actualTokens))")
         let creditAmount = creditTotal.displayText(matching: actualTokens)
             .replacingOccurrences(of: " credits", with: "")
         var credits = AttributedString(" (\(creditAmount))")
@@ -4050,42 +3964,59 @@ private struct AccountActivityCard: View {
         return detail
     }
 
+    @ViewBuilder
     private var chartLegend: some View {
+        if showsRemainingCredits {
+            creditChartLegend
+        } else {
+            HStack(spacing: 3) {
+                TokenChartSlimBar(height: 8, width: 5, color: theme.accent.opacity(0.78), isEmpty: false)
+                Text(language.text("实际", "Actual"))
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+            .fixedSize(horizontal: true, vertical: true)
+            .help(language.text("模型的实际词元用量，Fast 模式不会改变此数值。",
+                                "The number of tokens processed by the model. Fast mode does not change this value."))
+        }
+    }
+
+    private var creditChartLegend: some View {
         HStack(spacing: 7) {
             chartLegendItem(
-                kind: .actual,
-                color: (showsRemainingCredits ? creditsGold : theme.accent).opacity(0.78),
-                isVisible: showsActual
+                kind: .standard,
+                color: creditsGold.opacity(0.78),
+                isVisible: showsStandardCredits
             ) {
-                toggleActualSeries()
+                toggleStandardCreditSeries()
             }
             chartLegendItem(
-                kind: .modeEquivalent,
-                color: (showsRemainingCredits ? creditsGold : theme.accent).opacity(0.86),
-                isVisible: showsBilled
+                kind: .actual,
+                color: creditsGold.opacity(0.86),
+                isVisible: showsActualCredits
             ) {
-                toggleBilledSeries()
+                toggleActualCreditSeries()
             }
         }
         .fixedSize(horizontal: true, vertical: true)
     }
 
     private func chartLegendItem(
-        kind: TokenChartLegendKind,
+        kind: CreditChartLegendKind,
         color: Color,
         isVisible: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
-                TokenChartLegendMarker(
+                CreditChartLegendMarker(
                     kind: kind,
                     color: color,
                     isVisible: isVisible,
                     width: 5,
                     height: 8
                 )
-                Text(kind.title(for: language, credits: showsRemainingCredits))
+                Text(kind.title(for: language))
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(isVisible ? 0.38 : 0.18))
             }
@@ -4106,25 +4037,25 @@ private struct AccountActivityCard: View {
                 onLegendHoverChange(kind, false, nil)
             }
         }
-        .accessibilityLabel(kind.title(for: language, credits: showsRemainingCredits))
-        .accessibilityHint(kind.explanation(for: language, credits: showsRemainingCredits))
+        .accessibilityLabel(kind.title(for: language))
+        .accessibilityHint(kind.explanation(for: language))
     }
 
-    private func toggleActualSeries() {
-        if showsActual && !showsBilled {
-            showsActual = false
-            showsBilled = true
+    private func toggleStandardCreditSeries() {
+        if showsStandardCredits && !showsActualCredits {
+            showsStandardCredits = false
+            showsActualCredits = true
         } else {
-            showsActual.toggle()
+            showsStandardCredits.toggle()
         }
     }
 
-    private func toggleBilledSeries() {
-        if showsBilled && !showsActual {
-            showsBilled = false
-            showsActual = true
+    private func toggleActualCreditSeries() {
+        if showsActualCredits && !showsStandardCredits {
+            showsActualCredits = false
+            showsStandardCredits = true
         } else {
-            showsBilled.toggle()
+            showsActualCredits.toggle()
         }
     }
 
@@ -4342,8 +4273,8 @@ private func tokenChartSketchSeed(_ hourStart: Date) -> UInt64 {
     return UInt64(bitPattern: hour) &* 0x9E37_79B9_7F4A_7C15
 }
 
-private struct TokenChartLegendMarker: View {
-    let kind: TokenChartLegendKind
+private struct CreditChartLegendMarker: View {
+    let kind: CreditChartLegendKind
     let color: Color
     let isVisible: Bool
     let width: CGFloat
@@ -4359,7 +4290,7 @@ private struct TokenChartLegendMarker: View {
                     width: width,
                     color: color,
                     isEmpty: false,
-                    style: kind == .actual
+                    style: kind == .standard
                         ? .solid
                         : .marker(seed: tokenChartSketchSeed("legend"))
                 )
@@ -4475,33 +4406,33 @@ private struct TokenChartSlimBar: View {
     }
 }
 
-private struct TokenChartCombinedBar: View {
+private struct CreditChartCombinedBar: View {
+    let standardHeight: CGFloat
     let actualHeight: CGFloat
-    let billedHeight: CGFloat
     let width: CGFloat
     let color: Color
+    let showsStandard: Bool
     let showsActual: Bool
-    let showsBilled: Bool
     let isHovered: Bool
     let seed: UInt64
+
+    private var visibleStandardHeight: CGFloat {
+        showsStandard ? max(0, standardHeight) : 0
+    }
 
     private var visibleActualHeight: CGFloat {
         showsActual ? max(0, actualHeight) : 0
     }
 
-    private var visibleBilledHeight: CGFloat {
-        showsBilled ? max(0, billedHeight) : 0
-    }
-
     private var combinedHeight: CGFloat {
-        max(visibleActualHeight, visibleBilledHeight)
+        max(visibleStandardHeight, visibleActualHeight)
     }
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            if visibleBilledHeight > 0 {
+            if visibleActualHeight > 0 {
                 TokenChartSlimBar(
-                    height: visibleBilledHeight,
+                    height: visibleActualHeight,
                     width: width,
                     color: color,
                     isEmpty: false,
@@ -4510,7 +4441,7 @@ private struct TokenChartCombinedBar: View {
                 .opacity(isHovered ? 1 : 0.92)
             }
 
-            if visibleActualHeight > 0 {
+            if visibleStandardHeight > 0 {
                 Rectangle()
                     .fill(
                         LinearGradient(
@@ -4519,7 +4450,7 @@ private struct TokenChartCombinedBar: View {
                             endPoint: .bottom
                         )
                     )
-                    .frame(width: width, height: visibleActualHeight)
+                    .frame(width: width, height: visibleStandardHeight)
                     .opacity(isHovered ? 0.98 : 0.76)
             }
         }
@@ -4556,11 +4487,11 @@ private struct CreditActivityChart: View {
                     let actual = showsActualCredits ? bucket.total.credits : 0
                     ZStack(alignment: .bottom) {
                         Color.clear
-                        TokenChartCombinedBar(
-                            actualHeight: CGFloat(standard / maximum) * proxy.size.height,
-                            billedHeight: CGFloat(actual / maximum) * proxy.size.height,
+                        CreditChartCombinedBar(
+                            standardHeight: CGFloat(standard / maximum) * proxy.size.height,
+                            actualHeight: CGFloat(actual / maximum) * proxy.size.height,
                             width: 6.25, color: creditsGold,
-                            showsActual: showsStandard, showsBilled: showsActualCredits,
+                            showsStandard: showsStandard, showsActual: showsActualCredits,
                             isHovered: hoveredID == bucket.id,
                             seed: tokenChartSketchSeed(bucket.id)
                         )
@@ -4582,10 +4513,7 @@ private struct CreditActivityChart: View {
 }
 
 private struct DailyTokenActivityChart: View {
-    let actualBuckets: [DailyUsageBucket]
-    let billedBuckets: [DailyUsageBucket]
-    let showsActual: Bool
-    let showsBilled: Bool
+    let buckets: [DailyUsageBucket]
     let hoveredBucket: DailyUsageBucket?
     let onHover: (DailyUsageBucket?, Bool) -> Void
     @Environment(\.displayScale) private var displayScale
@@ -4594,13 +4522,7 @@ private struct DailyTokenActivityChart: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let billedByDate = billedBuckets.reduce(into: [String: Int64]()) {
-                $0[$1.startDate] = $1.tokens
-            }
-            let maximum = max(1, max(
-                showsActual ? actualBuckets.map(\.tokens).max() ?? 0 : 0,
-                showsBilled ? billedBuckets.map(\.tokens).max() ?? 0 : 0
-            ))
+            let maximum = max(1, buckets.map(\.tokens).max() ?? 0)
 
             ZStack(alignment: .bottom) {
                 Rectangle()
@@ -4611,34 +4533,24 @@ private struct DailyTokenActivityChart: View {
                     alignment: .bottom,
                     spacing: IslandLayout.activityChartBarSpacing
                 ) {
-                    ForEach(actualBuckets) { bucket in
-                        let billedTokens = billedByDate[bucket.startDate]
-                            ?? bucket.tokens
+                    ForEach(buckets) { bucket in
                         let actualIntensity = Double(max(0, bucket.tokens))
-                            / Double(maximum)
-                        let billedIntensity = Double(max(0, billedTokens))
                             / Double(maximum)
                         let actualHeight = bucket.tokens == 0
                             ? 0
                             : max(6, proxy.size.height * CGFloat(actualIntensity))
-                        let billedHeight = billedTokens == 0
-                            ? 0
-                            : max(6, proxy.size.height * CGFloat(billedIntensity))
                         let isHovered = hoveredBucket?.id == bucket.id
 
                         ZStack(alignment: .bottom) {
                             Color.clear
 
-                            TokenChartCombinedBar(
-                                actualHeight: actualHeight,
-                                billedHeight: billedHeight,
+                            TokenChartSlimBar(
+                                height: actualHeight,
                                 width: 6.25,
                                 color: theme.accent,
-                                showsActual: showsActual,
-                                showsBilled: showsBilled,
-                                isHovered: isHovered,
-                                seed: tokenChartSketchSeed(bucket.startDate)
+                                isEmpty: bucket.tokens == 0
                             )
+                            .opacity(isHovered ? 0.98 : 0.76)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -4646,7 +4558,7 @@ private struct DailyTokenActivityChart: View {
                             onHover(bucket, hovering)
                         }
                         .help(
-                            bucketHelp(bucket, billedTokens: billedTokens)
+                            bucketHelp(bucket)
                         )
                     }
                 }
@@ -4654,36 +4566,17 @@ private struct DailyTokenActivityChart: View {
         }
     }
 
-    private func bucketHelp(
-        _ bucket: DailyUsageBucket,
-        billedTokens: Int64
-    ) -> String {
+    private func bucketHelp(_ bucket: DailyUsageBucket) -> String {
         let date = shortUsageDate(bucket.startDate, language: language)
-        if showsActual && showsBilled {
-            return language.text(
-                "\(date)：实际消耗 \(exactTokenCount(bucket.tokens)) 词元；⚡模式等效 \(exactTokenCount(billedTokens)) 词元",
-                "\(date): Actual usage \(exactTokenCount(bucket.tokens)) tokens; mode equivalent \(exactTokenCount(billedTokens)) tokens"
-            )
-        }
-        if showsActual {
-            return language.text(
-                "\(date)：实际消耗 \(exactTokenCount(bucket.tokens)) 词元",
-                "\(date): Actual usage \(exactTokenCount(bucket.tokens)) tokens"
-            )
-        }
         return language.text(
-            "\(date)：⚡模式等效 \(exactTokenCount(billedTokens)) 词元",
-            "\(date): Mode equivalent \(exactTokenCount(billedTokens)) tokens"
+            "\(date)：实际消耗 \(exactTokenCount(bucket.tokens)) 词元",
+            "\(date): Actual usage \(exactTokenCount(bucket.tokens)) tokens"
         )
     }
-
 }
 
 private struct HourlyTokenActivityChart: View {
-    let actualBuckets: [HourlyUsageBucket]
-    let billedBuckets: [HourlyUsageBucket]
-    let showsActual: Bool
-    let showsBilled: Bool
+    let buckets: [HourlyUsageBucket]
     let hoveredBucket: HourlyUsageBucket?
     let onHover: (HourlyUsageBucket?, Bool) -> Void
     @Environment(\.displayScale) private var displayScale
@@ -4692,13 +4585,7 @@ private struct HourlyTokenActivityChart: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let billedByHour = billedBuckets.reduce(into: [Date: Int64]()) {
-                $0[$1.hourStart] = $1.tokens
-            }
-            let maximum = max(1, max(
-                showsActual ? actualBuckets.map(\.tokens).max() ?? 0 : 0,
-                showsBilled ? billedBuckets.map(\.tokens).max() ?? 0 : 0
-            ))
+            let maximum = max(1, buckets.map(\.tokens).max() ?? 0)
 
             ZStack(alignment: .bottom) {
                 Rectangle()
@@ -4709,19 +4596,12 @@ private struct HourlyTokenActivityChart: View {
                     alignment: .bottom,
                     spacing: IslandLayout.hourlyActivityChartBarSpacing
                 ) {
-                    ForEach(actualBuckets) { bucket in
-                        let billedTokens = billedByHour[bucket.hourStart]
-                            ?? bucket.tokens
+                    ForEach(buckets) { bucket in
                         let actualIntensity = Double(max(0, bucket.tokens))
-                            / Double(maximum)
-                        let billedIntensity = Double(max(0, billedTokens))
                             / Double(maximum)
                         let actualHeight = bucket.tokens == 0
                             ? 0
                             : max(5, proxy.size.height * CGFloat(actualIntensity))
-                        let billedHeight = billedTokens == 0
-                            ? 0
-                            : max(5, proxy.size.height * CGFloat(billedIntensity))
                         let isHovered = hoveredBucket?.id == bucket.id
                         let isCurrentHour = Calendar.autoupdatingCurrent.isDate(
                             bucket.hourStart,
@@ -4741,16 +4621,13 @@ private struct HourlyTokenActivityChart: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                             }
 
-                            TokenChartCombinedBar(
-                                actualHeight: actualHeight,
-                                billedHeight: billedHeight,
+                            TokenChartSlimBar(
+                                height: actualHeight,
                                 width: isCurrentHour ? 4 : 3.5,
                                 color: theme.accent,
-                                showsActual: showsActual,
-                                showsBilled: showsBilled,
-                                isHovered: isHovered,
-                                seed: tokenChartSketchSeed(bucket.hourStart)
+                                isEmpty: bucket.tokens == 0
                             )
+                            .opacity(isHovered ? 0.98 : 0.76)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -4760,7 +4637,6 @@ private struct HourlyTokenActivityChart: View {
                         .help(
                             hourlyBucketHelp(
                                 bucket,
-                                billedTokens: billedTokens,
                                 isCurrentHour: isCurrentHour
                             )
                         )
@@ -4772,27 +4648,14 @@ private struct HourlyTokenActivityChart: View {
 
     private func hourlyBucketHelp(
         _ bucket: HourlyUsageBucket,
-        billedTokens: Int64,
         isCurrentHour: Bool
     ) -> String {
         let suffix = isCurrentHour
             ? language.text("（本小时进行中）", " (current hour)")
             : ""
-        if showsActual && showsBilled {
-            return language.text(
-                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际消耗 \(exactTokenCount(bucket.tokens)) 词元；⚡模式等效 \(exactTokenCount(billedTokens)) 词元\(suffix)",
-                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual usage \(exactTokenCount(bucket.tokens)) tokens; mode equivalent \(exactTokenCount(billedTokens)) tokens\(suffix)"
-            )
-        }
-        if showsActual {
-            return language.text(
-                "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际消耗 \(exactTokenCount(bucket.tokens)) 词元\(suffix)",
-                "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual usage \(exactTokenCount(bucket.tokens)) tokens\(suffix)"
-            )
-        }
         return language.text(
-            "\(hourlyUsageDateText(bucket.hourStart, language: language))：⚡模式等效 \(exactTokenCount(billedTokens)) 词元\(suffix)",
-            "\(hourlyUsageDateText(bucket.hourStart, language: language)): Mode equivalent \(exactTokenCount(billedTokens)) tokens\(suffix)"
+            "\(hourlyUsageDateText(bucket.hourStart, language: language))：实际消耗 \(exactTokenCount(bucket.tokens)) 词元\(suffix)",
+            "\(hourlyUsageDateText(bucket.hourStart, language: language)): Actual usage \(exactTokenCount(bucket.tokens)) tokens\(suffix)"
         )
     }
 }
@@ -4802,7 +4665,6 @@ private struct QuotaMetric: View {
     let planLabel: String?
     @AppStorage("codexIsland.remainingShowsCredits")
     private var showsRemainingCredits = false
-    let tokenEstimate: CodexRemainingTokenEstimate?
     let resetSummary: ResetCreditSummary?
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
@@ -4853,14 +4715,16 @@ private struct QuotaMetric: View {
                     .foregroundStyle(.white.opacity(0.94))
                     .fixedSize(horizontal: true, vertical: true)
 
-                Text(remainingAmountDisplay)
-                    .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(showsRemainingCredits ? creditsGold : theme.accent.opacity(0.78))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .help(showsRemainingCredits ? remainingCreditsHelp : estimatedRemainingTokenHelp)
-                    .layoutPriority(1)
+                if showsRemainingCredits {
+                    Text(remainingCreditsDisplay)
+                        .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(creditsGold)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .help(remainingCreditsHelp)
+                        .layoutPriority(1)
+                }
 
                 Spacer(minLength: 0)
                 remainingUnitPicker
@@ -4904,21 +4768,8 @@ private struct QuotaMetric: View {
         return quotaResetDateText(date, language: language)
     }
 
-    private var estimatedRemainingTokens: Int64? {
-        guard let tokenEstimate, tokenEstimate.resetsAt > Date() else { return nil }
-        return tokenEstimate.tokens
-    }
-
-    private var estimatedRemainingTokenText: String? {
-        guard let estimatedRemainingTokens else { return nil }
-        return language.text(
-            "≈\(compactTokenCount(estimatedRemainingTokens)) 词元",
-            "≈\(compactTokenCount(estimatedRemainingTokens)) Tokens"
-        )
-    }
-
-    private var remainingAmountDisplay: AttributedString {
-        let amount = remainingAmountText
+    private var remainingCreditsDisplay: AttributedString {
+        let amount = remainingCreditsText
         guard !amount.hasPrefix("—") else { return AttributedString(amount) }
         var prefix = AttributedString("≈ ")
         prefix.foregroundColor = .white.opacity(0.94)
@@ -4926,15 +4777,11 @@ private struct QuotaMetric: View {
         return prefix
     }
 
-    private var remainingAmountText: String {
-        if showsRemainingCredits {
-            guard let credits = CodexDisplayPolicy.remainingCredits(
-                planLabel: planLabel, remainingPercent: window?.remainingPercent
-            ) else { return language.text("— 额度点", "— credits") }
-            return localizedCredits(String(format: "%.0f credits", credits), language: language)
-        }
-        return estimatedRemainingTokenText.map { String($0.dropFirst()) }
-            ?? language.text("— 词元", "— Tokens")
+    private var remainingCreditsText: String {
+        guard let credits = CodexDisplayPolicy.remainingCredits(
+            planLabel: planLabel, remainingPercent: window?.remainingPercent
+        ) else { return language.text("— 额度点", "— credits") }
+        return localizedCredits(String(format: "%.0f credits", credits), language: language)
     }
 
     private var remainingCreditsHelp: String {
@@ -4978,20 +4825,8 @@ private struct QuotaMetric: View {
         .buttonStyle(.plain)
         .accessibilityLabel(credits
             ? language.text("显示剩余额度点", "Show remaining credits")
-            : language.text("显示剩余 Token", "Show remaining tokens"))
+            : language.text("显示词元用量", "Show token usage"))
         .accessibilityAddTraits(showsRemainingCredits == credits ? .isSelected : [])
-    }
-
-    private var estimatedRemainingTokenHelp: String {
-        let explanation = language.text(
-            "根据最近 7 天本机调用的模型、缓存、输出及各会话 Fast 使用比例，结合官方费率与实际额度变化估算；假设后续使用习惯相近，取可用额度中先耗尽的一项。跨设备和其他共享额度的使用可能影响准确性",
-            "Estimated from the last 7 days of local model, cache, output, and per-session Fast usage, official rates, and observed quota changes. Assumes similar future usage and uses the first allowance to run out. Other devices and shared usage can affect accuracy"
-        )
-        guard tokenEstimate?.usesHistoricalCalibration == true else { return explanation }
-        return explanation + language.text(
-            "。当前周期样本较少，容量参考近期同套餐的已校准周期",
-            ". This cycle has limited data; capacity is based on recent calibrated cycles on the same plan"
-        )
     }
 
     private var paceAssessment: QuotaConsumptionPaceAssessment? {
