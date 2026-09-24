@@ -6,6 +6,19 @@ Codex Island is a floating status island for the top of macOS. It stays compact 
 
 Account details, usage, and the thread index come from read-only endpoints exposed by the local `codex app-server`. Per-thread configuration comes from the latest `thread_settings_applied` event in that thread's local rollout. The profile name and avatar are fetched on demand from the Profile endpoint used by the Codex App; the authentication token is retained only in memory for the duration of the request and is never written to disk or logs. Codex Island does not parse message bodies or call endpoints that consume reset credits.
 
+## Reset tracking
+
+Open **Reset tracking → Configure** in the island settings. Updates appear below account quota and above the usage chart. The dashboard, settings, and tracking pages share one expanded height. Tracking settings fit on one screen; longer updates scroll within the details page. Moving the pointer away collapses the island and resets navigation, so the next expansion opens the dashboard. Valid tracking edits save when leaving the page. Open menus and active slider drags temporarily defer collapse. The source URL comes first, followed by a full-width model card with model selection, a reasoning-effort slider, a Fast toggle, and a restore-defaults button. Ultra keeps its purple gradient; other effort titles and tracks follow the island theme, independently of Fast.
+
+- Automatic checks are off by default, with `https://codex-resets.com/` as the source and a twelve-hour interval. Enabling checks also enables change-only analysis and notifications; both remain individually adjustable. Custom HTTP(S) pages, RSS, and JSON are supported, with intervals from one minute to seven days. The original one-hour default migrates once to twelve hours; other saved intervals are preserved.
+- Models and reasoning efforts come from your current Codex subscription. The default is GPT-6 Sol / Max with Fast off. Unsupported combinations produce an error instead of silently selecting another model.
+- Model capabilities are cached locally across launches. Opening settings immediately restores the saved selection and controls; catalogs older than one hour refresh in the background. A failed refresh preserves the cache and retries automatically after about a minute without reopening settings. Login or Codex configuration changes invalidate the cache. Every analysis still validates the selected model and effort against the current subscription.
+- By default, only changed content triggers analysis. Countdowns update locally, failures retain the previous result, and change notifications can be turned off independently.
+- Countdowns require explicit time evidence. Reaching the time means awaiting confirmation. Forecasts and source announcements are labeled separately; source updates do not confirm your account's quota or redeem reset credits.
+- Analysis runs through the local Codex CLI and uses the signed-in ChatGPT subscription quota, as noted beside the setting title. Actual tokens and estimated credits contribute to local charts. Ephemeral analysis sessions stay out of recent tasks. Settings save automatically. Checks run while the app is open and resume after wake when due.
+
+Preferences store the settings; `~/Library/Application Support/CodexIsland/reset-subscription.json` stores up to 20 historical results and 30 days of analysis usage. Custom sources must return readable content directly; login-only or JavaScript-rendered pages may not be readable.
+
 ## Interface Preview
 
 ### Compact
@@ -34,13 +47,13 @@ Credits mode:
 
 The Tokens / Credits switch controls the remaining-usage display, the 30-day / 48-hour charts, and cumulative usage in the session list. Chart and session credit amounts use one decimal place, with zero shown as `0`; the estimated remaining balance uses whole credits.
 
-- **Tokens:** Only actual model tokens, without Fast weighting. In Tokens mode, the gold number in parentheses is the corresponding local credit cost.
+- **Tokens:** Only actual model tokens, without Fast weighting. In Tokens mode, the number in parentheses is the corresponding local credit cost, using the selected theme color.
 - **Credits:** A reference cost calculated using each call’s recorded model and Fast tier, with separate rates for uncached input, cached input, and output. Cached input is not charged again at the uncached rate; reasoning is already included in output.
 - **Standard / ⚡ Actual:** Standard is the cost of the same usage with Fast off. Actual includes Standard and Fast surcharges; Actual minus Standard is the extra cost of enabling Fast. For Standard usage of 100 at 2.5×, Actual is 250 and the extra cost is 150. The solid bar shows Standard; the outline shows the Actual total. Each series can be toggled independently.
 - **Local scope:** Chart and session credits are calculated from this computer’s logs. Account token totals can include other computers and need not match. `≥` marks a priced subtotal when some local calls cannot be priced; `—` indicates missing details.
 - **Remaining credits:** The app uses a fixed reference allowance of 2,750 for Plus, 13,750 for Pro 5X, and 55,000 for Pro 20X, multiplied by the remaining primary-quota percentage. For example, Pro 20X at 97% displays `≈ 53350 credits`. This is an app estimate, not a credit balance returned by the account API. Unrecognized plan tiers display `—`.
 
-Session hover cards show “TOTAL USAGE,” with the selected measure first and the other measure in parentheses. Tokens follow the selected theme; credits use gold. See [calculation details and sources](docs/token-estimate.md).
+Session hover cards show “TOTAL USAGE,” with the selected measure first and the other measure in parentheses. Tokens and credits both follow the selected theme, including credit balances, charts, legends, and the mode switch. See [calculation details and sources](docs/token-estimate.md).
 
 Official sources (verified September 23, 2026):
 
@@ -95,9 +108,9 @@ open "dist/Codex-Island.dmg"
 
 ### Download the DMG (Alternative)
 
-**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.08.28/Codex-Island.dmg)**
+**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.24/Codex-Island.dmg)**
 
-The current release is `v2026.08.28` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
+The current release is `v2026.09.24` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
 
 ### Launch at Login
 

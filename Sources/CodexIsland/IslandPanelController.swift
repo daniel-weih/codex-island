@@ -1,10 +1,15 @@
 import AppKit
+import Combine
 import QuartzCore
 import SwiftUI
 
 final class IslandPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    var allowsKeyboardInput = false
+    var onEscape: (() -> Void)?
+    override var canBecomeKey: Bool { allowsKeyboardInput }
     override var canBecomeMain: Bool { false }
+
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         // NSWindow normally pushes borderless panels below the menu bar's
@@ -27,6 +32,8 @@ final class IslandPanelController: NSObject {
     )
 
     private let viewModel: CodexStatusViewModel
+    private let navigation: IslandNavigation
+    private var subscriptions = Set<AnyCancellable>()
     private let displayGeometry = IslandDisplayGeometry()
     private let displaySelection: IslandDisplaySelectionModel
     private let panel: IslandPanel
@@ -37,10 +44,13 @@ final class IslandPanelController: NSObject {
     private var pointerIsInside = false
     private var targetScreen: NSScreen?
     private var screenObserver: NSObjectProtocol?
+    private var menuObservers: [NSObjectProtocol] = []
+    private var trackingMenus = Set<ObjectIdentifier>()
     private var displayTransitionGeneration = 0
 
-    init(viewModel: CodexStatusViewModel) {
+    init(viewModel: CodexStatusViewModel, subscription: ResetSubscriptionService, navigation: IslandNavigation) {
         self.viewModel = viewModel
+        self.navigation = navigation
         displaySelection = IslandDisplaySelectionModel()
         panel = IslandPanel(
             contentRect: NSRect(origin: .zero, size: compactSize),
@@ -56,6 +66,8 @@ final class IslandPanelController: NSObject {
                 viewModel: viewModel,
                 displayGeometry: displayGeometry,
                 displaySelection: displaySelection,
+                resetSubscription: subscription,
+                navigation: navigation,
                 onCopyScreenshot: { [weak self] in
                     guard let contentView = self?.panel.contentView else {
                         return false
@@ -69,6 +81,23 @@ final class IslandPanelController: NSObject {
         hostingView.layer?.isOpaque = false
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView = hostingView
+        panel.onEscape = { [weak navigation] in navigation?.back() }
+        navigation.$page.removeDuplicates().sink { [weak self] _ in
+            // Published emits before the new value is installed. Update input
+            // handling after SwiftUI finishes the page change.
+            DispatchQueue.main.async { self?.updatePageInteraction() }
+        }.store(in: &subscriptions)
+
+        for name in [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification] {
+            menuObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let menu = notification.object as? NSMenu else { return }
+                MainActor.assumeIsolated {
+                    self?.menuTrackingChanged(menu, isTracking: name == NSMenu.didBeginTrackingNotification)
+                }
+            })
+        }
 
         displaySelection.onPreferenceChange = { [weak self] in
             guard let self else { return }
@@ -98,6 +127,7 @@ final class IslandPanelController: NSObject {
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
         }
+        menuObservers.forEach(NotificationCenter.default.removeObserver)
     }
 
     func start() {
@@ -138,6 +168,7 @@ final class IslandPanelController: NSObject {
         panel.ignoresMouseEvents = true
         panel.orderOut(nil)
         viewModel.isExpanded = false
+        navigation.reset()
 
         // Moving an NSHostingView-backed window synchronously from the SwiftUI
         // button action can re-enter AppKit's constraint update cycle when the
@@ -170,14 +201,19 @@ final class IslandPanelController: NSObject {
             .mouseMoved,
             .leftMouseDragged,
             .rightMouseDragged,
-            .otherMouseDragged
+            .otherMouseDragged,
+            .leftMouseUp,
+            .rightMouseUp,
+            .otherMouseUp
         ]
 
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-            Task { @MainActor in self?.evaluatePointerPosition() }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            let released = [.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type)
+            Task { @MainActor in self?.evaluatePointerPosition(forceHoverUpdate: released) }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            Task { @MainActor in self?.evaluatePointerPosition() }
+            let released = [.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type)
+            Task { @MainActor in self?.evaluatePointerPosition(forceHoverUpdate: released) }
             return event
         }
     }
@@ -216,6 +252,7 @@ final class IslandPanelController: NSObject {
         expandWorkItem = nil
         collapseWorkItem?.cancel()
         collapseWorkItem = nil
+        guard trackingMenus.isEmpty else { return }
 
         if hovering {
             let workItem = DispatchWorkItem { [weak self] in
@@ -232,7 +269,9 @@ final class IslandPanelController: NSObject {
 
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                guard let self, !self.isPointerInsideInteractionRegion else { return }
+                guard let self, self.trackingMenus.isEmpty,
+                      NSEvent.pressedMouseButtons == 0,
+                      !self.isPointerInsideInteractionRegion else { return }
                 self.setExpanded(false, animated: true)
             }
         }
@@ -240,9 +279,10 @@ final class IslandPanelController: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24, execute: workItem)
     }
 
-    private func evaluatePointerPosition() {
+    private func evaluatePointerPosition(forceHoverUpdate: Bool = false) {
         let mouse = NSEvent.mouseLocation
-        if let screen = screen(containing: mouse) {
+        if !(viewModel.isExpanded && navigation.page.isSubscriptionPage),
+           let screen = screen(containing: mouse) {
             let targetChanged = targetScreen !== screen
             targetScreen = screen
 
@@ -256,12 +296,15 @@ final class IslandPanelController: NSObject {
         }
 
         let isInside = isPointerInsideInteractionRegion
-        guard isInside != pointerIsInside else { return }
+        // Re-evaluate after releasing a slider drag outside the island even
+        // when the pointer has not crossed the boundary a second time.
+        guard isInside != pointerIsInside || forceHoverUpdate else { return }
         pointerIsInside = isInside
         handleHover(isInside)
     }
 
     private func setExpanded(_ expanded: Bool, animated: Bool) {
+        guard expanded || trackingMenus.isEmpty else { return }
         if !panel.isVisible {
             reposition(animated: false)
             panel.orderFrontRegardless()
@@ -271,6 +314,12 @@ final class IslandPanelController: NSObject {
         guard viewModel.isExpanded != expanded else { return }
 
         viewModel.isExpanded = expanded
+        if !expanded {
+            // Reset before the next hover can reopen the panel, independently
+            // of when SwiftUI observes the collapsed state.
+            navigation.reset()
+        }
+        updateKeyboardInteraction()
         reposition(animated: animated)
     }
 
@@ -298,6 +347,14 @@ final class IslandPanelController: NSObject {
                     1.00
                 )
                 panel.animator().setFrame(frame, display: true)
+            } completionHandler: { [weak self] in
+                // Collapsing a subscription page can move the compact island
+                // to another display. A pointer already resting on its new
+                // position must not need another mouse move to reopen it.
+                Task { @MainActor in
+                    guard let self, self.panel.isVisible else { return }
+                    self.evaluatePointerPosition()
+                }
             }
         } else {
             panel.setFrame(frame, display: true)
@@ -305,7 +362,12 @@ final class IslandPanelController: NSObject {
     }
 
     private func preferredScreen() -> NSScreen? {
-        displaySelection.resolveScreen(
+        if viewModel.isExpanded && navigation.page.isSubscriptionPage,
+           let current = panel.screen,
+           NSScreen.screens.contains(where: { $0 === current }) {
+            return current
+        }
+        return displaySelection.resolveScreen(
             automaticScreen: automaticPreferredScreen()
         )
     }
@@ -371,6 +433,39 @@ final class IslandPanelController: NSObject {
                 forTopRegionHeight: topRegionHeight
             )
         )
+    }
+
+    private func updatePageInteraction() {
+        expandWorkItem?.cancel()
+        collapseWorkItem?.cancel()
+        updateKeyboardInteraction()
+        pointerIsInside = isPointerInsideInteractionRegion
+        handleHover(pointerIsInside)
+    }
+
+    private func updateKeyboardInteraction() {
+        let allowsInput = viewModel.isExpanded && navigation.page.isSubscriptionPage
+        panel.allowsKeyboardInput = allowsInput
+        panel.becomesKeyOnlyIfNeeded = !allowsInput
+        if allowsInput {
+            panel.makeKey()
+        } else {
+            panel.makeFirstResponder(nil)
+            if panel.isKeyWindow { panel.resignKey() }
+        }
+    }
+
+    private func menuTrackingChanged(_ menu: NSMenu, isTracking: Bool) {
+        if isTracking {
+            guard viewModel.isExpanded else { return }
+            trackingMenus.insert(ObjectIdentifier(menu))
+            collapseWorkItem?.cancel()
+            collapseWorkItem = nil
+            return
+        }
+        guard trackingMenus.remove(ObjectIdentifier(menu)) != nil, trackingMenus.isEmpty else { return }
+        pointerIsInside = isPointerInsideInteractionRegion
+        handleHover(pointerIsInside)
     }
 
     private func topRegionHeight(on screen: NSScreen, hasNotch: Bool) -> CGFloat {

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum CodexAppServerError: LocalizedError {
     case executableNotFound
@@ -32,14 +33,26 @@ enum CodexAppServerError: LocalizedError {
 final class CodexAppServerClient: @unchecked Sendable {
     typealias NotificationHandler = (String, JSONObject) -> Void
     typealias ConnectionHandler = (Bool, String?) -> Void
+    /// Runs on the transport queue. Returning nil rejects an unsupported request.
+    typealias ServerRequestHandler = (String, JSONObject) -> JSONObject?
+
+    private final class RequestCancellation: @unchecked Sendable {
+        let id = UUID()
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.withLock { cancelled } }
+        func cancel() { lock.withLock { cancelled = true } }
+    }
 
     private struct PendingRequest {
         let method: String
+        let cancellationID: UUID?
         let completion: (Result<JSONObject, Error>) -> Void
     }
 
     var onNotification: NotificationHandler?
     var onConnectionChanged: ConnectionHandler?
+    var onServerRequest: ServerRequestHandler?
 
     private let queue = DispatchQueue(label: "com.codexisland.app.app-server")
     private var process: Process?
@@ -51,10 +64,25 @@ final class CodexAppServerClient: @unchecked Sendable {
     private var nextID = 1
     private var ready = false
     private var intentionallyStopping = false
+    private let clientName: String
+    private let launchArguments: [String]
+    private let workingDirectory: URL?
+
+    init(clientName: String = "codex_island", launchArguments: [String] = [], workingDirectory: URL? = nil) {
+        self.clientName = clientName
+        self.launchArguments = launchArguments
+        self.workingDirectory = workingDirectory
+    }
 
     func start() async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        let cancellation = RequestCancellation()
+        try await withTaskCancellationHandler(operation: {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
+                guard !cancellation.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 if self.ready, self.process?.isRunning == true {
                     continuation.resume()
                     return
@@ -71,12 +99,13 @@ final class CodexAppServerClient: @unchecked Sendable {
                         method: "initialize",
                         params: [
                             "clientInfo": [
-                                "name": "codex_island",
+                                "name": self.clientName,
                                 "title": "Codex Island",
                                 "version": "0.1.0"
                             ]
                         ],
-                        timeout: 12
+                        timeout: 12,
+                        cancellationID: cancellation.id
                     ) { result in
                         switch result {
                         case .success:
@@ -99,20 +128,34 @@ final class CodexAppServerClient: @unchecked Sendable {
                 }
             }
         }
+        }, onCancel: {
+            cancellation.cancel()
+            self.queue.async { self.cancelRequestLocked(cancellation.id) }
+        })
     }
 
     func request(method: String, params: JSONObject = [:], timeout: TimeInterval = 12) async throws -> JSONObject {
+        let cancellation = RequestCancellation()
+        return try await withTaskCancellationHandler(operation: {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard !cancellation.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 guard self.ready, self.process?.isRunning == true else {
                     continuation.resume(throwing: CodexAppServerError.notReady)
                     return
                 }
-                self.sendRequestLocked(method: method, params: params, timeout: timeout) { result in
+                self.sendRequestLocked(method: method, params: params, timeout: timeout, cancellationID: cancellation.id) { result in
                     continuation.resume(with: result)
                 }
             }
         }
+        }, onCancel: {
+            cancellation.cancel()
+            self.queue.async { self.cancelRequestLocked(cancellation.id) }
+        })
     }
 
     func stop() {
@@ -121,9 +164,7 @@ final class CodexAppServerClient: @unchecked Sendable {
             self.ready = false
             self.outputPipe?.fileHandleForReading.readabilityHandler = nil
             self.errorPipe?.fileHandleForReading.readabilityHandler = nil
-            if self.process?.isRunning == true {
-                self.process?.terminate()
-            }
+            self.terminateProcessLocked()
             self.failAllPendingLocked(with: CodexAppServerError.serverStopped)
             self.cleanUpLocked()
         }
@@ -144,9 +185,9 @@ final class CodexAppServerClient: @unchecked Sendable {
         let standardError = Pipe()
 
         process.executableURL = executable
-        process.arguments = ["app-server"]
+        process.arguments = ["app-server"] + launchArguments
         process.environment = CodexExecutableLocator.augmentedEnvironment()
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.currentDirectoryURL = workingDirectory ?? FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = input
         process.standardOutput = output
         process.standardError = standardError
@@ -187,6 +228,7 @@ final class CodexAppServerClient: @unchecked Sendable {
         method: String,
         params: JSONObject,
         timeout: TimeInterval,
+        cancellationID: UUID? = nil,
         completion: @escaping (Result<JSONObject, Error>) -> Void
     ) {
         guard process?.isRunning == true else {
@@ -196,7 +238,7 @@ final class CodexAppServerClient: @unchecked Sendable {
 
         let id = nextID
         nextID += 1
-        pending[id] = PendingRequest(method: method, completion: completion)
+        pending[id] = PendingRequest(method: method, cancellationID: cancellationID, completion: completion)
 
         do {
             try writeLocked(["method": method, "id": id, "params": params])
@@ -214,6 +256,12 @@ final class CodexAppServerClient: @unchecked Sendable {
 
     private func sendNotificationLocked(method: String, params: JSONObject) throws {
         try writeLocked(["method": method, "params": params])
+    }
+
+    private func cancelRequestLocked(_ cancellationID: UUID) {
+        guard let id = pending.first(where: { $0.value.cancellationID == cancellationID })?.key,
+              let request = pending.removeValue(forKey: id) else { return }
+        request.completion(.failure(CancellationError()))
     }
 
     private func writeLocked(_ object: JSONObject) throws {
@@ -239,6 +287,20 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     private func handleMessageLocked(_ message: JSONObject) {
+        // Server request IDs occupy a separate namespace from our pending requests.
+        // Handle them first so an approval can never be mistaken for an RPC response.
+        if let method = message.string("method"), let id = message["id"] {
+            let params = message.dictionary("params") ?? [:]
+            if let result = onServerRequest?(method, params) {
+                try? writeLocked(["id": id, "result": result])
+            } else {
+                try? writeLocked(["id": id, "error": [
+                    "code": -32601,
+                    "message": "This client does not allow interactive requests or tool execution."
+                ]])
+            }
+            return
+        }
         if let id = message.int("id"), let request = pending.removeValue(forKey: id) {
             if let error = message.dictionary("error") {
                 request.completion(.failure(CodexAppServerError.remote(
@@ -294,12 +356,20 @@ final class CodexAppServerClient: @unchecked Sendable {
         ready = false
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
-        process?.terminationHandler = nil
-        if process?.isRunning == true {
-            process?.terminate()
-        }
+        terminateProcessLocked()
         failAllPendingLocked(with: CodexAppServerError.serverStopped)
         cleanUpLocked()
+    }
+
+    private func terminateProcessLocked() {
+        guard let process else { return }
+        process.terminationHandler = nil
+        guard process.isRunning else { return }
+        process.terminate()
+        // A stuck app-server must not keep consuming a scheduled analysis after cancellation.
+        queue.asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
     }
 
     private func dispatchConnectionChanged(_ connected: Bool, _ message: String?) {

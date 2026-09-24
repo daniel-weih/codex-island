@@ -21,6 +21,11 @@ final class CodexStatusViewModel: ObservableObject {
     private var tokenConsumptionHighWater: Int64?
     private var tokenConsumptionDayStart: Date?
     private var hasStarted = false
+    var resetSubscriptionUsage: [ResetUsageRecord] = [] {
+        didSet { resetUsageRevision &+= 1 }
+    }
+    private var resetUsageRevision: UInt64 = 0
+    private var resetUsageCache = ResetSubscriptionUsage.AggregationCache()
 
     private static let usageRefreshInterval: TimeInterval = 5 * 60
     private static let profileRefreshInterval: TimeInterval = 15 * 60
@@ -435,11 +440,11 @@ final class CodexStatusViewModel: ObservableObject {
                 nextDailyThreadDiscoveryAt = now.addingTimeInterval(
                     Self.failedRefreshRetryInterval
                 )
-                guard hasDiscoveredLocalActivity else { return }
+                guard hasDiscoveredLocalActivity || !resetSubscriptionUsage.isEmpty else { return }
             }
         }
 
-        guard hasDiscoveredLocalActivity else { return }
+        guard hasDiscoveredLocalActivity || !resetSubscriptionUsage.isEmpty else { return }
         let discoveredPaths = localActivityRolloutPaths
         let recentPaths = snapshot.recentThreads.compactMap(\.rolloutPath)
         let tokenPaths = Array(Set(discoveredPaths + recentPaths))
@@ -475,18 +480,39 @@ final class CodexStatusViewModel: ObservableObject {
             return (usage, hasRunningSession)
         }.value
         guard generation == accountGeneration else { return }
-        if let usage = localActivity.0 {
-            let total = usage.todayTokens
+        // Ephemeral subscription turns have no rollout. A fresh installation or
+        // unreadable local logs must still show their independently recorded usage.
+        if localActivity.0 != nil || !resetSubscriptionUsage.isEmpty {
+            let revision = resetUsageRevision
+            let subscriptionAggregation: ResetSubscriptionUsage.Aggregation
+            if let cached = resetUsageCache.value(revision: revision, now: now) {
+                subscriptionAggregation = cached
+            } else {
+                let records = resetSubscriptionUsage
+                let result = await Task.detached(priority: .utility) {
+                    ResetSubscriptionUsage.aggregate(records: records, now: now)
+                }.value
+                guard generation == accountGeneration, revision == resetUsageRevision else { return }
+                resetUsageCache.store(result, revision: revision, now: now)
+                subscriptionAggregation = result
+            }
+            let usage = localActivity.0
+            let combined = ResetSubscriptionUsage.merge(
+                aggregation: subscriptionAggregation, today: usage?.todayTokens ?? 0,
+                hourly: usage?.hourlyBuckets ?? [], daily: usage?.dailyBuckets ?? [],
+                credits: usage?.chartCreditTotals ?? [:]
+            )
+            let total = combined.today
             if total != snapshot.todayThreadTokens {
                 snapshot.todayThreadTokens = total
             }
-            if usage.hourlyBuckets != snapshot.hourlyThreadTokens {
-                snapshot.hourlyThreadTokens = usage.hourlyBuckets
+            if combined.hourly != snapshot.hourlyThreadTokens {
+                snapshot.hourlyThreadTokens = combined.hourly
             }
-            if usage.dailyBuckets != snapshot.dailyThreadTokens {
-                snapshot.dailyThreadTokens = usage.dailyBuckets
+            if combined.daily != snapshot.dailyThreadTokens {
+                snapshot.dailyThreadTokens = combined.daily
             }
-            snapshot.chartCreditTotals = usage.chartCreditTotals
+            snapshot.chartCreditTotals = combined.credits
             if CodexDisplayPolicy.shouldAnimateTokenConsumption(
                 previous: tokenConsumptionHighWater,
                 current: total

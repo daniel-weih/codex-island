@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-private let creditsGold = Color(red: 1, green: 215.0 / 255, blue: 0)
-
 private func localizedCredits(_ text: String, language: IslandInterfaceLanguage) -> String {
     text.replacingOccurrences(of: "credits", with: language.text("额度点", "credits"))
 }
@@ -32,10 +30,14 @@ enum IslandLayout {
     static let expandedMetricsHeight: CGFloat = 210
     static let expandedSeparatorHeight: CGFloat = 1
     static let expandedBottomPadding: CGFloat = 14
+    static let resetSubscriptionSummaryHeight: CGFloat = 36
+    // Every expanded page uses the dashboard's height, including while the
+    // subscription is disabled. Longer secondary pages scroll within this frame.
     static let expandedBodyHeight: CGFloat = expandedMetricsHeight
         + recentConversationsHeight
         + expandedSeparatorHeight * 2
         + expandedBottomPadding
+        + resetSubscriptionSummaryHeight
 
     static func compactWidth(forNotchWidth notchWidth: CGFloat) -> CGFloat {
         max(compactMinimumWidth, notchWidth + compactExtraWidth)
@@ -88,7 +90,7 @@ enum CreditChartLegendKind: String, Equatable, Sendable {
 
     func title(for language: IslandInterfaceLanguage) -> String {
         self == .standard ? language.text("标准", "Standard")
-            : language.text("⚡实际", "⚡ Actual")
+            : language.text("实际", "Actual")
     }
 
     func explanation(for language: IslandInterfaceLanguage) -> String {
@@ -487,6 +489,8 @@ struct IslandView: View {
     @ObservedObject var viewModel: CodexStatusViewModel
     @ObservedObject var displayGeometry: IslandDisplayGeometry
     @ObservedObject var displaySelection: IslandDisplaySelectionModel
+    @ObservedObject var resetSubscription: ResetSubscriptionService
+    @ObservedObject var navigation: IslandNavigation
     @Environment(\.displayScale) private var displayScale
     @AppStorage("codexIsland.statusAnimationsEnabled")
     private var statusAnimationsEnabled = true
@@ -500,7 +504,7 @@ struct IslandView: View {
     private var storedColorTheme = IslandColorTheme.ocean.rawValue
     @State private var launchAtLoginSetting: LaunchAtLoginSettingModel
     @State private var activePopover: IslandPopoverPresentation?
-    @State private var isIslandSettingsPresented = false
+    private var isIslandSettingsPresented: Bool { navigation.page == .islandSettings }
     @State private var hoveredHeaderAction: IslandHeaderAction?
     @State private var headerTooltipPointer: CGPoint?
     @State private var screenshotCopied = false
@@ -518,6 +522,8 @@ struct IslandView: View {
         viewModel: CodexStatusViewModel,
         displayGeometry: IslandDisplayGeometry,
         displaySelection: IslandDisplaySelectionModel,
+        resetSubscription: ResetSubscriptionService? = nil,
+        navigation: IslandNavigation? = nil,
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
         initialResetSummaryHover: Bool = false,
@@ -536,6 +542,12 @@ struct IslandView: View {
         self.viewModel = viewModel
         self.displayGeometry = displayGeometry
         self.displaySelection = displaySelection
+        self.resetSubscription = resetSubscription ?? ResetSubscriptionService(
+            settings: ResetSubscriptionSettings(), persistenceEnabled: false
+        )
+        self.navigation = navigation ?? IslandNavigation(
+            page: initialIslandSettingsPresented ? .islandSettings : .dashboard
+        )
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
         _tokenChartRange = State(initialValue: initialTokenChartRange)
@@ -593,9 +605,6 @@ struct IslandView: View {
             self.initialPopover = nil
         }
         _activePopover = State(initialValue: nil)
-        _isIslandSettingsPresented = State(
-            initialValue: initialIslandSettingsPresented
-        )
         _hoveredHeaderAction = State(initialValue: initialHoveredHeaderAction)
         _headerTooltipPointer = State(initialValue: nil)
     }
@@ -656,7 +665,7 @@ struct IslandView: View {
         .onChange(of: viewModel.isExpanded) { expanded in
             if !expanded {
                 activePopover = nil
-                isIslandSettingsPresented = false
+                navigation.reset()
                 hoveredHeaderAction = nil
                 headerTooltipPointer = nil
             }
@@ -997,7 +1006,8 @@ struct IslandView: View {
             Hairline()
                 .padding(.horizontal, IslandLayout.contentHorizontalInset)
 
-            if isIslandSettingsPresented {
+            switch navigation.page {
+            case .islandSettings:
                 IslandSettingsPanel(
                     statusAnimationsEnabled: $statusAnimationsEnabled,
                     tokenConsumptionEffectEnabled: $tokenConsumptionEffectEnabled,
@@ -1009,7 +1019,12 @@ struct IslandView: View {
                     previewDisplayPickerPresentation: previewDisplayPickerPresentation,
                     colorTheme: colorThemeBinding,
                     isRefreshing: viewModel.isRefreshing,
-                    onRefresh: viewModel.refresh
+                    onRefresh: viewModel.refresh,
+                    subscription: resetSubscription,
+                    onConfigureSubscription: {
+                        activePopover = nil
+                        navigation.navigate(to: .resetSettings)
+                    }
                 )
                 .frame(maxHeight: .infinity)
                 .onAppear(perform: refreshLaunchAtLoginSetting)
@@ -1017,7 +1032,24 @@ struct IslandView: View {
                     .move(edge: .trailing)
                         .combined(with: .opacity)
                 )
-            } else {
+            case .resetDetails:
+                ResetSubscriptionDetailsPage(
+                    service: resetSubscription,
+                    language: interfaceLanguage,
+                    theme: selectedColorTheme,
+                    onBack: navigation.back,
+                    onConfigure: { navigation.navigate(to: .resetSettings) }
+                )
+            case .resetSettings:
+                ResetSubscriptionSettingsPage(
+                    service: resetSubscription,
+                    language: interfaceLanguage,
+                    theme: selectedColorTheme,
+                    allowsNetworkRequests: usesTimelineUpdates,
+                    onBack: navigation.back,
+                    onDetails: { navigation.navigate(to: .resetDetails) }
+                )
+            case .dashboard:
                 dashboardContent
                     .frame(maxHeight: .infinity)
                     .transition(
@@ -1029,7 +1061,7 @@ struct IslandView: View {
         .padding(.bottom, IslandLayout.expandedBottomPadding)
         .animation(
             usesTimelineUpdates ? .easeOut(duration: 0.18) : nil,
-            value: isIslandSettingsPresented
+            value: navigation.page
         )
     }
 
@@ -1050,10 +1082,6 @@ struct IslandView: View {
             VStack(spacing: 0) {
                 metrics
                     .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        CodexLauncher.openCodex()
-                    }
 
                 Hairline()
                     .padding(.horizontal, IslandLayout.contentHorizontalInset)
@@ -1156,7 +1184,7 @@ struct IslandView: View {
         Button {
             activePopover = nil
             withAnimation(.easeOut(duration: 0.18)) {
-                isIslandSettingsPresented.toggle()
+                navigation.navigate(to: isIslandSettingsPresented ? .dashboard : .islandSettings)
             }
         } label: {
             ZStack {
@@ -1426,6 +1454,11 @@ struct IslandView: View {
             chartCreditTotals: viewModel.snapshot.chartCreditTotals,
             window: viewModel.snapshot.rateLimit?.primary,
             resetSummary: viewModel.snapshot.resetCredits,
+            resetSubscription: resetSubscription,
+            onOpenResetSubscription: {
+                activePopover = nil
+                navigation.navigate(to: .resetDetails)
+            },
             onResetHoverChange: { hovering, pointer in
                 updateResetHover(hovering: hovering, pointer: pointer)
             },
@@ -1753,6 +1786,8 @@ private struct IslandSettingsPanel: View {
     @Binding var colorTheme: IslandColorTheme
     let isRefreshing: Bool
     let onRefresh: () -> Void
+    @ObservedObject var subscription: ResetSubscriptionService
+    let onConfigureSubscription: () -> Void
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
@@ -1760,7 +1795,7 @@ private struct IslandSettingsPanel: View {
     @State private var isRefreshHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(language.text("灵动岛设置", "Island settings"))
                     .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
@@ -1793,7 +1828,7 @@ private struct IslandSettingsPanel: View {
                         "运行会话的呼吸提示",
                         "Pulse while running"
                     ),
-                    tint: .green,
+                    tint: theme.accent,
                     isOn: $statusAnimationsEnabled
                 )
 
@@ -1815,7 +1850,7 @@ private struct IslandSettingsPanel: View {
                         "完成或等待输入时播放",
                         "Plays on finish or input request"
                     ),
-                    tint: .orange,
+                    tint: theme.accent,
                     isOn: $completionSoundEnabled
                 )
 
@@ -1823,7 +1858,7 @@ private struct IslandSettingsPanel: View {
                     icon: "power",
                     title: language.text("开机启动", "Launch at login"),
                     detail: launchAtLoginDetailText,
-                    tint: .purple,
+                    tint: theme.accent,
                     isOn: $launchAtLoginEnabled
                 )
             }
@@ -1949,10 +1984,17 @@ private struct IslandSettingsPanel: View {
             .frame(height: 56)
             .background(settingsCardBackground)
             .overlay(settingsCardBorder)
+
+            ResetSubscriptionSettingCard(
+                service: subscription,
+                language: language,
+                theme: theme,
+                onConfigure: onConfigureSubscription
+            )
         }
         .padding(.horizontal, IslandLayout.contentHorizontalInset)
-        .padding(.top, 10)
-        .padding(.bottom, 9)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -1997,6 +2039,7 @@ private struct IslandDisplayPicker: View {
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
     @State private var isHovered = false
     @State private var isPresented = false
     private let previewPresentation: Bool?
@@ -2076,14 +2119,14 @@ private struct IslandDisplayPicker: View {
                 .opacity(0.58)
         }
         .foregroundStyle(
-            Color.cyan.opacity(isHovered || isMenuPresented ? 0.90 : 0.72)
+            theme.accent.opacity(isHovered || isMenuPresented ? 0.90 : 0.72)
         )
         .padding(.horizontal, 7)
         .frame(width: Self.width, height: 28)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(
-                    Color.cyan.opacity(
+                    theme.accent.opacity(
                         isHovered || isMenuPresented ? 0.12 : 0.07
                     )
                 )
@@ -2091,7 +2134,7 @@ private struct IslandDisplayPicker: View {
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(
-                    Color.cyan.opacity(
+                    theme.accent.opacity(
                         isHovered || isMenuPresented ? 0.18 : 0.10
                     ),
                     lineWidth: 1 / max(1, displayScale)
@@ -2120,7 +2163,7 @@ private struct IslandDisplayPicker: View {
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(
                                 choice.target == selection.preference
-                                    ? Color.cyan.opacity(0.86)
+                                    ? theme.accent.opacity(0.86)
                                     : Color.white.opacity(0.18)
                             )
                             .frame(width: 8)
@@ -2473,7 +2516,7 @@ private struct IslandLanguagePicker: View {
     }
 }
 
-private struct IslandToggleStyle: ToggleStyle {
+struct IslandToggleStyle: ToggleStyle {
     let tint: Color
 
     @Environment(\.displayScale) private var displayScale
@@ -3252,6 +3295,7 @@ private struct ThreadTokenUsageView: View {
     let usage: ThreadTokenUsage?
     let onHoverChange: (Bool, CGPoint?) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
     @State private var isPointerInside = false
 
     var body: some View {
@@ -3263,7 +3307,7 @@ private struct ThreadTokenUsageView: View {
                         : compactTokenCount(usage.totalTokens))
                         .font(.system(size: IslandTypography.body, weight: .medium, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(showsRemainingCredits ? creditsGold : Color.white.opacity(0.31))
+                        .foregroundStyle(showsRemainingCredits ? theme.accent : Color.white.opacity(0.31))
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .accessibilityLabel(
@@ -3407,9 +3451,9 @@ private struct TokenUsageDetailPopover: View {
         let tokenValue = exactTokenCount(usage.totalTokens) + language.text(" 词元", " Tokens")
         let creditValue = localizedCredits(usage.creditEstimate?.displayText ?? "— credits", language: language)
         var first = AttributedString(showsRemainingCredits ? creditValue : tokenValue)
-        first.foregroundColor = showsRemainingCredits ? creditsGold : theme.accent.opacity(0.88)
+        first.foregroundColor = showsRemainingCredits ? theme.accent : theme.accent.opacity(0.88)
         var second = AttributedString(" (" + (showsRemainingCredits ? tokenValue : creditValue) + ")")
-        second.foregroundColor = showsRemainingCredits ? theme.accent.opacity(0.88) : creditsGold
+        second.foregroundColor = showsRemainingCredits ? theme.accent.opacity(0.88) : theme.accent
         first.append(second)
         return first
     }
@@ -3535,6 +3579,7 @@ private struct CreditChartLegendPopover: View {
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
     static func size(
         for kind: CreditChartLegendKind,
         language: IslandInterfaceLanguage
@@ -3558,15 +3603,22 @@ private struct CreditChartLegendPopover: View {
             HStack(spacing: 6) {
                 CreditChartLegendMarker(
                     kind: kind,
-                    color: creditsGold,
+                    color: theme.accent,
                     isVisible: true,
                     width: 5,
                     height: 10
                 )
 
+                if kind == .actual {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: IslandTypography.body, weight: .bold))
+                        .foregroundStyle(theme.accent)
+                        .accessibilityHidden(true)
+                }
+
                 Text(kind.title(for: language))
                     .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
-                    .foregroundStyle(creditsGold)
+                    .foregroundStyle(theme.accent)
                     .lineLimit(1)
             }
 
@@ -3632,6 +3684,8 @@ private struct AccountActivityCard: View {
     let chartCreditTotals: [Date: CodexChartCreditTotal]
     let window: RateLimitWindow?
     let resetSummary: ResetCreditSummary?
+    @ObservedObject var resetSubscription: ResetSubscriptionService
+    let onOpenResetSubscription: () -> Void
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     let onLegendHoverChange: (CreditChartLegendKind, Bool, CGPoint?) -> Void
     let planLabel: String?
@@ -3659,6 +3713,8 @@ private struct AccountActivityCard: View {
         chartCreditTotals: [Date: CodexChartCreditTotal],
         window: RateLimitWindow?,
         resetSummary: ResetCreditSummary?,
+        resetSubscription: ResetSubscriptionService,
+        onOpenResetSubscription: @escaping () -> Void,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
         onLegendHoverChange: @escaping (
             CreditChartLegendKind,
@@ -3676,6 +3732,8 @@ private struct AccountActivityCard: View {
         self.chartCreditTotals = chartCreditTotals
         self.window = window
         self.resetSummary = resetSummary
+        self.resetSubscription = resetSubscription
+        self.onOpenResetSubscription = onOpenResetSubscription
         self.onResetHoverChange = onResetHoverChange
         self.onLegendHoverChange = onLegendHoverChange
         self.planLabel = planLabel
@@ -3742,6 +3800,19 @@ private struct AccountActivityCard: View {
             .padding(.horizontal, IslandLayout.contentHorizontalInset)
             .frame(height: 76)
             .padding(.top, 4)
+            .contentShape(Rectangle())
+            .onTapGesture { CodexLauncher.openCodex() }
+
+            if resetSubscription.settings.enabled {
+                ResetSubscriptionSummaryRow(
+                    service: resetSubscription,
+                    language: language,
+                    theme: theme,
+                    onOpen: onOpenResetSubscription
+                )
+                .frame(height: IslandLayout.resetSubscriptionSummaryHeight)
+                .padding(.horizontal, IslandLayout.contentHorizontalInset)
+            }
 
             Hairline()
                 .padding(.horizontal, IslandLayout.contentHorizontalInset)
@@ -3812,6 +3883,8 @@ private struct AccountActivityCard: View {
             .padding(.horizontal, IslandLayout.contentHorizontalInset)
             .padding(.top, 1)
             .padding(.bottom, 1)
+            .contentShape(Rectangle())
+            .onTapGesture { CodexLauncher.openCodex() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: identity.avatarData) { data in
@@ -3948,7 +4021,7 @@ private struct AccountActivityCard: View {
             var detail = AttributedString("\(dateText) · ")
             detail.foregroundColor = theme.accent.opacity(0.72)
             var credits = AttributedString(values)
-            credits.foregroundColor = creditsGold
+            credits.foregroundColor = theme.accent
             detail.append(credits)
             var tokens = AttributedString(" (\(chartTokenCount(actualTokens)))")
             tokens.foregroundColor = theme.accent.opacity(0.72)
@@ -3959,7 +4032,7 @@ private struct AccountActivityCard: View {
         let creditAmount = creditTotal.displayText(matching: actualTokens)
             .replacingOccurrences(of: " credits", with: "")
         var credits = AttributedString(" (\(creditAmount))")
-        credits.foregroundColor = creditsGold
+        credits.foregroundColor = theme.accent
         detail.append(credits)
         return detail
     }
@@ -3985,14 +4058,14 @@ private struct AccountActivityCard: View {
         HStack(spacing: 7) {
             chartLegendItem(
                 kind: .standard,
-                color: creditsGold.opacity(0.78),
+                color: theme.accent.opacity(0.78),
                 isVisible: showsStandardCredits
             ) {
                 toggleStandardCreditSeries()
             }
             chartLegendItem(
                 kind: .actual,
-                color: creditsGold.opacity(0.86),
+                color: theme.accent.opacity(0.86),
                 isVisible: showsActualCredits
             ) {
                 toggleActualCreditSeries()
@@ -4016,6 +4089,12 @@ private struct AccountActivityCard: View {
                     width: 5,
                     height: 8
                 )
+                if kind == .actual {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(color.opacity(isVisible ? 1 : 0.24))
+                        .accessibilityHidden(true)
+                }
                 Text(kind.title(for: language))
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(isVisible ? 0.38 : 0.18))
@@ -4472,6 +4551,7 @@ private struct CreditActivityChart: View {
     let hoveredID: String?
     let onHover: (String?, Bool) -> Void
     @Environment(\.islandInterfaceLanguage) private var language
+    @Environment(\.islandColorTheme) private var theme
 
     private func visibleCost(_ bucket: CreditChartBucket) -> Double {
         max(showsStandard ? bucket.total.standardCredits : 0,
@@ -4490,7 +4570,7 @@ private struct CreditActivityChart: View {
                         CreditChartCombinedBar(
                             standardHeight: CGFloat(standard / maximum) * proxy.size.height,
                             actualHeight: CGFloat(actual / maximum) * proxy.size.height,
-                            width: 6.25, color: creditsGold,
+                            width: 6.25, color: theme.accent,
                             showsStandard: showsStandard, showsActual: showsActualCredits,
                             isHovered: hoveredID == bucket.id,
                             seed: tokenChartSketchSeed(bucket.id)
@@ -4503,8 +4583,8 @@ private struct CreditActivityChart: View {
                         ? bucket.label + language.text("：暂无本机用量记录", ": no local usage records")
                         : bucket.label + (bucket.total.unpricedCalls > 0
                             ? language.text("（仅可计价部分）", " (priced portion only)") : "") + language.text(
-                        "：本机标准 \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) 额度点；⚡实际 \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) 额度点。标准为不开启 Fast 时的用量；实际 − 标准为开启 Fast 浪费的额度。",
-                        ": local Standard \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) credits; ⚡ Actual \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) credits. Standard assumes Fast off; Actual minus Standard is the extra Fast cost."
+                        "：本机标准 \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) 额度点；实际 \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) 额度点。标准为不开启 Fast 时的用量；实际 − 标准为开启 Fast 浪费的额度。",
+                        ": local Standard \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) credits; Actual \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) credits. Standard assumes Fast off; Actual minus Standard is the extra Fast cost."
                     ))
                 }
             }
@@ -4719,7 +4799,7 @@ private struct QuotaMetric: View {
                     Text(remainingCreditsDisplay)
                         .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(creditsGold)
+                        .foregroundStyle(theme.accent)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .help(remainingCreditsHelp)
@@ -4799,7 +4879,7 @@ private struct QuotaMetric: View {
         .padding(2)
         .background(alignment: .leading) {
             Capsule()
-                .fill((showsRemainingCredits ? creditsGold : theme.accent).opacity(0.16))
+                .fill(theme.accent.opacity(0.16))
                 .frame(width: 39, height: 18)
                 .offset(x: showsRemainingCredits ? 41 : 2)
         }
@@ -4817,7 +4897,7 @@ private struct QuotaMetric: View {
             Text(title)
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .foregroundStyle(showsRemainingCredits == credits
-                    ? (credits ? creditsGold : theme.accent)
+                    ? theme.accent
                     : Color.white.opacity(0.38))
                 .frame(width: 39, height: 18)
                 .contentShape(Capsule())
