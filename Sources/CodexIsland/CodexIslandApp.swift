@@ -4,6 +4,10 @@ import AppKit
 enum CodexIslandApp {
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--check-resources") {
+            exit(CodexResourceProbe.run())
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

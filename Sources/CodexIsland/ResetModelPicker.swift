@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 enum ResetReasoningAppearance {
@@ -20,6 +19,10 @@ struct ResetModelPicker: View {
     let isLoadingModels: Bool
     let language: IslandInterfaceLanguage
     let theme: IslandColorTheme
+    var previewPresentation: Bool? = nil
+    var previewHoverIndex: Int? = nil
+    var onPresentationChange: (Bool) -> Void = { _ in }
+    @State private var isMenuPresented = false
     @State private var previewEffort: String?
 
     private var selectedModel: ResetAnalysisModel? { models.first { $0.id == settings.model } }
@@ -38,12 +41,14 @@ struct ResetModelPicker: View {
                 Spacer(minLength: 0)
                 resetButton
             }
+            .zIndex((previewPresentation ?? isMenuPresented) ? 1 : 0)
             ResetEffortSlider(
                 selection: $settings.reasoningEffort,
                 preview: $previewEffort,
                 efforts: efforts,
                 language: language,
-                theme: theme
+                theme: theme,
+                previewHoverIndex: previewHoverIndex
             )
             .frame(height: 24)
         }
@@ -52,10 +57,8 @@ struct ResetModelPicker: View {
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(0.035))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5))
         )
     }
 
@@ -69,11 +72,11 @@ struct ResetModelPicker: View {
                 Text("Fast")
                     .font(.system(size: 8, weight: .semibold, design: .rounded))
             }
-            .foregroundStyle(settings.fast ? accent : .white.opacity(0.40))
+            .foregroundStyle(settings.fast ? theme.accent : .white.opacity(0.40))
             .frame(width: 28, height: 30)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(settings.fast ? accent.opacity(0.10) : Color.clear)
+                    .fill(settings.fast ? theme.accent.opacity(0.10) : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -95,35 +98,59 @@ struct ResetModelPicker: View {
     }
 
     private var modelMenu: some View {
-        ZStack {
+        IslandSelectionPicker(
+            selection: Binding(get: { settings.model }, set: { id in
+                if let model = models.first(where: { $0.id == id }) { selectModel(model) }
+            }),
+            options: modelOptions, theme: theme,
+            accessibilityLabel: language.text("分析模型", "Analysis model"),
+            accessibilityIdentifier: "reset-analysis-model",
+            help: language.text("选择分析模型：", "Choose analysis model: ") + modelName,
+            placement: .below, menuWidth: 230, menuOverlap: -3,
+            previewPresentation: previewPresentation,
+            onPresentationChange: { isMenuPresented = $0; onPresentationChange($0) }
+        ) { presented, hovered in
             VStack(spacing: 1) {
                 HStack(spacing: 5) {
-                    Text((previewEffort ?? settings.reasoningEffort).capitalized)
-                        .font(.system(size: 16, weight: .medium, design: .rounded))
-                        .foregroundStyle(accent)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.36))
+                    Text(modelName)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: presented ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .opacity(0.58)
                 }
-                Text(modelName)
-                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.57))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                .foregroundStyle(theme.accent.opacity(presented || hovered ? 0.90 : 0.78))
+                HStack(spacing: 3) {
+                    Text(language.text("推理强度", "Reasoning"))
+                        .foregroundStyle(.white.opacity(0.40))
+                    Text((previewEffort ?? settings.reasoningEffort).capitalized)
+                        .foregroundStyle(accent.opacity(0.90))
+                }
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .lineLimit(1)
             }
+            .padding(.horizontal, 7)
             .frame(maxWidth: .infinity)
-            .accessibilityHidden(true)
-            ResetModelMenuAnchor(
-                models: models,
-                isLoadingModels: isLoadingModels,
-                selectedID: settings.model,
-                currentName: modelName,
-                effort: settings.reasoningEffort,
-                language: language,
-                onSelect: selectModel
-            )
+            .frame(height: 30)
+            .modifier(IslandPickerSurface(theme: theme, isActive: presented || hovered))
         }
         .frame(height: 30)
+    }
+
+    private var modelOptions: [IslandSelectionOption] {
+        guard !models.isEmpty else {
+            return [.init(id: "catalog-status", title: isLoadingModels
+                ? language.text("正在获取模型列表…", "Loading models…")
+                : language.text("模型暂不可用 · 自动重试", "Models unavailable · Retrying"), isEnabled: false)]
+        }
+        var options = models.map { IslandSelectionOption(id: $0.id, title: $0.displayName) }
+        if selectedModel == nil {
+            options.insert(.init(id: settings.model,
+                                 title: modelName + language.text("（当前不可用）", " (unavailable)"),
+                                 isEnabled: false), at: 0)
+        }
+        return options
     }
 
     private var resetButton: some View {
@@ -165,134 +192,17 @@ struct ResetModelPicker: View {
     }
 }
 
-/// SwiftUI's macOS Menu flattens a multi-line label into its native menu title.
-/// Keep the two-line artwork in SwiftUI and use a native, accessible button only
-/// for hit testing, keyboard focus, and presenting the catalog menu.
-private struct ResetModelMenuAnchor: NSViewRepresentable {
-    let models: [ResetAnalysisModel]
-    let isLoadingModels: Bool
-    let selectedID: String
-    let currentName: String
-    let effort: String
-    let language: IslandInterfaceLanguage
-    let onSelect: (ResetAnalysisModel) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> ResetMenuButton {
-        let button = ResetMenuButton(frame: .zero)
-        button.title = ""
-        button.isBordered = false
-        button.setButtonType(.momentaryPushIn)
-        button.target = context.coordinator
-        button.action = #selector(Coordinator.openMenu(_:))
-        button.setAccessibilityRole(.popUpButton)
-        button.setAccessibilityIdentifier("reset-analysis-model")
-        updateNSView(button, context: context)
-        return button
-    }
-
-    func updateNSView(_ button: ResetMenuButton, context: Context) {
-        context.coordinator.parent = self
-        button.toolTip = language.text("选择分析模型", "Choose an analysis model")
-        button.setAccessibilityLabel(language.text("分析模型", "Analysis model"))
-        button.setAccessibilityValue(currentName + ", " + effort.capitalized)
-        button.setAccessibilityHelp(button.toolTip)
-    }
-
-    final class Coordinator: NSObject {
-        var parent: ResetModelMenuAnchor
-
-        init(_ parent: ResetModelMenuAnchor) { self.parent = parent }
-
-        @objc func openMenu(_ sender: NSButton) {
-            let menu = NSMenu()
-            menu.autoenablesItems = false
-            menu.minimumWidth = sender.bounds.width
-            if !parent.models.isEmpty && !parent.models.contains(where: { $0.id == parent.selectedID }) {
-                let unavailable = NSMenuItem(
-                    title: parent.currentName + parent.language.text("（当前不可用）", " (currently unavailable)"),
-                    action: nil, keyEquivalent: ""
-                )
-                unavailable.isEnabled = false
-                menu.addItem(unavailable)
-            }
-            for model in parent.models {
-                let item = NSMenuItem(title: model.displayName, action: #selector(selectModel(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = model.id
-                item.state = model.id == parent.selectedID ? .on : .off
-                menu.addItem(item)
-            }
-            if parent.models.isEmpty {
-                let empty = NSMenuItem(
-                    title: parent.isLoadingModels
-                        ? parent.language.text("正在获取模型列表…", "Loading models…")
-                        : parent.language.text("模型列表暂不可用，将自动重试", "Models unavailable; retrying automatically"),
-                    action: nil, keyEquivalent: ""
-                )
-                empty.isEnabled = false
-                menu.addItem(empty)
-            }
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: sender)
-        }
-
-        @objc private func selectModel(_ sender: NSMenuItem) {
-            guard let id = sender.representedObject as? String,
-                  let model = parent.models.first(where: { $0.id == id }) else { return }
-            parent.onSelect(model)
-        }
-    }
-}
-
-final class ResetMenuButton: NSButton {
-    override var acceptsFirstResponder: Bool { true }
-
-    // The visible label belongs to SwiftUI. Draw only a native keyboard focus
-    // indicator; do not hide this control from the accessibility hierarchy.
-    override func draw(_ dirtyRect: NSRect) {
-        guard window?.firstResponder === self else { return }
-        NSColor.keyboardFocusIndicatorColor.withAlphaComponent(0.75).setStroke()
-        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
-        outline.lineWidth = 1
-        outline.stroke()
-    }
-
-    override func becomeFirstResponder() -> Bool {
-        let accepted = super.becomeFirstResponder()
-        needsDisplay = true
-        return accepted
-    }
-
-    override func resignFirstResponder() -> Bool {
-        let accepted = super.resignFirstResponder()
-        needsDisplay = true
-        return accepted
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if [36, 49, 125, 126].contains(event.keyCode) {
-            performClick(nil)
-        } else {
-            super.keyDown(with: event)
-        }
-    }
-
-    override func accessibilityPerformShowMenu() -> Bool {
-        performClick(nil)
-        return true
-    }
-}
-
 private struct ResetEffortSlider: View {
     @Binding var selection: String
     @Binding var preview: String?
     let efforts: [String]
     let language: IslandInterfaceLanguage
     let theme: IslandColorTheme
+    var previewHoverIndex: Int? = nil
+    @State private var hoveredIndex: Int?
     @State private var dragIndex: Int?
     @FocusState private var isFocused: Bool
-    private let knobSize: CGFloat = 22
+    private let knobSize: CGFloat = 20
 
     private var selectedIndex: Int? { efforts.firstIndex(of: selection) }
     private var isInteractive: Bool { efforts.count > 1 }
@@ -308,7 +218,7 @@ private struct ResetEffortSlider: View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 rail
-                    .frame(height: 18)
+                    .frame(height: 9)
                 if efforts.count > 1 {
                     ForEach(efforts.indices, id: \.self) { index in
                         Circle()
@@ -321,13 +231,38 @@ private struct ResetEffortSlider: View {
                     Circle()
                         .fill(Color.white.opacity(isInteractive ? 0.98 : 0.42))
                         .frame(width: knobSize, height: knobSize)
-                        .overlay(Circle().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5))
+                        .overlay(Circle().strokeBorder(
+                            isFocused ? theme.accent.opacity(0.45) : Color.black.opacity(0.12),
+                            lineWidth: isFocused ? 1 : 0.5))
                         .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                         .offset(x: center(for: index, width: geometry.size.width) - knobSize / 2)
                 }
             }
             .frame(height: 24)
             .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let point):
+                    hoveredIndex = efforts.isEmpty ? nil : index(at: point.x, width: geometry.size.width)
+                case .ended: hoveredIndex = nil
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if dragIndex == nil, let index = previewHoverIndex ?? hoveredIndex,
+                   efforts.indices.contains(index) {
+                    Text(efforts[index].capitalized)
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .frame(width: 54, height: 22)
+                        .background(RoundedRectangle(cornerRadius: 5)
+                            .fill(Color(red: 0.025, green: 0.028, blue: 0.036))
+                            .overlay(RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(.white.opacity(0.11), lineWidth: 0.5)))
+                        .offset(x: min(max(0, center(for: index, width: geometry.size.width) - 27),
+                                       max(0, geometry.size.width - 54)), y: 26)
+                        .allowsHitTesting(false)
+                }
+            }
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in
                     guard isInteractive else { return }
@@ -354,10 +289,6 @@ private struct ResetEffortSlider: View {
             @unknown default: break
             }
         }
-        .overlay(Capsule().strokeBorder(
-            ResetReasoningAppearance.accent(for: activeEffort, theme: theme)
-                .opacity(isFocused ? 0.65 : 0), lineWidth: 1
-        ).padding(-3))
         .accessibilityRepresentation {
             Slider(value: accessibleIndex, in: 0...Double(max(1, efforts.count - 1)), step: 1) {
                 Text(language.text("推理强度", "Reasoning effort"))
@@ -383,9 +314,9 @@ private struct ResetEffortSlider: View {
                          Color(red: 0.68, green: 0.44, blue: 0.86)],
                 startPoint: .leading, endPoint: .trailing
             ))
-            .opacity(isInteractive ? 0.90 : 0.35)
+            .opacity(isInteractive ? 0.65 : 0.25)
         } else {
-            Capsule().fill(theme.accent.opacity(isInteractive ? 0.62 : 0.16))
+            Capsule().fill(theme.accent.opacity(isInteractive ? 0.32 : 0.12))
         }
     }
 
@@ -414,6 +345,7 @@ private struct ResetEffortSlider: View {
 
     private func cancelPreview() {
         dragIndex = nil
+        hoveredIndex = nil
         preview = nil
     }
 }

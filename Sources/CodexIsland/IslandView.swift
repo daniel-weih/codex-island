@@ -443,48 +443,6 @@ final class IslandDisplayGeometry: ObservableObject {
 
 }
 
-@MainActor
-private enum TaskSoundPlayer {
-    private static let completionSound: NSSound? = {
-        let url = Bundle.module.url(
-            forResource: "TaskCompletion8Bit",
-            withExtension: "wav"
-        ) ?? Bundle.module.url(
-            forResource: "TaskCompletion",
-            withExtension: "mp3"
-        )
-        guard let url else {
-            return nil
-        }
-        return NSSound(contentsOf: url, byReference: false)
-    }()
-
-    private static let approvalSound: NSSound? = {
-        guard let url = Bundle.module.url(
-            forResource: "TaskApprovalAlert",
-            withExtension: "wav"
-        ) else {
-            return nil
-        }
-        return NSSound(contentsOf: url, byReference: false)
-    }()
-
-    static func playCompletion() {
-        play(completionSound)
-    }
-
-    static func playApproval() {
-        play(approvalSound)
-    }
-
-    private static func play(_ sound: NSSound?) {
-        sound?.stop()
-        if sound?.play() != true {
-            NSSound.beep()
-        }
-    }
-}
-
 struct IslandView: View {
     @ObservedObject var viewModel: CodexStatusViewModel
     @ObservedObject var displayGeometry: IslandDisplayGeometry
@@ -502,6 +460,8 @@ struct IslandView: View {
     private var storedLanguagePreference = IslandLanguagePreference.automatic.rawValue
     @AppStorage(IslandColorTheme.storageKey)
     private var storedColorTheme = IslandColorTheme.ocean.rawValue
+    @AppStorage("codexIsland.themeWatermarkEnabled")
+    private var themeWatermarkEnabled = true
     @State private var launchAtLoginSetting: LaunchAtLoginSettingModel
     @State private var activePopover: IslandPopoverPresentation?
     private var isIslandSettingsPresented: Bool { navigation.page == .islandSettings }
@@ -513,6 +473,9 @@ struct IslandView: View {
     private let initialPopover: IslandPopoverPresentation?
     private let initialTokenConsumptionPhase: Double?
     private let previewDisplayPickerPresentation: Bool?
+    private let previewModelPickerPresentation: Bool?
+    private let previewEffortHoverIndex: Int?
+    private let previewIntervalPickerPresentation: Bool?
     private let previewLanguagePreference: IslandLanguagePreference?
     private let previewColorTheme: IslandColorTheme?
     private let onCopyScreenshot: () -> Bool
@@ -530,6 +493,9 @@ struct IslandView: View {
         initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
+        previewIntervalPickerPresentation: Bool? = nil,
+        previewModelPickerPresentation: Bool? = nil,
+        previewEffortHoverIndex: Int? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         initialTokenChartRange: TokenChartRange = .days30,
@@ -550,6 +516,9 @@ struct IslandView: View {
         )
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
+        self.previewIntervalPickerPresentation = previewIntervalPickerPresentation
+        self.previewModelPickerPresentation = previewModelPickerPresentation
+        self.previewEffortHoverIndex = previewEffortHoverIndex
         _tokenChartRange = State(initialValue: initialTokenChartRange)
         _previousThreadStates = State(
             initialValue: Self.threadStates(
@@ -1018,6 +987,7 @@ struct IslandView: View {
                     displaySelection: displaySelection,
                     previewDisplayPickerPresentation: previewDisplayPickerPresentation,
                     colorTheme: colorThemeBinding,
+                    themeWatermarkEnabled: $themeWatermarkEnabled,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh,
                     subscription: resetSubscription,
@@ -1046,6 +1016,9 @@ struct IslandView: View {
                     language: interfaceLanguage,
                     theme: selectedColorTheme,
                     allowsNetworkRequests: usesTimelineUpdates,
+                    previewIntervalPickerPresentation: previewIntervalPickerPresentation,
+                    previewModelPickerPresentation: previewModelPickerPresentation,
+                    previewEffortHoverIndex: previewEffortHoverIndex,
                     onBack: navigation.back,
                     onDetails: { navigation.navigate(to: .resetDetails) }
                 )
@@ -1067,7 +1040,7 @@ struct IslandView: View {
 
     private var dashboardContent: some View {
         ZStack(alignment: .bottomTrailing) {
-            if selectedColorTheme.watermarkResourceName != nil {
+            if themeWatermarkEnabled, selectedColorTheme.watermarkResourceName != nil {
                 IslandThemeWatermark(theme: selectedColorTheme)
                     .frame(
                         width: selectedColorTheme.watermarkSize.width,
@@ -1784,6 +1757,7 @@ private struct IslandSettingsPanel: View {
     @ObservedObject var displaySelection: IslandDisplaySelectionModel
     let previewDisplayPickerPresentation: Bool?
     @Binding var colorTheme: IslandColorTheme
+    @Binding var themeWatermarkEnabled: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     @ObservedObject var subscription: ResetSubscriptionService
@@ -1878,11 +1852,12 @@ private struct IslandSettingsPanel: View {
                     Text(language.text("颜色风格", "Color theme"))
                         .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(1)
 
                     Text(
                         language.text(
-                            "当前：\(colorTheme.label(language: language)) · 黑底刘海适配",
-                            "\(colorTheme.label(language: language)) · black and notch safe"
+                            "当前：\(colorTheme.label(language: language))",
+                            colorTheme.label(language: language)
                         )
                     )
                         .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
@@ -1892,12 +1867,35 @@ private struct IslandSettingsPanel: View {
 
                 Spacer(minLength: 8)
 
-                IslandThemePicker(selection: $colorTheme)
+                HStack(spacing: 10) {
+                    IslandThemePicker(selection: $colorTheme)
+
+                    Rectangle()
+                        .fill(Color.white.opacity(0.09))
+                        .frame(width: 1 / max(1, displayScale), height: 22)
+
+                    HStack(spacing: 6) {
+                        Text(language.text("水印", "Watermark"))
+                            .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.56))
+
+                        Toggle(isOn: $themeWatermarkEnabled) {
+                            EmptyView()
+                        }
+                        .labelsHidden()
+                        .toggleStyle(IslandToggleStyle(tint: theme.accent))
+                        .frame(width: 30, height: 17)
+                        .accessibilityLabel(Text(language.text("显示水印", "Show watermark")))
+                        .accessibilityValue(Text(themeWatermarkEnabled
+                            ? language.text("开启", "On") : language.text("关闭", "Off")))
+                        .help(language.text("显示主题背景水印，不影响配色", "Show the theme watermark without changing its colors"))
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: true)
             }
             .padding(.horizontal, 9)
             .frame(height: 52)
-            .background(settingsCardBackground)
-            .overlay(settingsCardBorder)
+            .background { settingsCardBackground.overlay(settingsCardBorder) }
 
             HStack(spacing: 8) {
                 ZStack {
@@ -1982,8 +1980,7 @@ private struct IslandSettingsPanel: View {
             .padding(.horizontal, 9)
             .frame(maxWidth: .infinity)
             .frame(height: 56)
-            .background(settingsCardBackground)
-            .overlay(settingsCardBorder)
+            .background { settingsCardBackground.overlay(settingsCardBorder) }
 
             ResetSubscriptionSettingCard(
                 service: subscription,
@@ -2037,7 +2034,6 @@ private struct IslandDisplayPicker: View {
     private static let width: CGFloat = 116
     @ObservedObject var selection: IslandDisplaySelectionModel
 
-    @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
     @State private var isHovered = false
@@ -2103,47 +2099,15 @@ private struct IslandDisplayPicker: View {
     }
 
     private var pickerLabel: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "display")
-                .font(.system(size: 10.5, weight: .semibold))
-
-            Text(selectedLabel)
-                .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
-                .lineLimit(1)
-                .truncationMode(.tail)
-
-            Spacer(minLength: 1)
-
-            Image(systemName: isMenuPresented ? "chevron.up" : "chevron.down")
-                .font(.system(size: 7, weight: .bold))
-                .opacity(0.58)
-        }
-        .foregroundStyle(
-            theme.accent.opacity(isHovered || isMenuPresented ? 0.90 : 0.72)
+        IslandPickerLabel(
+            title: selectedLabel, systemImage: "display", theme: theme,
+            isPresented: isMenuPresented, isHovered: isHovered
         )
-        .padding(.horizontal, 7)
-        .frame(width: Self.width, height: 28)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(
-                    theme.accent.opacity(
-                        isHovered || isMenuPresented ? 0.12 : 0.07
-                    )
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(
-                    theme.accent.opacity(
-                        isHovered || isMenuPresented ? 0.18 : 0.10
-                    ),
-                    lineWidth: 1 / max(1, displayScale)
-                )
-        )
+        .frame(width: Self.width)
     }
 
     private var displayMenu: some View {
-        VStack(spacing: 1) {
+        VStack(spacing: IslandSelectionMenuStyle.spacing) {
             ForEach(selection.choices) { choice in
                 Button {
                     guard choice.isAvailable else { return }
@@ -2154,41 +2118,13 @@ private struct IslandDisplayPicker: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(
-                            systemName: choice.target == selection.preference
-                                ? "checkmark.circle.fill"
-                                : "circle"
-                        )
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(
-                                choice.target == selection.preference
-                                    ? theme.accent.opacity(0.86)
-                                    : Color.white.opacity(0.18)
-                            )
-                            .frame(width: 8)
-
-                        Text(optionLabel(for: choice))
-                            .font(
-                                .system(
-                                    size: IslandTypography.body,
-                                    weight: .semibold,
-                                    design: .rounded
-                                )
-                            )
-                            .foregroundStyle(
-                                choice.isAvailable
-                                    ? Color.white.opacity(0.72)
-                                    : Color.white.opacity(0.28)
-                            )
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 8)
-                    .frame(width: 142, height: 24)
-                    .contentShape(Rectangle())
+                    IslandSelectionMenuLabel(
+                        title: optionLabel(for: choice),
+                        isSelected: choice.target == selection.preference,
+                        theme: theme,
+                        isAvailable: choice.isAvailable
+                    )
+                    .frame(width: 142)
                 }
                 .buttonStyle(.plain)
                 .disabled(!choice.isAvailable)
@@ -2198,19 +2134,7 @@ private struct IslandDisplayPicker: View {
                 )
             }
         }
-        .padding(3)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color(red: 0.025, green: 0.028, blue: 0.036))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(
-                    Color.white.opacity(0.11),
-                    lineWidth: 1 / max(1, displayScale)
-                )
-        )
-        .shadow(color: .black.opacity(0.62), radius: 5, y: 2)
+        .modifier(IslandSelectionMenuStyle())
     }
 
     private var selectedLabel: String {
@@ -5228,10 +5152,7 @@ private struct IslandThemeWatermark: View {
 
     var body: some View {
         if let resourceName = theme.watermarkResourceName,
-           let image = Bundle.module.url(
-               forResource: resourceName,
-               withExtension: "png"
-           ).flatMap(NSImage.init(contentsOf:)) {
+           let image = AppResources.shared.image(named: resourceName) {
             Image(nsImage: image)
                 .resizable()
                 .renderingMode(theme.usesOriginalWatermarkColors ? .original : .template)

@@ -11,6 +11,9 @@ RESET_OUTPUT_DIR="$ROOT_DIR/.build/reset-subscription-checks"
 RESET_OUTPUT="$RESET_OUTPUT_DIR/ResetSubscriptionChecks"
 MODULE_CACHE="$ROOT_DIR/.build/test-module-cache"
 
+"$ROOT_DIR/scripts/test-resources.sh"
+"$ROOT_DIR/scripts/test-installer.sh"
+
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$SCREENSHOT_OUTPUT_DIR"
 mkdir -p "$RESET_OUTPUT_DIR"

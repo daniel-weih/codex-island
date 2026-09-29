@@ -941,6 +941,25 @@ enum CodexPreviewRenderer {
                 }
             }
             for theme in IslandColorTheme.allCases {
+                for unit in ResetIntervalUnit.allCases {
+                    let subscription = previewResetSubscription(language: language)
+                    var configuration = subscription.settings
+                    configuration.intervalUnit = unit
+                    try subscription.updateSettings(configuration)
+                    let url = directory.appendingPathComponent(
+                        "codex-island-interval-menu-\(language.rawValue)-\(theme.rawValue)-\(unit.rawValue).png"
+                    )
+                    try render(
+                        snapshot: language == .chinese ? snapshot : englishSnapshot,
+                        displayGeometry: geometry, expanded: true,
+                        previewIntervalPickerPresentation: true,
+                        previewLanguagePreference: language == .chinese ? .chinese : .english,
+                        previewColorTheme: theme,
+                        resetSubscription: subscription, initialPage: .resetSettings,
+                        size: expandedSize, to: url
+                    )
+                    outputURLs.append(url)
+                }
                 for effort in ["max", "ultra"] {
                     for fast in [false, true] {
                         let pickerSubscription = previewResetSubscription(language: language)
@@ -964,6 +983,40 @@ enum CodexPreviewRenderer {
                 }
             }
 
+            for state in [ResetPreviewState.ready, .catalogLoading, .catalogEmpty, .catalogLong] {
+                let subscription = previewResetSubscription(language: language, state: state)
+                let url = directory.appendingPathComponent("codex-island-model-menu-\(language.rawValue)-\(state.rawValue).png")
+                try render(
+                    snapshot: language == .chinese ? snapshot : englishSnapshot,
+                    displayGeometry: geometry, expanded: true,
+                    previewModelPickerPresentation: true,
+                    previewLanguagePreference: language == .chinese ? .chinese : .english,
+                    previewColorTheme: .meituan,
+                    resetSubscription: subscription, initialPage: .resetSettings,
+                    size: expandedSize, to: url
+                )
+                subscription.stop()
+                outputURLs.append(url)
+            }
+            for state in [ResetPreviewState.ready, .fetching, .analyzing, .failed] {
+                let subscription = previewResetSubscription(language: language, state: state)
+                for page in [IslandPage.resetSettings, .resetDetails] {
+                    let suffix = page == .resetSettings ? "settings" : "details"
+                    let url = directory.appendingPathComponent("codex-island-check-\(language.rawValue)-\(suffix)-\(state.rawValue).png")
+                    try render(
+                        snapshot: language == .chinese ? snapshot : englishSnapshot,
+                        displayGeometry: geometry, expanded: true,
+                        previewEffortHoverIndex: state == .ready && page == .resetSettings ? 2 : nil,
+                        previewLanguagePreference: language == .chinese ? .chinese : .english,
+                        previewColorTheme: .meituan,
+                        resetSubscription: subscription, initialPage: page,
+                        size: expandedSize, to: url
+                    )
+                    outputURLs.append(url)
+                }
+                subscription.stop()
+            }
+
             // Model availability may change after settings were saved. Ensure
             // the inline error still leaves every setting and action visible.
             let unavailableSubscription = previewResetSubscription(language: language)
@@ -984,7 +1037,13 @@ enum CodexPreviewRenderer {
         return outputURLs
     }
 
-    private static func previewResetSubscription(language: IslandInterfaceLanguage) -> ResetSubscriptionService {
+    private enum ResetPreviewState: String {
+        case ready, fetching, analyzing, failed, catalogLoading, catalogEmpty, catalogLong
+    }
+
+    private static func previewResetSubscription(
+        language: IslandInterfaceLanguage, state: ResetPreviewState = .ready
+    ) -> ResetSubscriptionService {
         let now = Date()
         var settings = ResetSubscriptionSettings()
         settings.enabled = true
@@ -1012,17 +1071,39 @@ enum CodexPreviewRenderer {
             fast: false,
             usage: nil
         )
-        let models = [
+        var models = [
             ResetAnalysisModel(id: "gpt-6-sol", displayName: "GPT-6 Sol", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], serviceTiers: [ResetServiceTier(id: "priority", name: "Fast")], defaultServiceTier: "default"),
             ResetAnalysisModel(id: "gpt-6-astra", displayName: "GPT-6 Astra", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], serviceTiers: [ResetServiceTier(id: "priority", name: "Fast")], defaultServiceTier: "default")
         ]
-        return ResetSubscriptionService(
+        if state == .catalogLong {
+            models += (1...6).map { index in
+                ResetAnalysisModel(id: "preview-model-\(index)", displayName: "Preview model \(index)",
+                                   reasoningEfforts: ["medium", "high"], serviceTiers: [], defaultServiceTier: nil)
+            }
+        }
+        let service = ResetSubscriptionService(
             settings: settings, persistenceEnabled: false,
-            initialReport: report, initialModels: models,
-            fetch: { _ in throw ResetSubscriptionError.source("Preview only") },
-            analyze: { _, _ in throw ResetSubscriptionError.analysis("Preview only") },
-            listModels: { models }
+            initialReport: report,
+            initialModels: [.catalogLoading, .catalogEmpty].contains(state) ? [] : models,
+            fetch: { url in
+                if state == .fetching { try await Task.sleep(nanoseconds: 60_000_000_000) }
+                if state == .failed { throw ResetSubscriptionError.source("Preview: source unavailable") }
+                return ResetSourceSnapshot(url: url, fetchedAt: Date(), text: "Preview update",
+                                           fingerprint: "preview-new-update", event: nil)
+            },
+            analyze: { _, _ in
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+                throw CancellationError()
+            },
+            listModels: {
+                if state == .catalogLoading { try await Task.sleep(nanoseconds: 60_000_000_000) }
+                return state == .catalogEmpty ? [] : models
+            }
         )
+        if [.catalogLoading, .catalogEmpty].contains(state) { service.loadModels() }
+        if [.fetching, .analyzing, .failed].contains(state) { service.checkNow() }
+        if state != .ready { RunLoop.main.run(until: Date().addingTimeInterval(0.08)) }
+        return service
     }
 
     private static func previewDailyUsageBuckets(now: Date = Date()) -> [DailyUsageBucket] {
@@ -1093,6 +1174,9 @@ enum CodexPreviewRenderer {
         initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
+        previewIntervalPickerPresentation: Bool? = nil,
+        previewModelPickerPresentation: Bool? = nil,
+        previewEffortHoverIndex: Int? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         initialTokenChartRange: TokenChartRange = .days30,
@@ -1111,7 +1195,7 @@ enum CodexPreviewRenderer {
         let previousArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         var arguments = previousArguments
         if let enabled = previewSettingsEnabled {
-            for key in ["statusAnimationsEnabled", "tokenConsumptionEffectEnabled", "completionSoundEnabled"] {
+            for key in ["statusAnimationsEnabled", "tokenConsumptionEffectEnabled", "completionSoundEnabled", "themeWatermarkEnabled"] {
                 arguments["codexIsland.\(key)"] = enabled
             }
         }
@@ -1172,6 +1256,9 @@ enum CodexPreviewRenderer {
                 ? initialHoveredChartLegend : nil,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,
+            previewIntervalPickerPresentation: previewIntervalPickerPresentation,
+            previewModelPickerPresentation: previewModelPickerPresentation,
+            previewEffortHoverIndex: previewEffortHoverIndex,
             initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
             initialTokenChartRange: initialTokenChartRange,

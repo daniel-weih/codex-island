@@ -106,11 +106,15 @@ open "dist/Codex Island.app"
 open "dist/Codex-Island.dmg"
 ```
 
+DMG 构建并校验成功后，`dist` 只保留 DMG 文件，清除本次临时构建产物、暂存应用、预览及其他非 DMG 输出；本次打包的临时工作目录在成功或失败后都会清理。两个打包脚本都支持向 `swift build` 透传参数，如 `--sdk /path/to/MacOSX.sdk`。
+
+新构建的 DMG 中，双击 **Install Codex Island（安装或更新）** 即可安装到“应用程序”。安装器会校验新版本、正常退出旧版、原子替换并重新打开，保留账户和偏好设置；校验或替换失败时保留或恢复旧版。这个入口也可避开 Finder 拖拽覆盖时偶发的重名错误。“应用程序”快捷方式仍可用于手动安装。
+
 ### 直接下载 DMG（备选）
 
-**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.24/Codex-Island.dmg)**
+**[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.29/Codex-Island.dmg)**
 
-当前版本为 `v2026.09.24`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
+当前版本为 `v2026.09.29`，支持 macOS 13 及以上的 Apple Silicon Mac。安装包使用 ad-hoc 签名；首次启动若被 macOS 拦截，请在 Finder 中按住 Control 点按应用，选择“打开”。
 
 ### 开机启动
 
@@ -124,11 +128,13 @@ open "dist/Codex-Island.dmg"
 CODEX_CLI_PATH=/path/to/codex swift run
 ```
 
-运行解析器检查：
+运行检查，包括资源缺失、损坏和应用移动后的回归用例：
 
 ```bash
 ./scripts/test.sh
 ```
+
+打包时还会通过应用的 `--check-resources` 检查实际加载和解码图片、提示音，不启动业务服务或播放声音。运行时从已安装应用自身定位资源：水印不可用时省略显示，任务提示音不可用时回退到系统提示音。
 
 只读检查本机 App Server 连接（不会打印 token、邮箱和会话正文）：
 
@@ -153,6 +159,7 @@ swift run CodexIsland --render-preview dist/previews
 - Profile 头像、昵称、账户累计词元，以及可切换的近 30 日每日 / 过去 48 小时每小时用量柱图；词元模式显示实际数量，额度点模式可展示标准费用、实际总费用或两者，并可悬停查看口径说明
 - 点击展开态的非会话区域可激活 Codex App；右上角依次提供截图复制、打开 Codex 设置、打开灵动岛设置和退出按钮
 - 灵动岛设置支持状态动效、Token 消耗动效、任务完成音效、品牌配色、界面语言、显示器选择与开机启动；任务完成音效与开机启动默认关闭；显示位置默认自动，也可固定到内建屏或任一已连接外接屏，目标屏断开时临时回退并在重连后自动恢复
+- 配色旁的水印开关默认开启并独立保存，关闭后可保留主题颜色而不显示背景图形，切换主题也会沿用该偏好。
 - Codex 账户套餐，以及最近三条 CLI/App 会话各自的来源、精简模型名（如 `5.6-Sol`）、推理强度和 Fast 状态；执行中的任务优先展示
 - 最近三条会话的近实时执行状态：执行中、空闲、已中断或失败
 - 最近三条会话的累计 Token；悬停数值可查看输入、缓存输入、输出与推理输出明细

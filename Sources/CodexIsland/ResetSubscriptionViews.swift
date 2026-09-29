@@ -376,22 +376,11 @@ struct ResetSubscriptionDetailsPage: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
-            Text(service.isRefreshing ? ResetSubscriptionPresentation.phase(service.phase, language: language) : language.text("网站动态独立于账号配额", "Source updates are separate from account limits"))
-                .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.32))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            Button { service.checkNow() } label: {
-                Label(language.text("立即检查", "Check now"), systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-            .foregroundStyle(theme.accent.opacity(service.isRefreshing ? 0.4 : 0.9))
-            .disabled(service.isRefreshing)
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 34)
+        ResetSubscriptionFooter(
+            service: service, language: language, theme: theme,
+            idleMessage: language.text("网站动态独立于账号配额", "Source updates are separate from account limits"),
+            onCheck: { service.checkNow() }
+        )
     }
 
     private func sectionLabel(_ title: String) -> some View {
@@ -416,26 +405,84 @@ struct ResetSubscriptionDetailsPage: View {
     }
 }
 
+/// Both tracking pages share the same action and progress/error feedback.
+private struct ResetSubscriptionFooter: View {
+    @ObservedObject var service: ResetSubscriptionService
+    let language: IslandInterfaceLanguage
+    let theme: IslandColorTheme
+    let idleMessage: String
+    var settingsError: String? = nil
+    var isCheckDisabled = false
+    let onCheck: () -> Void
+
+    private var isDisabled: Bool { service.isRefreshing || isCheckDisabled }
+    private var message: String {
+        if service.isRefreshing { return ResetSubscriptionPresentation.phase(service.phase, language: language) }
+        if settingsError != nil { return language.text("设置有误 · 尚未保存", "Settings need attention · Not saved") }
+        if service.lastError != nil { return language.text("检查失败 · 可重试", "Check failed · Try again") }
+        return idleMessage
+    }
+    private var actionTitle: String {
+        if service.isRefreshing { return language.text("检查中…", "Checking…") }
+        return service.lastError == nil
+            ? language.text("立即检查", "Check now") : language.text("重试检查", "Retry check")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(message)
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(!service.isRefreshing && (settingsError != nil || service.lastError != nil)
+                    ? Color.orange.opacity(0.80) : .white.opacity(0.32))
+                .lineLimit(1)
+                .help(settingsError ?? service.lastError ?? message)
+                .accessibilityIdentifier("reset-check-status")
+            Spacer(minLength: 0)
+            Button(action: onCheck) {
+                Label(actionTitle, systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+            .foregroundStyle(theme.accent.opacity(isDisabled ? 0.4 : 0.9))
+            .fixedSize()
+            .disabled(isDisabled)
+            .accessibilityIdentifier("reset-check-now")
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 34)
+    }
+}
+
 struct ResetSubscriptionSettingsPage: View {
     @ObservedObject var service: ResetSubscriptionService
     let language: IslandInterfaceLanguage
     let theme: IslandColorTheme
     let allowsNetworkRequests: Bool
+    let previewIntervalPickerPresentation: Bool?
+    let previewModelPickerPresentation: Bool?
+    let previewEffortHoverIndex: Int?
     let onBack: () -> Void
     let onDetails: () -> Void
     @State private var draft: ResetSubscriptionSettings
     @State private var intervalText: String
     @State private var saveError: String?
     @State private var pendingSave: Task<Void, Never>?
+    @State private var isModelMenuPresented = false
+    @State private var isIntervalMenuPresented = false
     @FocusState private var focusedField: Field?
     private enum Field: Hashable { case url, interval }
 
     init(service: ResetSubscriptionService, language: IslandInterfaceLanguage, theme: IslandColorTheme,
-         allowsNetworkRequests: Bool, onBack: @escaping () -> Void, onDetails: @escaping () -> Void) {
+         allowsNetworkRequests: Bool, previewIntervalPickerPresentation: Bool? = nil,
+         previewModelPickerPresentation: Bool? = nil, previewEffortHoverIndex: Int? = nil,
+         onBack: @escaping () -> Void, onDetails: @escaping () -> Void) {
         self.service = service
         self.language = language
         self.theme = theme
         self.allowsNetworkRequests = allowsNetworkRequests
+        self.previewIntervalPickerPresentation = previewIntervalPickerPresentation
+        self.previewModelPickerPresentation = previewModelPickerPresentation
+        self.previewEffortHoverIndex = previewEffortHoverIndex
         self.onBack = onBack
         self.onDetails = onDetails
         _draft = State(initialValue: service.settings)
@@ -451,11 +498,18 @@ struct ResetSubscriptionSettingsPage: View {
             )
             VStack(spacing: 8) {
                 sourceRow
-                ResetModelPicker(settings: $draft, models: service.models, isLoadingModels: service.isLoadingModels,
-                                 language: language, theme: theme)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: ResetModelPicker.height)
+                ResetModelPicker(
+                    settings: $draft, models: service.models, isLoadingModels: service.isLoadingModels,
+                    language: language, theme: theme,
+                    previewPresentation: previewModelPickerPresentation,
+                    previewHoverIndex: previewEffortHoverIndex,
+                    onPresentationChange: { isModelMenuPresented = $0 }
+                )
+                .frame(maxWidth: .infinity)
+                .frame(height: ResetModelPicker.height)
+                .zIndex((previewModelPickerPresentation ?? isModelMenuPresented) ? 2 : 1)
                 scheduleRow
+                    .zIndex((previewIntervalPickerPresentation ?? isIntervalMenuPresented) ? 2 : 0)
                 optionsRow
                 if let error = displayedError {
                     Label(error, systemImage: "exclamationmark.circle")
@@ -516,10 +570,13 @@ struct ResetSubscriptionSettingsPage: View {
                 .help(language.text("检查间隔：1 分钟至 7 天", "Check interval: 1 minute to 7 days"))
                 .accessibilityLabel(language.text("检查间隔", "Check interval"))
                 .accessibilityIdentifier("reset-check-interval")
-            ResetIntervalUnitPicker(selection: $draft.intervalUnit, language: language)
+            ResetIntervalUnitPicker(
+                selection: $draft.intervalUnit, language: language, theme: theme,
+                previewPresentation: previewIntervalPickerPresentation,
+                onPresentationChange: { isIntervalMenuPresented = $0 }
+            )
                 .frame(maxWidth: .infinity)
-                .frame(height: 30)
-                .background(fieldBackground)
+                .frame(height: ResetIntervalUnitPicker.height)
         }
         .frame(height: 30)
     }
@@ -556,20 +613,15 @@ struct ResetSubscriptionSettingsPage: View {
     }
 
     private var settingsFooter: some View {
-        HStack {
-            Spacer()
-            Button(language.text("立即检查", "Check now")) {
-                commit()
-                if validationError == nil && saveError == nil { service.checkNow() }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(theme.accent.opacity(service.isRefreshing || validationError != nil ? 0.4 : 0.9))
-            .disabled(service.isRefreshing || validationError != nil)
+        ResetSubscriptionFooter(
+            service: service, language: language, theme: theme,
+            idleMessage: language.text("设置自动保存", "Settings save automatically"),
+            settingsError: validationError ?? saveError,
+            isCheckDisabled: validationError != nil
+        ) {
+            commit()
+            if validationError == nil && saveError == nil { service.checkNow() }
         }
-        .font(.system(size: 11.5, weight: .medium, design: .rounded))
-        .frame(height: 26)
-        .padding(.horizontal, 18)
-        .padding(.bottom, 3)
     }
 
     private var displayedError: String? {

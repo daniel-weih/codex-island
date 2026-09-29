@@ -106,11 +106,15 @@ Package the app, DMG, and mounted-volume icon:
 open "dist/Codex-Island.dmg"
 ```
 
+After a successful DMG build and validation, `dist` keeps only DMG files. The temporary build, staging app, previews, and other non-DMG output are removed; the packaging workspace is cleaned on success or failure. Both packaging scripts forward arguments such as `--sdk /path/to/MacOSX.sdk` to `swift build`.
+
+In newly built disk images, double-click **Install Codex Island** to install or update the app in Applications. It validates the new app, quits the installed version, replaces it atomically, and opens it again. Account data and preferences are preserved. If validation or replacement fails, the previous app is kept or restored. This also avoids Finder's intermittent duplicate-name error when replacing an app by dragging it. The Applications shortcut remains available for manual installation.
+
 ### Download the DMG (Alternative)
 
-**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.24/Codex-Island.dmg)**
+**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.29/Codex-Island.dmg)**
 
-The current release is `v2026.09.24` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
+The current release is `v2026.09.29` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
 
 ### Launch at Login
 
@@ -124,11 +128,13 @@ If `codex` is not in a common executable path, specify it explicitly:
 CODEX_CLI_PATH=/path/to/codex swift run
 ```
 
-Run parser checks:
+Run the checks, including missing/corrupt resource and relocated-app regression cases:
 
 ```bash
 ./scripts/test.sh
 ```
+
+Packaging also runs `--check-resources` on the built app to decode its bundled images and sounds without starting services or playing audio. Runtime resource loading uses the installed app's own paths: unavailable watermarks are omitted, and unavailable task sounds fall back to the system alert.
 
 Probe the local App Server connection in read-only mode (without printing tokens, email addresses, or thread content):
 
@@ -153,6 +159,7 @@ swift run CodexIsland --render-preview dist/previews
 - Profile avatar and name, lifetime account tokens, and switchable charts for the latest 30 calendar days or previous 48 hours; Tokens mode shows actual tokens; Credits mode can show Standard cost, Actual cost, or both, with hover explanations
 - Activation of the Codex App by clicking any non-thread area in the expanded island; the top-right actions can copy a transparent rounded PNG, open Codex settings, open Island settings, or quit the app
 - Settings for status animation, token-consumption animation, task-completion sound, color theme, interface language, target display, and launch at login; the completion sound and launch at login are disabled by default; target display defaults to automatic and can be pinned to the built-in display or any connected external display, with temporary fallback after disconnection and automatic restoration after reconnection
+- The watermark switch beside the color themes defaults to on and is saved independently, so any theme can keep its colors without showing the background graphic.
 - Codex account plan plus the source, compact model name (for example `5.6-Sol`), reasoning effort, and Fast status of the three most recent CLI/App threads, with running threads prioritized
 - Near-real-time execution state for the three most recent threads: running, idle, interrupted, or failed
 - Cumulative token usage for the three most recent threads, with input, cached-input, output, and reasoning-output details on hover
