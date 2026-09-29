@@ -112,9 +112,9 @@ In newly built disk images, double-click **Install Codex Island** to install or 
 
 ### Download the DMG (Alternative)
 
-**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/download/v2026.09.29/Codex-Island.dmg)**
+**[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**
 
-The current release is `v2026.09.29` and supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
+The latest published DMG supports Apple Silicon Macs running macOS 13 or later. The package uses an ad-hoc signature. If macOS blocks the first launch, Control-click the app in Finder and choose **Open**.
 
 ### Launch at Login
 
