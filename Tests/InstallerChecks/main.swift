@@ -102,7 +102,7 @@ enum InstallerChecks {
             try fm.copyItem(at: source, to: destination)
             installer.validate = { app in
                 _ = try AppInstaller.bundleExecutable(app)
-                if app == destination {
+                if app.resolvingSymlinksInPath().path == destination.resolvingSymlinksInPath().path {
                     try fm.moveItem(at: destination, to: destination.appendingPathExtension("moved"))
                     try fixture(destination, marker: "other")
                 }

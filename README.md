@@ -112,8 +112,8 @@ In newly built disk images, double-click **Install Codex Island** to install or 
 
 The installer exits automatically and does not add a Dock icon. Opening the same installer again only opens the installed app when its contents already match; it does not reinstall or restart that app.
 
-Pushing an annotated `vYYYY.MM.DD` tag matching the app version runs the installer checks and builds the DMG on an Apple Silicon GitHub runner. The release uses the tag annotation as its notes and is published only after the uploaded DMG's SHA-256 matches the build output.
-If a release needs to be retried, push a `release/vYYYY.MM.DD` branch. The workflow still checks out the existing tag and leaves published assets intact.
+Pushing an annotated `vYYYY.MM.DD` tag (or `vYYYY.MM.DD-N` for a later build that day) matching the app version runs the installer checks and builds the DMG on an Apple Silicon GitHub runner. The release uses the tag annotation as its notes and is published only after the uploaded DMG's SHA-256 matches the build output.
+If a release needs to be retried, push a `release/<tag>` branch. The workflow still checks out the existing tag and leaves published assets intact.
 
 ### Download the DMG (Alternative)
 

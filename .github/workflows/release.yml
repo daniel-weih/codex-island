@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: publish-dmg
   cancel-in-progress: false
@@ -25,7 +29,7 @@ jobs:
       - name: Select release tag
         run: |
           tag="${GITHUB_REF_NAME#release/}"
-          [[ "$tag" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]
+          [[ "$tag" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-[1-9][0-9]*)?$ ]]
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -39,68 +43,41 @@ jobs:
           python3 - <<'PY'
           import os, platform, plistlib, re
           tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v\d{4}\.\d{2}\.\d{2}', tag), 'Expected a vYYYY.MM.DD tag'
+          assert re.fullmatch(r'v\d{4}\.\d{2}\.\d{2}(?:-[1-9]\d*)?', tag), 'Expected a vYYYY.MM.DD tag'
           with open('Packaging/Info.plist', 'rb') as stream:
               info = plistlib.load(stream)
-          version = '.'.join(str(int(part)) for part in tag[1:].split('.'))
+          version = '.'.join(str(int(part)) for part in tag[1:].split('-')[0].split('.'))
           assert info['CFBundleShortVersionString'] == version, 'Tag and app version differ'
           assert platform.machine() == 'arm64', 'An Apple Silicon runner is required'
           PY
 
       - name: Test installer
+        id: installer
         run: ./scripts/test-installer.sh 2>&1 | tee "$RUNNER_TEMP/installer-checks.log"
 
       - name: Build and verify DMG
+        id: package
         run: ./scripts/package_dmg.sh 2>&1 | tee "$RUNNER_TEMP/package-dmg.log"
 
       - name: Upload, verify, and publish
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          exec > >(tee "$RUNNER_TEMP/publish.log") 2>&1
-          notes="$RUNNER_TEMP/release-notes.md"
-          git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$RELEASE_TAG" > "$notes"
-          python3 - "$notes" <<'PY'
-          import hashlib, pathlib, sys
-          asset = pathlib.Path('dist/Codex-Island.dmg')
-          digest = hashlib.sha256(asset.read_bytes()).hexdigest()
-          with open(sys.argv[1], 'a', encoding='utf-8') as stream:
-              stream.write(f'\nSHA-256: `{digest}`\n')
-          PY
-
-          # Resume incomplete drafts, but never replace an already published asset.
-          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/is-draft" 2>/dev/null; then
-            if [[ "$(cat "$RUNNER_TEMP/is-draft")" != true ]]; then
-              echo "Release is already published; existing assets are unchanged."
-              exit 0
-            fi
-            gh release edit "$RELEASE_TAG" --title "Codex Island $RELEASE_TAG" --notes-file "$notes"
-            gh release upload "$RELEASE_TAG" dist/Codex-Island.dmg --clobber
-          else
-            gh release create "$RELEASE_TAG" dist/Codex-Island.dmg --draft --verify-tag \
-              --title "Codex Island $RELEASE_TAG" --notes-file "$notes"
-          fi
-
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
-          python3 - "$RUNNER_TEMP/release.json" <<'PY'
-          import hashlib, json, os, pathlib, sys
-          release = json.loads(pathlib.Path(sys.argv[1]).read_text())
-          asset = pathlib.Path('dist/Codex-Island.dmg')
-          assert release['tag_name'] == os.environ['RELEASE_TAG'] and release['draft']
-          matches = [item for item in release['assets'] if item['name'] == asset.name]
-          assert len(matches) == 1 and matches[0]['state'] == 'uploaded'
-          assert matches[0]['size'] == asset.stat().st_size
-          assert matches[0]['digest'] == 'sha256:' + hashlib.sha256(asset.read_bytes()).hexdigest()
-          PY
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+        run: ./scripts/publish_release.sh 2>&1 | tee "$RUNNER_TEMP/publish.log"
 
       - name: Report failed checks
         if: failure()
+        env:
+          INSTALLER_OUTCOME: ${{ steps.installer.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
         run: |
           python3 - <<'PYDIAG'
           import os, pathlib
-          for name in ('installer-checks', 'package-dmg', 'publish'):
+          for name, key in (('installer-checks', 'INSTALLER'), ('package-dmg', 'PACKAGE'), ('publish', 'PUBLISH')):
+              if os.environ[f'{key}_OUTCOME'] != 'failure':
+                  continue
               path = pathlib.Path(os.environ['RUNNER_TEMP']) / f'{name}.log'
               if path.exists():
                   detail = path.read_text(errors='replace')[-6000:]
