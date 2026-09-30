@@ -4,13 +4,15 @@
 
 ## 官方费率
 
-GPT-6 费率与 Fast 倍率最近核验于 **2026-09-23**；保留旧模型的历史参考费率：
+GPT-6 / GPT-6.1 费率与 Fast 倍率最近核验于 **2026-09-30**；保留旧模型的历史参考费率：
 
 - [各模型 Token / Credits 费率](https://learn.chatgpt.com/docs/pricing#token-rates)
 - [ChatGPT Work / Codex credit rate card](https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing)
 - [Fast 模式倍率](https://learn.chatgpt.com/docs/agent-configuration/speed)
 
-GPT-6 Astra、Sol、Luna 在提供 Fast 时均按标准费用的 **2.5×** 计算。每百万普通输入、缓存输入、输出 Token 的标准 credits 分别为：Astra `250 / 25 / 1,250`，Sol `50 / 5 / 250`，Luna `2.5 / 0.25 / 12.5`。相同的 Fast 倍率不代表相同的基础费率。
+应用按订阅内额度估算。GPT-6.1 Sol 和 GPT-6 Astra、Sol、Luna 在提供 Fast 时均按标准消耗的 **2.5×** 计算。购买的 credits 和 Enterprise 按量付费采用 **2×** Fast 倍率；本机日志无法区分单次调用使用哪种额度，因此应用不单独估算这两类扣费。API Key 计费另有规则。
+
+每百万普通输入、缓存输入、输出 Token 的标准 credits 分别为：GPT-6.1 Sol `50 / 2.5 / 250`，GPT-6 Astra `250 / 25 / 1,250`，GPT-6 Sol `50 / 5 / 250`，GPT-6 Luna `2.5 / 0.25 / 12.5`。GPT-6.1 Sol 的缓存输入费率是 GPT-6 Sol 的一半，其余两项相同。相同的 Fast 倍率不代表相同的基础费率。
 
 参考费率集中维护在 `CodexCreditRateCard`，未列出的模型、无法确认的模型别名及无明细的历史记录不猜价格。例如 GPT-5.5 的 20,000 普通输入、80,000 缓存输入和 5,000 输出，参考成本为 7.25 credits。
 

@@ -3,9 +3,12 @@ import Foundation
 typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
-    // https://learn.chatgpt.com/docs/agent-configuration/speed (verified 2026-09-23)
+    // Included-subscription usage multipliers, verified 2026-09-30.
+    // Purchased credits use a separate billing multiplier (2x for Fast).
+    // https://learn.chatgpt.com/docs/agent-configuration/speed
     private static let modelFamilyMultipliers: [(family: String, multiplier: Double)] = [
         ("gpt-6-astra", 2.5),
+        ("gpt-6.1-sol", 2.5),
         ("gpt-6-sol", 2.5),
         ("gpt-6-luna", 2.5),
         ("gpt-5.6", 2.5),
@@ -13,7 +16,7 @@ enum CodexFastModeUsagePolicy {
         ("gpt-5.4", 2.0)
     ]
 
-    /// Returns the official ChatGPT Fast-to-Standard credit multiplier.
+    /// Returns the official included-subscription Fast-to-Standard multiplier.
     /// Models outside the documented Fast support list are left unpriced
     /// instead of guessing a multiplier.
     static func multiplier(for model: String?) -> Double? {

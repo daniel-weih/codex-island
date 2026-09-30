@@ -1,13 +1,13 @@
 import Foundation
 
 /// A dated rate card, not a fixed allowance for any subscription plan.
-/// Current GPT-6 rates and Fast multipliers verified 2026-09-23.
+/// Current GPT-6 / GPT-6.1 rates verified 2026-09-30.
 /// Older model rates retained from the 2026-09-07 rate card.
 /// https://learn.chatgpt.com/docs/pricing#token-rates
 /// https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing
 /// https://learn.chatgpt.com/docs/agent-configuration/speed
 enum CodexCreditRateCard {
-    static let revision = "2026-09-23"
+    static let revision = "2026-09-30"
 
     struct Rate: Equatable {
         var input: Double
@@ -17,6 +17,7 @@ enum CodexCreditRateCard {
 
     private static let rates: [String: Rate] = [
         "gpt-6-astra": Rate(input: 250, cachedInput: 25, output: 1_250),
+        "gpt-6.1-sol": Rate(input: 50, cachedInput: 2.5, output: 250),
         "gpt-6-sol": Rate(input: 50, cachedInput: 5, output: 250),
         "gpt-6-luna": Rate(input: 2.5, cachedInput: 0.25, output: 12.5),
         "gpt-5.6-sol": Rate(input: 100, cachedInput: 10, output: 500),

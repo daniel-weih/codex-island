@@ -55,10 +55,10 @@ The Tokens / Credits switch controls the remaining-usage display, the 30-day / 4
 
 Session hover cards show “TOTAL USAGE,” with the selected measure first and the other measure in parentheses. Tokens and credits both follow the selected theme, including credit balances, charts, legends, and the mode switch. See [calculation details and sources](docs/token-estimate.md).
 
-Official sources (verified September 23, 2026):
+Official sources (verified September 30, 2026):
 
-- [Model credit rates](https://learn.chatgpt.com/docs/pricing#token-rates): separate rates per million uncached input, cached input, and output tokens.
-- [Fast mode and credit multipliers](https://learn.chatgpt.com/docs/agent-configuration/speed): **2.5×** Standard consumption for GPT-6 (Astra, Sol, and Luna), GPT-5.6, and GPT-5.5; **2×** for GPT-5.4. These are credit multipliers where Fast is available, distinct from speed improvements. API-key billing follows separate rules.
+- [Model credit rates](https://learn.chatgpt.com/docs/pricing#token-rates): separate rates per million uncached input, cached input, and output tokens. GPT-6.1 Sol uses **50 / 2.5 / 250 credits**, compared with GPT-6 Sol's **50 / 5 / 250**; its cached-input rate is half as much.
+- [Fast mode and allowance multipliers](https://learn.chatgpt.com/docs/agent-configuration/speed): the app estimates included subscription consumption at **2.5×** Standard for GPT-6.1 Sol, GPT-6 (Astra, Sol, and Luna), GPT-5.6, and GPT-5.5 where Fast is available. Purchased credits and Enterprise pay-as-you-go use **2×** for Fast; logs do not identify which allowance funded a call, so the app does not estimate those charges separately. The historical GPT-5.4 **2×** reference is retained. API-key billing follows separate rules.
 
 When a session switches models or Fast mode, the app prices each call using its recorded settings and sums the results; the final model does not reprice the entire session. The formula is `credits = Σ[(uncached input × input rate + cached input × cache rate + output × output rate) / 1,000,000 × call multiplier]`. Rates come from the app’s maintained reference table; changes to the official website do not automatically update local rates.
 
