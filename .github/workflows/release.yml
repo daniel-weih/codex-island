@@ -48,10 +48,23 @@ jobs:
           PY
 
       - name: Test installer
-        run: ./scripts/test-installer.sh
+        run: ./scripts/test-installer.sh 2>&1 | tee "$RUNNER_TEMP/installer-checks.log"
 
       - name: Build and verify DMG
-        run: ./scripts/package_dmg.sh
+        run: ./scripts/package_dmg.sh 2>&1 | tee "$RUNNER_TEMP/package-dmg.log"
+
+      - name: Report failed checks
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          for name in ('installer-checks', 'package-dmg'):
+              path = pathlib.Path(os.environ['RUNNER_TEMP']) / f'{name}.log'
+              if path.exists():
+                  detail = path.read_text(errors='replace')[-6000:]
+                  detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::error title={name}::{detail}')
+          PY
 
       - name: Upload, verify, and publish
         env:
