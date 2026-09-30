@@ -110,6 +110,10 @@ DMG 构建并校验成功后，`dist` 只保留 DMG 文件，清除本次临时�
 
 新构建的 DMG 中，双击 **Install Codex Island（安装或更新）** 即可安装到“应用程序”。安装器会校验新版本、正常退出旧版、原子替换并重新打开，保留账户和偏好设置；校验或替换失败时保留或恢复旧版。这个入口也可避开 Finder 拖拽覆盖时偶发的重名错误。“应用程序”快捷方式仍可用于手动安装。
 
+安装器完成后会自动退出，不显示 Dock 图标。再次打开同一个安装器时，如果已安装应用的内容完全一致，只会打开该应用，不会重复安装或重启它。
+
+推送与应用版本一致的 `vYYYY.MM.DD` 附注标签后，GitHub 会在 Apple Silicon 构建机上运行安装器检查并生成 DMG。标签说明用作 Release 更新说明，上传后的 SHA-256 与构建产物一致才会正式发布。
+
 ### 直接下载 DMG（备选）
 
 **[下载 Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**

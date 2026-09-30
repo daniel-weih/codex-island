@@ -45,8 +45,8 @@ enum InstallerMain {
             do {
                 var installer = AppInstaller()
                 installer.stopApplication = InstalledApplication.stop
-                try installer.install(from: URL(fileURLWithPath: arguments[2]), to: URL(fileURLWithPath: arguments[4]))
-                print("Codex Island installed successfully")
+                let outcome = try installer.install(from: URL(fileURLWithPath: arguments[2]), to: URL(fileURLWithPath: arguments[4]))
+                print(outcome == .alreadyInstalled ? "Codex Island is already installed" : "Codex Island installed successfully")
             } catch { fail(error) }
             return
         }
@@ -54,7 +54,7 @@ enum InstallerMain {
         let app = NSApplication.shared
         let delegate = InstallerDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(.accessory)
         withExtendedLifetime(delegate) { app.run() }
     }
 
@@ -68,6 +68,7 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private let status = NSTextField(labelWithString: "")
     private var installing = false
+    private var launchHandoff: InstallerLaunchHandoff?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 200),
@@ -77,7 +78,7 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         let icon = NSImageView(frame: NSRect(x: 30, y: 93, width: 64, height: 64))
         icon.image = NSApp.applicationIconImage
         window.contentView?.addSubview(icon)
-        let title = NSTextField(labelWithString: InstallerText.choose("正在安装 Codex Island", "Installing Codex Island"))
+        let title = NSTextField(labelWithString: InstallerText.choose("正在准备 Codex Island", "Preparing Codex Island"))
         title.font = .systemFont(ofSize: 19, weight: .semibold)
         title.frame = NSRect(x: 112, y: 128, width: 325, height: 26)
         window.contentView?.addSubview(title)
@@ -105,7 +106,13 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         installing ? .terminateCancel : .terminateNow
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if installing { window.makeKeyAndOrderFront(nil) }
+        return true
+    }
+
     private func startInstallation() {
+        guard !installing, launchHandoff == nil else { return }
         installing = true
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -114,30 +121,41 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
                 installer.progress = { message in
                     DispatchQueue.main.async { self.status.stringValue = message }
                 }
-                try installer.install(from: InstallerMain.source, to: InstallerMain.destination)
-                DispatchQueue.main.async { self.finishInstallation() }
+                let outcome = try installer.install(from: InstallerMain.source, to: InstallerMain.destination)
+                DispatchQueue.main.async { self.finishInstallation(outcome) }
             } catch {
                 DispatchQueue.main.async { self.showFailure(error) }
             }
         }
     }
 
-    private func finishInstallation() {
-        status.stringValue = InstallerText.choose("安装完成，正在打开…", "Installed. Opening Codex Island…")
-        NSWorkspace.shared.openApplication(at: InstallerMain.destination, configuration: .init()) { _, error in
-            DispatchQueue.main.async {
-                self.installing = false
-                if let error {
-                    let alert = NSAlert()
-                    alert.messageText = InstallerText.choose("安装已完成", "Installation complete")
-                    alert.informativeText = InstallerText.choose(
-                        "可从“应用程序”打开 Codex Island。\n\(error.localizedDescription)",
-                        "Open Codex Island from Applications.\n\(error.localizedDescription)")
-                    alert.runModal()
-                }
-                NSApp.terminate(nil)
+    private func finishInstallation(_ outcome: AppInstaller.Outcome) {
+        // The app is safely in place now. Quitting must no longer be vetoed
+        // while Launch Services opens (or activates) the installed application.
+        installing = false
+        status.stringValue = outcome == .alreadyInstalled
+            ? InstallerText.choose("已安装当前版本，正在打开…", "Already installed. Opening Codex Island…")
+            : InstallerText.choose("安装完成，正在打开…", "Installed. Opening Codex Island…")
+        window.orderOut(nil)
+        let handoff = InstallerLaunchHandoff()
+        launchHandoff = handoff
+        handoff.start(open: { completion in
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.createsNewApplicationInstance = false
+            NSWorkspace.shared.openApplication(at: InstallerMain.destination, configuration: configuration) { _, error in
+                completion(error)
             }
-        }
+        }, completion: { outcome in
+            if case .failed(let error) = outcome {
+                let alert = NSAlert()
+                alert.messageText = InstallerText.choose("安装已完成", "Installation complete")
+                alert.informativeText = InstallerText.choose(
+                    "可从“应用程序”打开 Codex Island。\n\(error.localizedDescription)",
+                    "Open Codex Island from Applications.\n\(error.localizedDescription)")
+                alert.runModal()
+            }
+            NSApp.terminate(nil)
+        })
     }
 
     private func showFailure(_ error: Error) {

@@ -16,7 +16,8 @@ enum InstallerChecks {
             let macOS = app.appendingPathComponent("Contents/MacOS")
             try fm.createDirectory(at: macOS, withIntermediateDirectories: true)
             let data = try PropertyListSerialization.data(fromPropertyList: [
-                "CFBundleIdentifier": id, "CFBundlePackageType": "APPL", "CFBundleExecutable": "Codex Island"
+                "CFBundleIdentifier": id, "CFBundlePackageType": "APPL", "CFBundleExecutable": "Codex Island",
+                "CFBundleVersion": "1"
             ], format: .xml, options: 0)
             try data.write(to: app.appendingPathComponent("Contents/Info.plist"))
             let executable = macOS.appendingPathComponent("Codex Island")
@@ -60,8 +61,55 @@ enum InstallerChecks {
             }
             try installer.install(from: source, to: destination)
             require(stopped && marker(destination) == "new", "update stops and replaces old app")
-            installer.stopApplication = { _ in }
-            try installer.install(from: source, to: destination)
+            let identity = try AppInstaller.identity(destination)
+            installer.stopApplication = { _ in fatalError("A repeated install must not stop the running app") }
+            installer.rename = { _, _, _ in fatalError("A repeated install must not replace the app") }
+            require(try installer.install(from: source, to: destination) == .alreadyInstalled, "repeat is a no-op")
+            require(try AppInstaller.identity(destination) == identity, "repeat keeps the installed bundle in place")
+        }
+        try scenario("identical-install") { source, destination, installer in
+            try fm.removeItem(at: destination)
+            try fm.copyItem(at: source, to: destination)
+            let identity = try AppInstaller.identity(destination)
+            installer.stopApplication = { _ in fatalError("An identical app must not be terminated") }
+            installer.rename = { _, _, _ in fatalError("An identical app must not be replaced") }
+            require(try installer.install(from: source, to: destination) == .alreadyInstalled, "identical payload skips installation")
+            require(try AppInstaller.identity(destination) == identity, "identical install preserves inode")
+        }
+        try scenario("same-version-new-code") { source, destination, installer in
+            require(try installer.install(from: source, to: destination) == .installed, "same version with different code still updates")
+            require(marker(destination) == "new", "same-version update installs new executable")
+        }
+        try scenario("same-version-new-resource") { source, destination, installer in
+            try fm.removeItem(at: destination)
+            try fm.copyItem(at: source, to: destination)
+            let resource = "Contents/resource.txt"
+            try Data("new resource".utf8).write(to: source.appendingPathComponent(resource))
+            try Data("old resource".utf8).write(to: destination.appendingPathComponent(resource))
+            require(try installer.install(from: source, to: destination) == .installed, "resource changes still update")
+            require(try Data(contentsOf: destination.appendingPathComponent(resource)) == Data("new resource".utf8), "resource replaced")
+        }
+        try scenario("identical-bytes-invalid-permissions") { source, destination, installer in
+            try fm.removeItem(at: destination)
+            try fm.copyItem(at: source, to: destination)
+            let executable = destination.appendingPathComponent("Contents/MacOS/Codex Island")
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: executable.path)
+            require(try installer.install(from: source, to: destination) == .installed, "invalid installed app is repaired despite identical bytes")
+            require(fm.isExecutableFile(atPath: executable.path), "executable permissions restored")
+        }
+        try scenario("identical-target-changed") { source, destination, installer in
+            try fm.removeItem(at: destination)
+            try fm.copyItem(at: source, to: destination)
+            installer.validate = { app in
+                _ = try AppInstaller.bundleExecutable(app)
+                if app == destination {
+                    try fm.moveItem(at: destination, to: destination.appendingPathExtension("moved"))
+                    try fixture(destination, marker: "other")
+                }
+            }
+            installer.stopApplication = { _ in fatalError("An intervening app must not be stopped") }
+            expectFailure { try installer.install(from: source, to: destination) }
+            require(marker(destination) == "other", "no-op check detects a changed target")
         }
         try scenario("repair-missing-executable") { source, destination, installer in
             try fm.removeItem(at: destination.appendingPathComponent("Contents/MacOS/Codex Island"))
@@ -150,6 +198,42 @@ enum InstallerChecks {
             require(staging != nil && marker(staging!.appendingPathComponent(AppInstaller.appName)) == "old",
                     "failed recovery retains the old app")
         }
-        print("All \(passed) installer checks passed (replacement, validation, rollback, races, cleanup)")
+        func waitUntil(_ condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(2)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            require(condition(), "launch handoff completes within its deadline")
+        }
+        func handoffScenario(_ name: String, error: Error? = nil, omitCallback: Bool = false) {
+            print("Checking \(name)")
+            let handoff = InstallerLaunchHandoff(timeout: 0.05)
+            var results: [InstallerLaunchHandoff.Outcome] = []
+            var callback: ((Error?) -> Void)?
+            var opens = 0
+            handoff.start(open: { completion in
+                opens += 1
+                callback = completion
+                if !omitCallback { completion(error) }
+            }, completion: { results.append($0) })
+            handoff.start(open: { _ in opens += 1 }, completion: { _ in fatalError("Duplicate handoff") })
+            waitUntil { !results.isEmpty }
+            switch results[0] {
+            case .opened: require(!omitCallback && error == nil, "successful launch result")
+            case .failed: require(error != nil, "failed launch result")
+            case .timedOut: require(omitCallback, "missing callback is bounded")
+            }
+            // A callback arriving after the deadline, or delivered twice by the
+            // launcher, must not reopen alerts or repeat termination.
+            callback?(nil)
+            callback?(injected)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            require(results.count == 1 && opens == 1, "one launch and one completion only")
+            passed += 1
+        }
+        handoffScenario("launch-success")
+        handoffScenario("launch-failure", error: injected)
+        handoffScenario("launch-callback-missing", omitCallback: true)
+        print("All \(passed) installer checks passed (idempotence, lifecycle, replacement, rollback, races, cleanup)")
     }
 }

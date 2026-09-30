@@ -23,12 +23,18 @@ struct AppInstaller {
         let inode: ino_t
     }
 
+    enum Outcome {
+        case installed
+        case alreadyInstalled
+    }
+
     var validate: (URL) throws -> Void = AppInstaller.validatePayload
     var stopApplication: (URL) throws -> Void = { _ in }
     var rename: (URL, URL, UInt32) throws -> Void = AppInstaller.renameItem
     var progress: (String) -> Void = { _ in }
 
-    func install(from source: URL, to destination: URL) throws {
+    @discardableResult
+    func install(from source: URL, to destination: URL) throws -> Outcome {
         let fm = FileManager.default
         let source = source.standardizedFileURL
         let destination = destination.standardizedFileURL
@@ -42,6 +48,25 @@ struct AppInstaller {
         progress(InstallerText.choose("正在验证安装包…", "Checking the application…"))
         try validate(source)
         let original = try Self.destinationIdentity(destination)
+        // Compare the whole bundle, not just its version: a damaged resource or a
+        // rebuilt app with the same version must still be repaired/replaced.
+        if original != nil, fm.contentsEqual(atPath: source.path, andPath: destination.path) {
+            var installedCopyIsValid = false
+            do {
+                try validate(destination)
+                installedCopyIsValid = true
+            } catch {
+                // Matching bytes do not imply matching permissions or a usable app.
+            }
+            if installedCopyIsValid {
+                guard try Self.destinationIdentity(destination) == original else {
+                    throw InstallationError(message: InstallerText.choose(
+                        "安装位置已被其他操作更改，请重试。", "The installation changed during this check. Please retry."))
+                }
+                progress(InstallerText.choose("已安装当前版本", "This version is already installed"))
+                return .alreadyInstalled
+            }
+        }
         let staging = parent.appendingPathComponent(".codex-island-install-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: false,
                                attributes: [.posixPermissions: 0o700])
@@ -102,6 +127,7 @@ struct AppInstaller {
                 throw error
             }
         }
+        return .installed
     }
 
     static func identity(_ url: URL) throws -> Identity {

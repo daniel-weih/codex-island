@@ -110,6 +110,10 @@ After a successful DMG build and validation, `dist` keeps only DMG files. The te
 
 In newly built disk images, double-click **Install Codex Island** to install or update the app in Applications. It validates the new app, quits the installed version, replaces it atomically, and opens it again. Account data and preferences are preserved. If validation or replacement fails, the previous app is kept or restored. This also avoids Finder's intermittent duplicate-name error when replacing an app by dragging it. The Applications shortcut remains available for manual installation.
 
+The installer exits automatically and does not add a Dock icon. Opening the same installer again only opens the installed app when its contents already match; it does not reinstall or restart that app.
+
+Pushing an annotated `vYYYY.MM.DD` tag matching the app version runs the installer checks and builds the DMG on an Apple Silicon GitHub runner. The release uses the tag annotation as its notes and is published only after the uploaded DMG's SHA-256 matches the build output.
+
 ### Download the DMG (Alternative)
 
 **[Download Codex Island DMG](https://github.com/daniel-weih/codex-island/releases/latest/download/Codex-Island.dmg)**
