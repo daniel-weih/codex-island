@@ -48,6 +48,15 @@ enum InstallerChecks {
             passed += 1
         }
         let injected = InstallationError(message: "Injected failure")
+        try scenario("destination-inside-source", existing: false) { source, _, installer in
+            var validated = false
+            installer.validate = { _ in validated = true; throw injected }
+            for parent in [source, source.appendingPathComponent("nested")] {
+                expectFailure { try installer.install(from: source, to: parent.appendingPathComponent(AppInstaller.appName)) }
+            }
+            require(!validated, "a destination inside its payload is rejected before staging or validation")
+            require(marker(source) == "new", "an invalid destination preserves the source bundle")
+        }
         try scenario("fresh", existing: false) { source, destination, installer in
             try installer.install(from: source, to: destination)
             require(marker(destination) == "new", "fresh installation")
@@ -148,6 +157,17 @@ enum InstallerChecks {
             expectFailure { try installer.install(from: source, to: destination) }
             require(!fm.fileExists(atPath: destination.path), "fresh install rolls back invalid app")
         }
+        try scenario("fresh-target-changed-after-validation", existing: false) { source, destination, installer in
+            installer.validate = { app in
+                _ = try AppInstaller.bundleExecutable(app)
+                if app.standardizedFileURL == destination.standardizedFileURL {
+                    try fm.moveItem(at: destination, to: destination.appendingPathExtension("moved"))
+                    try fixture(destination, marker: "other")
+                }
+            }
+            expectFailure { try installer.install(from: source, to: destination) }
+            require(marker(destination) == "other", "fresh installation detects but does not remove an intervening app")
+        }
         try scenario("target-race", existing: false) { source, destination, installer in
             installer.rename = { from, to, flags in
                 try fixture(destination, marker: "other")
@@ -211,12 +231,14 @@ enum InstallerChecks {
             var results: [InstallerLaunchHandoff.Outcome] = []
             var callback: ((Error?) -> Void)?
             var opens = 0
+            var cleanups = 0
             handoff.start(open: { completion in
                 opens += 1
                 callback = completion
                 if !omitCallback { completion(error) }
-            }, completion: { results.append($0) })
-            handoff.start(open: { _ in opens += 1 }, completion: { _ in fatalError("Duplicate handoff") })
+            }, onOpened: { cleanups += 1 }, completion: { results.append($0) })
+            handoff.start(open: { _ in opens += 1 }, onOpened: { fatalError("Duplicate cleanup") },
+                          completion: { _ in fatalError("Duplicate handoff") })
             waitUntil { !results.isEmpty }
             switch results[0] {
             case .opened: require(!omitCallback && error == nil, "successful launch result")
@@ -229,11 +251,69 @@ enum InstallerChecks {
             callback?(injected)
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             require(results.count == 1 && opens == 1, "one launch and one completion only")
+            require(cleanups == (!omitCallback && error == nil ? 1 : 0),
+                    "disk image cleanup runs exactly once after a successful launch and never on failure or timeout")
             passed += 1
         }
         handoffScenario("launch-success")
         handoffScenario("launch-failure", error: injected)
         handoffScenario("launch-callback-missing", omitCallback: true)
+        print("Checking launch-result-validation")
+        let installedURL = root.appendingPathComponent("installed/Codex Island.app")
+        let wrongURL = root.appendingPathComponent("old/Codex Island.app")
+        require(InstalledApplication.openingError(destination: installedURL, applicationURL: installedURL,
+                isTerminated: false, underlyingError: nil) == nil, "the installed running application is accepted")
+        let equivalentURL = installedURL.deletingLastPathComponent().appendingPathComponent("unused/../Codex Island.app")
+        require(InstalledApplication.openingError(destination: installedURL, applicationURL: equivalentURL,
+                isTerminated: false, underlyingError: nil) == nil, "equivalent normalized paths are accepted")
+        for (path, terminated) in [(wrongURL as URL?, false), (nil, false), (installedURL as URL?, true)] {
+            let error = InstalledApplication.openingError(destination: installedURL, applicationURL: path,
+                                                         isTerminated: terminated, underlyingError: nil)
+            require(error != nil, "a wrong, missing, or terminated launch result is rejected")
+            let handoff = InstallerLaunchHandoff()
+            var finished = false
+            handoff.start(open: { $0(error) }, onOpened: { fatalError("Invalid launch must not eject the image") },
+                          completion: { _ in finished = true })
+            waitUntil { finished }
+        }
+        require((InstalledApplication.openingError(destination: installedURL, applicationURL: installedURL,
+                 isTerminated: false, underlyingError: injected) as? InstallationError)?.message == injected.message,
+                "the original launch error is preserved")
+        passed += 1
+        let imageMount = URL(fileURLWithPath: "/Volumes/Codex Island 2")
+        let installerURL = imageMount.appendingPathComponent("Install Codex Island.app")
+        let destination = URL(fileURLWithPath: "/Applications/Codex Island.app")
+        let uuid = UUID().uuidString
+        let imageInfo: [String: Any] = ["BusProtocol": "Disk Image", "Ejectable": true,
+                                      "MountPoint": imageMount.path, "VolumeUUID": uuid]
+        func ejectTarget(_ info: [String: Any], source: URL? = nil, installed: URL? = nil) throws -> InstallerDiskImageEjector.Target? {
+            let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            return InstallerDiskImageEjector.target(installerURL: source ?? installerURL,
+                                                    destination: installed ?? destination, information: data)
+        }
+        print("Checking eject-source-image")
+        require(try ejectTarget(imageInfo) == .init(mountPoint: imageMount, volumeUUID: uuid),
+                "ejection identifies the source image even when its mount name has a suffix")
+        passed += 1
+        print("Checking eject-unrelated-volumes")
+        require(try ejectTarget(imageInfo, source: URL(fileURLWithPath: "/Volumes/Codex Island/Install Codex Island.app")) == nil,
+                "another similarly named image is never ejected")
+        require(try ejectTarget(imageInfo, installed: imageMount.appendingPathComponent("Codex Island.app")) == nil,
+                "the installed application's volume is never ejected")
+        require(try ejectTarget(imageInfo, source: URL(fileURLWithPath: "/Users/test/Downloads/Install Codex Island.app")) == nil,
+                "a locally copied installer does not eject an unrelated mounted image")
+        passed += 1
+        print("Checking eject-physical-and-system-volumes")
+        var physicalInfo = imageInfo
+        physicalInfo["BusProtocol"] = "USB"
+        require(try ejectTarget(physicalInfo) == nil, "physical disks are excluded")
+        var systemInfo = imageInfo
+        systemInfo["SystemImage"] = true
+        require(try ejectTarget(systemInfo) == nil, "system images are excluded")
+        var incompleteInfo = imageInfo
+        incompleteInfo.removeValue(forKey: "VolumeUUID")
+        require(try ejectTarget(incompleteInfo) == nil, "missing volume identity prevents ejection")
+        passed += 1
         print("All \(passed) installer checks passed (idempotence, lifecycle, replacement, rollback, races, cleanup)")
     }
 }

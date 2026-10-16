@@ -11,13 +11,19 @@ struct ResetSubscriptionChecks {
     static func main() async {
         do {
             try checkSettingsAndSource()
+            try checkSourceTextProcessing()
+            try checkFeedTextProcessing()
             try checkReportPolicy()
             try checkExplicitTimeEvidence()
+            try checkStructuredTimestampValidation()
             checkUsageMerge()
+            try await checkUsageArrivingDuringRefresh()
             try await checkSchedulingAndPersistence()
             try await checkCancellation()
+            try await checkDisablingAutomaticChecks()
             try await checkIntervalUpdates()
             try await checkModelCatalogCaching()
+            await checkAutomaticModelRefresh()
             await checkAutomaticModelRetry()
             await checkModelCatalogCancellation()
         } catch {
@@ -84,6 +90,91 @@ struct ResetSubscriptionChecks {
         expect(plain.text == "Reset at 23:00 & later.", "HTML executable content is removed and entities decoded")
         expect((try? ResetSubscriptionSource.parse(data: Data(repeating: 65, count: 1_048_577), url: sourceURL)) == nil, "oversized source is rejected before model use")
         expect((try? ResetSubscriptionSource.parse(data: Data("<script>empty</script>".utf8), url: sourceURL)) == nil, "empty rendered text is rejected")
+    }
+
+    private static func checkFeedTextProcessing() throws {
+        let url = URL(string: "https://example.com/reset-feed")!
+        func parse(_ xml: String, type: String? = "application/rss+xml") throws -> ResetSourceSnapshot {
+            try ResetSubscriptionSource.parse(data: Data(xml.utf8), url: url, contentType: type)
+        }
+        let rss = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+          <channel><title>Reset updates</title><item><title>Next reset</title>
+            <description><![CDATA[<p>Reset scheduled for 2026-10-16T12:00:00Z &amp; later.</p><script>hidden</script>]]></description>
+            <content:encoded><![CDATA[<p>备用额度 &gt; 0，等待确认。</p>]]></content:encoded>
+          </item></channel>
+        </rss>
+        """
+        let scheduled = try parse(rss)
+        let cancelled = try parse(rss.replacingOccurrences(of: "scheduled", with: "cancelled"))
+        expect(scheduled.text == "Reset updates Next reset Reset scheduled for 2026-10-16T12:00:00Z & later. 备用额度 > 0，等待确认。",
+               "RSS CDATA and namespaced content preserve evidence while removing embedded HTML")
+        expect(scheduled.fingerprint != cancelled.fingerprint,
+               "a changed RSS body triggers change-only analysis even when titles are unchanged")
+        let untyped = try parse(rss, type: nil)
+        expect(untyped.text == scheduled.text, "feed detection also works without a Content-Type header")
+        let escaped = try parse("<rss><channel><description>&lt;p&gt;Reset &amp;amp; later.&lt;/p&gt;</description></channel></rss>")
+        expect(escaped.text == "Reset & later.", "escaped HTML in RSS is decoded after XML character chunks are joined")
+
+        let atom = try parse("""
+        <feed xmlns="http://www.w3.org/2005/Atom"><title>Updates &amp; news</title><entry>
+          <title type="text">Keep &lt;time&gt; literal</title>
+          <summary type="html">&lt;p&gt;Reset &amp;amp; credit.&lt;/p&gt;</summary>
+          <content type="text"><![CDATA[Value < 5 > 0; 2026-10-16T12:00:00Z]]></content>
+          <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Confirmed</p><script>hidden</script></div></content>
+        </entry></feed>
+        """, type: "application/atom+xml")
+        expect(atom.text == "Updates & news Keep <time> literal Reset & credit. Value < 5 > 0; 2026-10-16T12:00:00Z Confirmed",
+               "Atom respects text, HTML, CDATA, and XHTML without stripping literal angle brackets")
+        expect((try? parse("<rss><channel><description><![CDATA[truncated")) == nil,
+               "malformed XML is rejected instead of silently producing an incomplete announcement")
+        expect((try? parse("<!DOCTYPE rss [<!ENTITY injected 'expanded'>]><rss>&injected;</rss>")) == nil,
+               "feed parsing rejects DTD entity expansion")
+    }
+
+    private static func checkSourceTextProcessing() throws {
+        let cases = [
+            ("before<!-- a <!-- nested -->after", "before after"),
+            ("before<!--unfinished", "before<!--unfinished"),
+            ("<!--\u{301}>-->", ""),
+            ("before<script a='x'>ignored\n</SCRIPT \n>after", "before after"),
+            ("before<style>a<script>b</script>c</style>after", "before after"),
+            ("before<script>unclosed<svg>hidden</svg>after", "before unclosed after"),
+            ("before<ſcript>hidden</SCRIPT>after", "before after"),
+            ("<>text<", "<>text<"),
+            ("<\u{301}>text", "text"),
+            ("&lt;script&gt;literal&lt;/script&gt;", "<script>literal</script>"),
+            ("&amp;lt; &amp;#x1F600; &#38;lt; &#X41;", "< 😀 &lt; &#X41;"),
+            ("👩🏽‍💻 &#x1F600; 中&#51;文&#xD800;&#1114112;&#4294967296;",
+             "👩🏽‍💻 😀 中3文&#xD800;&#1114112;&#4294967296;")
+        ]
+        for (input, expected) in cases {
+            expect(ResetSubscriptionSource.plainText(input) == expected,
+                   "source text preserves comments, hidden content, incomplete markup and Unicode: \(input)")
+        }
+        let angles = String(repeating: "<", count: 64_000)
+        let comments = String(repeating: "<!--", count: 16_000)
+        let largeCases = [
+            ("unfinished tags", angles, angles),
+            ("unfinished comments", comments, comments),
+            ("unfinished scripts", String(repeating: "<script>x", count: 16_000),
+             Array(repeating: "x", count: 16_000).joined(separator: " ")),
+            ("numeric Unicode entities", String(repeating: "&#x1F600;", count: 64_000),
+             String(repeating: "😀", count: 64_000))
+        ]
+        var slowest: TimeInterval = 0
+        for (name, input, expected) in largeCases {
+            let began = ProcessInfo.processInfo.systemUptime
+            let result = try ResetSubscriptionSource.parse(
+                data: Data(input.utf8), url: URL(string: "https://fixture.example/news")!, contentType: "text/html")
+            let elapsed = ProcessInfo.processInfo.systemUptime - began
+            slowest = max(slowest, elapsed)
+            expect(result.text == expected, "large source preserves \(name)")
+            // Old scans/replacements took tens of seconds at these sizes.
+            expect(elapsed < 5, "large source must not stall subscription checks: \(name)")
+        }
+        print(String(format: "Large source text slowest case: %.2f s", slowest))
     }
 
     private static func checkLegacyDefaults() throws {
@@ -199,6 +290,21 @@ struct ResetSubscriptionChecks {
         result.timeEvidence = valid[3]
         expect(ResetReportBuilder.report(source: generic, analysis: result, settings: .init(), analyzedAt: now).scheduledAt == nil,
                "a valid timestamp still requires a verbatim source quotation")
+    }
+
+    private static func checkStructuredTimestampValidation() throws {
+        let valid = ["2026-10-16T12:00:00Z", "2026-10-16T20:00:00+08:00",
+                     "2026-10-16T08:30:00-0330", "2026-10-16T12:00:00.125Z"]
+        for value in valid {
+            expect(ResetDateParser.date(value) != nil, "valid structured timestamp remains supported: \(value)")
+        }
+        for value in ["2026-02-30T12:00:00Z", "2026-10-16T12:00:00Zgarbage",
+                      "2026-10-16T12:00:00+25:00", "2026-10-16T12:00:00+00:99",
+                      "2026-10-16T24:00:00Z", "2026-10-16T12:00:00"] {
+            expect(ResetDateParser.date(value) == nil, "invalid structured timestamp is never normalized: \(value)")
+            let source = try snapshot(scheduledAt: value)
+            expect(source.event?.scheduledAt == nil, "invalid source timestamp cannot enable a countdown: \(value)")
+        }
     }
 
     private static func checkSchedulingAndPersistence() async throws {
@@ -317,6 +423,99 @@ struct ResetSubscriptionChecks {
         expect(service.latest?.fingerprint == "new-source", "cancelled old-source completion cannot overwrite new configuration")
         expect(!service.isRefreshing, "old completion does not leave the service busy")
         service.stop()
+    }
+
+    private static func checkDisablingAutomaticChecks() async throws {
+        for pauseDuringAnalysis in [false, true] {
+            let suiteName = "CodexIsland.DisableChecks.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suiteName)!
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName)
+            let cacheURL = directory.appendingPathComponent("cache.json")
+            defer {
+                defaults.removePersistentDomain(forName: suiteName)
+                try? FileManager.default.removeItem(at: directory)
+            }
+            var pendingFetch: CheckedContinuation<ResetSourceSnapshot, Error>?
+            var pendingAnalysis: CheckedContinuation<ResetAnalysisResult, Error>?
+            var operationReturned = false
+            var fetchCount = 0
+            var analyzeCount = 0
+            var notifications = 0
+            var currentTime = now
+            let source = try snapshot()
+            var configuration = ResetSubscriptionSettings()
+            configuration.enabled = true
+            configuration.model = "previously-available-model"
+            let service = ResetSubscriptionService(settings: configuration, persistenceEnabled: true,
+                fetch: { _ in
+                    fetchCount += 1
+                    if !pauseDuringAnalysis {
+                        defer { operationReturned = true }
+                        return try await withCheckedThrowingContinuation { pendingFetch = $0 }
+                    }
+                    return source
+                }, analyze: { _, _ in
+                    analyzeCount += 1
+                    if pauseDuringAnalysis {
+                        defer { operationReturned = true }
+                        return try await withCheckedThrowingContinuation { pendingAnalysis = $0 }
+                    }
+                    return analysis()
+                }, listModels: { [] }, defaults: defaults, cacheURL: cacheURL, now: { currentTime })
+            service.onNewReport = { _ in notifications += 1 }
+            service.start()
+            while pendingFetch == nil && pendingAnalysis == nil { await Task.yield() }
+            try service.setAutomaticChecksEnabled(false)
+            var disabled = configuration
+            disabled.enabled = false
+            expect(service.settings == disabled && service.phase == .idle && service.nextCheckAt == nil,
+                   "disabling immediately cancels the active stage and preserves all saved fields")
+
+            let restored = ResetSubscriptionService(persistenceEnabled: true,
+                fetch: { _ in source }, analyze: { _, _ in analysis() }, listModels: { [] },
+                defaults: defaults, cacheURL: cacheURL, now: { currentTime })
+            expect(restored.settings == disabled && restored.nextCheckAt == nil,
+                   "disabled state survives relaunch without requiring the old model to remain available")
+
+            var invalidDraft = configuration
+            invalidDraft.urlString = "https://"
+            do {
+                try service.updateSettings(invalidDraft)
+                expect(false, "invalid edits cannot re-enable automatic checks")
+            } catch {
+                expect(service.settings == disabled, "rejected edits leave automatic checks disabled")
+            }
+
+            pendingFetch?.resume(returning: source)
+            pendingAnalysis?.resume(returning: analysis())
+            while !operationReturned { await Task.yield() }
+            expect(service.latest == nil && notifications == 0 && service.nextCheckAt == nil,
+                   "a cancelled response cannot publish, notify or reschedule after disabling")
+            expect(analyzeCount == (pauseDuringAnalysis ? 1 : 0),
+                   "disabling during fetch prevents the pending response from starting an analysis")
+            let previousFetchCount = fetchCount
+            currentTime = currentTime.addingTimeInterval(100_000)
+            service.refreshAfterWake()
+            await service.waitForCurrentCheck()
+            expect(fetchCount == previousFetchCount, "disabled checks stay off after an overdue wake")
+
+            // A disabled subscription still supports manual checks. A later
+            // debounced save of the same off state must leave that task alone.
+            pendingFetch = nil
+            pendingAnalysis = nil
+            service.checkNow()
+            while pendingFetch == nil && pendingAnalysis == nil { await Task.yield() }
+            try service.setAutomaticChecksEnabled(false)
+            expect(service.phase == (pauseDuringAnalysis ? .analyzing : .fetching),
+                   "repeated disabled saves do not cancel a manual check")
+            pendingFetch?.resume(returning: source)
+            pendingAnalysis?.resume(returning: analysis())
+            await service.waitForCurrentCheck()
+            expect(service.latest != nil && service.nextCheckAt == nil,
+                   "manual checks can finish while automatic scheduling remains disabled")
+            service.stop()
+            restored.stop()
+        }
     }
 
     private static func analysis() -> ResetAnalysisResult {
@@ -471,6 +670,62 @@ struct ResetSubscriptionChecks {
         upgraded.stop()
     }
 
+    private static func checkAutomaticModelRefresh() async {
+        let original = [ResetAnalysisModel(id: "original", displayName: "Original",
+            reasoningEfforts: ["max"], serviceTiers: [], defaultServiceTier: nil)]
+        let refreshed = [ResetAnalysisModel(id: "refreshed", displayName: "Refreshed",
+            reasoningEfforts: ["high", "max"], serviceTiers: [], defaultServiceTier: nil)]
+        let otherAccount = [ResetAnalysisModel(id: "other-account", displayName: "Other Account",
+            reasoningEfforts: ["high"], serviceTiers: [], defaultServiceTier: nil)]
+        var currentTime = now
+        var scope = "account-a"
+        var requests = 0
+        var response = original
+        let service = ResetSubscriptionService(persistenceEnabled: false, listModels: {
+            requests += 1
+            return response
+        }, modelCatalogScope: { scope }, now: { currentTime })
+        defer { service.stop() }
+        let selection = service.settings
+        service.start()
+        await service.waitForModels()
+        expect(requests == 1 && service.models == original, "startup loads the original account's model catalog")
+
+        for _ in 0..<5 { service.refreshAfterWake() }
+        await service.waitForModels()
+        expect(requests == 1, "automatic checks reuse a fresh model catalog")
+        currentTime = currentTime.addingTimeInterval(ResetSubscriptionService.modelCatalogLifetime - 1)
+        service.refreshAfterWake()
+        await service.waitForModels()
+        expect(requests == 1, "automatic model refresh respects the full cache lifetime")
+
+        response = refreshed
+        currentTime = currentTime.addingTimeInterval(1)
+        for _ in 0..<5 { service.refreshAfterWake() }
+        await service.waitForModels()
+        expect(requests == 2 && service.models == refreshed,
+               "an expired successful catalog refreshes without reopening settings and deduplicates wake events")
+
+        response = otherAccount
+        scope = "account-b"
+        service.refreshAfterWake()
+        expect(service.models.isEmpty, "automatic account changes immediately invalidate the old account's catalog")
+        await service.waitForModels()
+        expect(requests == 3 && service.models == otherAccount && service.settings == selection,
+               "automatic account refresh bypasses a fresh cache and preserves the saved model selection")
+        for _ in 0..<5 { service.refreshAfterWake() }
+        await service.waitForModels()
+        expect(requests == 3, "successful automatic refresh returns to using the cache")
+
+        service.stop()
+        let stoppedRequests = requests
+        scope = "account-c"
+        currentTime = currentTime.addingTimeInterval(ResetSubscriptionService.modelCatalogLifetime)
+        service.refreshAfterWake()
+        await service.waitForModels()
+        expect(requests == stoppedRequests, "stopping the service prevents account and expiry refreshes")
+    }
+
     private static func checkAutomaticModelRetry() async {
         let catalog = [ResetAnalysisModel(id: "gpt-6-sol", displayName: "GPT-6 Sol",
             reasoningEfforts: ["max"], serviceTiers: [], defaultServiceTier: nil)]
@@ -601,6 +856,13 @@ struct ResetSubscriptionChecks {
                "different analysis turns in one hour are summed")
         expect(merged.daily.first { $0.startDate == "2026-09-22" }?.tokens == 4000,
                "usage retains yesterday in the correct calendar day")
+        for identifier: Calendar.Identifier in [.buddhist, .hebrew, .persian] {
+            var systemCalendar = Calendar(identifier: identifier)
+            systemCalendar.timeZone = calendar.timeZone
+            let usage = ResetSubscriptionUsage.aggregate(records: [yesterday], now: now, calendar: systemCalendar)
+            expect(usage.daily == [DailyUsageBucket(startDate: "2026-09-22", tokens: 4000)],
+                   "\(identifier) reset usage shares Gregorian day keys with account and rollout history")
+        }
         expect(merged.hourly.first { $0.hourStart == hour.addingTimeInterval(-46 * 3600) }?.tokens == 6000,
                "the usage merge retains the 48-hour chart window")
         let expectedActual = (CodexCreditRateCard.credits(model: "gpt-6-sol", serviceTier: "fast", inputTokens: 1000, cachedInputTokens: 0, outputTokens: 0) ?? -1)
@@ -630,6 +892,56 @@ struct ResetSubscriptionChecks {
         otherZone.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
         expect(cache.value(revision: 4, now: now, calendar: otherZone) == nil,
                "changing time zone refreshes day and hour assignments")
+
+        let beforeClockCorrection = now.addingTimeInterval(120)
+        let beforeCorrection = ResetSubscriptionUsage.aggregate(
+            records: [future], now: beforeClockCorrection, calendar: calendar)
+        cache.store(beforeCorrection, revision: 6, now: beforeClockCorrection, calendar: calendar)
+        expect(cache.value(revision: 6, now: now, calendar: calendar) == nil,
+               "a backward clock correction within the same hour invalidates future usage")
+        let pendingFuture = ResetSubscriptionUsage.aggregate(records: [future], now: now, calendar: calendar)
+        cache.store(pendingFuture, revision: 7, now: now, calendar: calendar)
+        expect(cache.value(revision: 7, now: now.addingTimeInterval(30), calendar: calendar) == pendingFuture,
+               "future usage still permits reuse before it becomes current")
+        expect(cache.value(revision: 7, now: future.recordedAt, calendar: calendar) == nil,
+               "a cached future record becomes visible on time without waiting for the next hour")
+    }
+
+    private static func checkUsageArrivingDuringRefresh() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-usage-refresh-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let originalCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        setenv("CODEX_HOME", directory.path, 1)
+        defer {
+            if let originalCodexHome { setenv("CODEX_HOME", originalCodexHome, 1) }
+            else { unsetenv("CODEX_HOME") }
+            try? FileManager.default.removeItem(at: directory)
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+        }
+
+        let model = CodexStatusViewModel()
+        defer { model.stop() }
+        // Log scanning captured an earlier time than this usage notification.
+        // Advancing the injected clock represents the await before aggregation.
+        let record = ResetUsageRecord(
+            id: "analysis/turn", recordedAt: now.addingTimeInterval(0.1),
+            model: "gpt-6-sol", serviceTier: "default", inputTokens: 1000,
+            cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1000
+        )
+        model.resetSubscriptionUsage = [record]
+        var clockReads = 0
+        await model.refreshDailyThreadTokens(clock: {
+            clockReads += 1
+            return clockReads == 1 ? now : now.addingTimeInterval(0.2)
+        })
+        expect(model.snapshot.todayThreadTokens == 1000,
+               "usage received after the polling timestamp is counted immediately after scanning")
+        expect(abs(model.snapshot.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 0.05) < 0.000001,
+               "new analysis credits are not lost to the hourly aggregation cache")
+        await model.refreshDailyThreadTokens(clock: { now.addingTimeInterval(1) })
+        expect(model.snapshot.todayThreadTokens == 1000,
+               "subsequent polls retain the new usage without waiting for the next hour")
     }
 
     private static func snapshot(generated: String = "2026-09-23T02:00:00Z", daysSince: Double = 0.32,

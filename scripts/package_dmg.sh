@@ -15,6 +15,7 @@ DMG_ICON="$WORK_DIR/CodexIsland-dmg-icon.icns"
 ICON_RSRC="$WORK_DIR/CodexIsland-icon.rsrc"
 MOUNT_DIR="$WORK_DIR/mount"
 MOUNTED=0
+PUBLISH_DIR=""
 
 detach_image() {
     local attempt
@@ -31,6 +32,9 @@ detach_image() {
 }
 
 cleanup() {
+    if [[ -n "$PUBLISH_DIR" ]]; then
+        rm -rf -- "$PUBLISH_DIR"
+    fi
     if (( MOUNTED )); then
         if ! detach_image; then
             echo "Could not detach $MOUNT_DIR; temporary files retained at $WORK_DIR" >&2
@@ -43,6 +47,10 @@ trap cleanup EXIT
 
 if [[ -L "$DIST_DIR" ]]; then
     echo "Refusing to clean a symlinked output directory: $DIST_DIR" >&2
+    exit 1
+fi
+if [[ -d "$FINAL_DMG" ]]; then
+    echo "Refusing to replace a directory with the disk image: $FINAL_DMG" >&2
     exit 1
 fi
 mkdir -p "$DIST_DIR" "$MOUNT_DIR"
@@ -101,8 +109,20 @@ codesign --verify --deep --strict "$MOUNT_DIR/Install Codex Island.app"
 [[ "$(readlink "$MOUNT_DIR/Applications")" == /Applications ]]
 detach_image
 
-# Publish only a verified DMG. A failed build keeps the previous output intact.
-mv -f "$BUILT_DMG" "$FINAL_DMG"
+# Stage the complete copy on the destination volume before atomically replacing
+# the previous DMG. /tmp and this checkout need not be on the same filesystem.
+PUBLISH_DIR="$(mktemp -d "$DIST_DIR/.codex-island-publish.XXXXXX")"
+ditto "$BUILT_DMG" "$PUBLISH_DIR/Codex-Island.dmg"
+python3 - "$PUBLISH_DIR/Codex-Island.dmg" "$FINAL_DMG" <<'PY'
+import os
+import sys
+
+# Unlike mv, replace fails if a directory appeared at the final path while the
+# build was running instead of silently placing the DMG inside that directory.
+os.replace(sys.argv[1], sys.argv[2])
+PY
+rmdir "$PUBLISH_DIR"
+PUBLISH_DIR=""
 for artifact in "$DIST_DIR"/*(DN); do
     if [[ -f "$artifact" && "${artifact:e:l}" == dmg ]]; then
         continue

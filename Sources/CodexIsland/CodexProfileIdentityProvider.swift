@@ -9,7 +9,7 @@ struct ProfileIdentityLoadResult {
 }
 
 enum CodexProfileIdentityProvider {
-    static func load(authToken: String?) async -> ProfileIdentityLoadResult {
+    static func load(authToken: String?, session: URLSession = remoteSession) async -> ProfileIdentityLoadResult {
         let fallback = ProfileIdentitySummary.empty
 
         guard let authToken, !authToken.isEmpty else {
@@ -21,7 +21,7 @@ enum CodexProfileIdentityProvider {
             )
         }
 
-        let remoteResult = await fetchRemoteProfile(authToken: authToken)
+        let remoteResult = await fetchRemoteProfile(authToken: authToken, session: session)
         guard case .success(let remoteProfile) = remoteResult else {
             let authorizationRejected: Bool
             if case .unauthorized = remoteResult {
@@ -42,7 +42,7 @@ enum CodexProfileIdentityProvider {
         }
         var avatarDownloadFailed = false
         if let avatarURL = remoteProfile.avatarURL {
-            if let avatarData = await downloadAvatar(from: avatarURL) {
+            if let avatarData = await downloadAvatar(from: avatarURL, session: session) {
                 identity.avatarData = avatarData
             } else {
                 avatarDownloadFailed = true
@@ -88,7 +88,7 @@ enum CodexProfileIdentityProvider {
             ?? payload.string("chatgpt_account_id")
     }
 
-    private static func fetchRemoteProfile(authToken: String) async -> RemoteProfileResult {
+    private static func fetchRemoteProfile(authToken: String, session: URLSession) async -> RemoteProfileResult {
         guard let url = URL(string: "https://chatgpt.com/backend-api/wham/profiles/me") else {
             return .unavailable
         }
@@ -102,8 +102,9 @@ enum CodexProfileIdentityProvider {
         request.setValue("Codex Desktop", forHTTPHeaderField: "originator")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse else {
+        guard let (data, httpResponse) = try? await boundedResponse(
+            for: request, maximumBytes: 2 * 1_024 * 1_024, session: session
+        ) else {
             return .unavailable
         }
         if httpResponse.statusCode == 401 { return .unauthorized }
@@ -120,14 +121,15 @@ enum CodexProfileIdentityProvider {
         ))
     }
 
-    private static func downloadAvatar(from url: URL) async -> Data? {
+    private static func downloadAvatar(from url: URL, session: URLSession) async -> Data? {
         guard url.scheme?.lowercased() == "https" else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("image/*", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse,
+        guard let (data, httpResponse) = try? await boundedResponse(
+                for: request, maximumBytes: 5 * 1_024 * 1_024, session: session
+              ),
               (200..<300).contains(httpResponse.statusCode),
               httpResponse.url?.scheme?.lowercased() == "https",
               httpResponse.expectedContentLength <= 0
@@ -137,6 +139,27 @@ enum CodexProfileIdentityProvider {
             return nil
         }
         return data
+    }
+
+    private static func boundedResponse(
+        for request: URLRequest, maximumBytes: Int, session: URLSession
+    ) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let response = response as? HTTPURLResponse,
+              response.url?.scheme?.lowercased() == "https" else { throw URLError(.badServerResponse) }
+        // Error bodies are unnecessary, particularly for authentication refresh.
+        guard (200..<300).contains(response.statusCode) else { return (Data(), response) }
+        guard response.expectedContentLength <= Int64(maximumBytes) else {
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        var data = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count < maximumBytes else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        return (data, response)
     }
 
     private static func isReasonableAvatarImage(_ data: Data) -> Bool {
@@ -164,11 +187,12 @@ enum CodexProfileIdentityProvider {
         return value
     }
 
-    private static let session: URLSession = {
+    private static let remoteSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForResource = 20
         return URLSession(configuration: configuration)
     }()
 }

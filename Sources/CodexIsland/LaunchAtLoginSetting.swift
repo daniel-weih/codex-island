@@ -42,18 +42,8 @@ struct LaunchAtLoginBackend {
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         let plistURL = launchAgentsDirectory
             .appendingPathComponent("\(launchAgentLabel).plist")
-        let legacyPlistURLs = (
-            try? fileManager.contentsOfDirectory(
-                at: launchAgentsDirectory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )
-        )?.filter {
-            $0 != plistURL && $0.pathExtension == "plist"
-        } ?? []
         return launchAgent(
             plistURL: plistURL,
-            legacyPlistURLs: legacyPlistURLs,
             appBundleURL: appBundleURL,
             appExecutableURL: appExecutableURL,
             bundleIdentifier: Bundle.main.bundleIdentifier
@@ -91,11 +81,17 @@ struct LaunchAtLoginBackend {
             "RunAtLoad": true
         ]
         let expectedKeys = Set(expectedPropertyList.keys)
-        let legacyKeys: Set<String> = [
-            "Label",
-            "ProgramArguments",
-            "RunAtLoad"
-        ]
+
+        func legacyCandidates() -> [URL] {
+            // Older builds may add a registration while this app is running.
+            // Take a fresh inventory for every status check and mutation.
+            let discovered = (try? fileManager.contentsOfDirectory(
+                at: plistURL.deletingLastPathComponent(),
+                includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )) ?? []
+            return Array(Set((legacyPlistURLs + discovered).map(\.standardizedFileURL)))
+                .filter { $0 != plistURL.standardizedFileURL && $0.pathExtension == "plist" }
+        }
 
         func propertyList(at url: URL) -> [String: Any]? {
             guard
@@ -112,23 +108,49 @@ struct LaunchAtLoginBackend {
         }
 
         func isLegacyCodexIslandAgent(at url: URL) -> Bool {
-            guard
-                let dictionary = propertyList(at: url),
-                dictionary["RunAtLoad"] as? Bool == true,
-                let arguments = dictionary["ProgramArguments"] as? [String],
-                arguments == programArguments || arguments == legacyProgramArguments
-            else {
-                return false
-            }
+            guard let dictionary = propertyList(at: url) else { return false }
+            let label = dictionary["Label"] as? String ?? ""
+            // The dedicated label establishes ownership even after both the
+            // application and the plist have moved or been renamed.
+            if label == launchAgentLabel { return true }
+            guard let arguments = dictionary["ProgramArguments"] as? [String] else { return false }
 
-            let label = (dictionary["Label"] as? String ?? "").lowercased()
-            let filename = url.lastPathComponent.lowercased()
-            return label.contains("codex-island")
-                || filename.contains("codex-island")
+            func targetsApplication() -> Bool {
+                if arguments == programArguments || arguments == legacyProgramArguments { return true }
+                let bundleNames: Set<String> = [
+                    normalizedAppURL.lastPathComponent.lowercased(),
+                    "codex island.app", "codex-island.app", "codexisland.app"
+                ]
+                if arguments.count == 3, arguments[0] == "/usr/bin/open", arguments[1] == "-g",
+                   arguments[2].hasPrefix("/") {
+                    return bundleNames.contains(URL(fileURLWithPath: arguments[2]).lastPathComponent.lowercased())
+                }
+                guard arguments.count == 1, arguments[0].hasPrefix("/") else { return false }
+                let target = URL(fileURLWithPath: arguments[0]).standardizedFileURL
+                let executableNames: Set<String> = [
+                    normalizedExecutableURL.lastPathComponent.lowercased(),
+                    "codex island", "codex-island", "codexisland"
+                ]
+                return executableNames.contains(target.lastPathComponent.lowercased())
+                    && target.deletingLastPathComponent().lastPathComponent == "MacOS"
+                    && target.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents"
+                    && bundleNames.contains(target.deletingLastPathComponent().deletingLastPathComponent()
+                        .deletingLastPathComponent().lastPathComponent.lowercased())
+            }
+            let identifiers = dictionary["AssociatedBundleIdentifiers"] as? [String] ?? []
+            let legacyName = [label, url.deletingPathExtension().lastPathComponent].contains {
+                $0.lowercased().split(separator: ".").contains("codex-island")
+            }
+            // Legacy names alone are insufficient: also require the known
+            // direct-exec/open shape and an app target, without requiring that
+            // the previous installation still exists. RunAtLoad is deliberately
+            // not an ownership condition; explicit disable cleans inactive rows.
+            return targetsApplication() && (legacyName || identifiers.contains(bundleIdentifier))
         }
 
         return LaunchAtLoginBackend(
             readStatus: {
+                let legacy = legacyCandidates().filter(isLegacyCodexIslandAgent)
                 if let dictionary = propertyList(at: plistURL),
                    dictionary["Label"] as? String == launchAgentLabel,
                    dictionary["RunAtLoad"] as? Bool == true {
@@ -137,17 +159,15 @@ struct LaunchAtLoginBackend {
                         == programArguments,
                        dictionary["AssociatedBundleIdentifiers"] as? [String]
                         == [bundleIdentifier] {
-                        return .enabled
+                        return legacy.isEmpty ? .enabled : .legacyRegistered
                     }
 
-                    if Set(dictionary.keys) == legacyKeys,
-                       dictionary["ProgramArguments"] as? [String]
-                        == legacyProgramArguments {
-                        return .legacyRegistered
-                    }
+                    // The app-owned label survives relocation. Rewrite older
+                    // registrations even when their executable path has moved.
+                    return .legacyRegistered
                 }
 
-                if legacyPlistURLs.contains(where: isLegacyCodexIslandAgent) {
+                if legacy.contains(where: { propertyList(at: $0)?["RunAtLoad"] as? Bool == true }) {
                     return .legacyRegistered
                 }
 
@@ -168,7 +188,7 @@ struct LaunchAtLoginBackend {
                     [.posixPermissions: 0o644],
                     ofItemAtPath: plistURL.path
                 )
-                for legacyURL in legacyPlistURLs
+                for legacyURL in legacyCandidates()
                     where isLegacyCodexIslandAgent(at: legacyURL) {
                     try fileManager.removeItem(at: legacyURL)
                 }
@@ -177,7 +197,7 @@ struct LaunchAtLoginBackend {
                 if fileManager.fileExists(atPath: plistURL.path) {
                     try fileManager.removeItem(at: plistURL)
                 }
-                for legacyURL in legacyPlistURLs
+                for legacyURL in legacyCandidates()
                     where isLegacyCodexIslandAgent(at: legacyURL) {
                     try fileManager.removeItem(at: legacyURL)
                 }
@@ -202,15 +222,9 @@ struct LaunchAtLoginSettingModel {
     mutating func setEnabled(_ shouldEnable: Bool) {
         let currentStatus = backend.readStatus()
 
-        switch (shouldEnable, currentStatus) {
-        case (true, .enabled):
+        if shouldEnable, currentStatus == .enabled {
             state = .enabled
             return
-        case (false, .notRegistered):
-            state = .disabled
-            return
-        default:
-            break
         }
 
         do {

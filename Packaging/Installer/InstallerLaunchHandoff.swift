@@ -13,6 +13,7 @@ final class InstallerLaunchHandoff {
     private var started = false
     private var completed = false
     private var deadline: DispatchWorkItem?
+    private var onOpened: (() -> Void)?
     private var completion: ((Outcome) -> Void)?
 
     init(timeout: TimeInterval = 8) {
@@ -20,10 +21,12 @@ final class InstallerLaunchHandoff {
     }
 
     func start(open: (@escaping (Error?) -> Void) -> Void,
+               onOpened: @escaping () -> Void = {},
                completion: @escaping (Outcome) -> Void) {
         precondition(Thread.isMainThread)
         guard !started else { return }
         started = true
+        self.onOpened = onOpened
         self.completion = completion
         let deadline = DispatchWorkItem { [weak self] in self?.finish(.timedOut) }
         self.deadline = deadline
@@ -40,8 +43,11 @@ final class InstallerLaunchHandoff {
         completed = true
         deadline?.cancel()
         deadline = nil
+        let onOpened = self.onOpened
+        self.onOpened = nil
         let completion = self.completion
         self.completion = nil
+        if case .opened = outcome { onOpened?() }
         completion?(outcome)
     }
 }

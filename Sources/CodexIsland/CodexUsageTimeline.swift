@@ -1,6 +1,30 @@
 import Foundation
 
 enum CodexUsageTimeline {
+    /// Account date keys use the Gregorian calendar regardless of the user's
+    /// preferred display calendar. Keep local time zones (including DST) while
+    /// sharing that date-key convention across every usage source.
+    static func calendar(timeZone: TimeZone = .autoupdatingCurrent) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    static func dailyCreditTotals(
+        from hourly: [Date: CodexChartCreditTotal],
+        calendar inputCalendar: Calendar = .autoupdatingCurrent
+    ) -> [String: CodexChartCreditTotal] {
+        let calendar = Self.calendar(timeZone: inputCalendar.timeZone)
+        var totals: [String: CodexChartCreditTotal] = [:]
+        for (hour, value) in hourly {
+            let components = calendar.dateComponents([.year, .month, .day], from: hour)
+            let key = String(format: "%04d-%02d-%02d", components.year ?? 0,
+                             components.month ?? 0, components.day ?? 0)
+            totals[key, default: CodexChartCreditTotal()].merge(value)
+        }
+        return totals
+    }
+
     static func lastDaysIncludingToday(
         from buckets: [DailyUsageBucket],
         todayTokens: Int64? = nil,
@@ -11,7 +35,7 @@ enum CodexUsageTimeline {
     ) -> [DailyUsageBucket] {
         guard count > 0 else { return [] }
 
-        let calendar = inputCalendar
+        let calendar = Self.calendar(timeZone: inputCalendar.timeZone)
         let today = calendar.startOfDay(for: now)
         guard let firstDay = calendar.date(
             byAdding: .day,
@@ -27,7 +51,9 @@ enum CodexUsageTimeline {
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         var tokenByDate = buckets.reduce(into: [String: Int64]()) { result, bucket in
-            result[bucket.startDate, default: 0] += max(0, bucket.tokens)
+            let (total, overflow) = result[bucket.startDate, default: 0]
+                .addingReportingOverflow(max(0, bucket.tokens))
+            result[bucket.startDate] = overflow ? .max : total
         }
 
         // Account history can be delayed or temporarily truncated. Merge the

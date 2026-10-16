@@ -175,6 +175,13 @@ final class ResetSubscriptionService: ObservableObject {
         nextModelRetryAt = nil
     }
 
+    /// Toggles scheduling without committing any partially edited form fields.
+    func setAutomaticChecksEnabled(_ enabled: Bool) throws {
+        var updated = settings
+        updated.setAutomaticChecksEnabled(enabled)
+        try updateSettings(updated)
+    }
+
     func updateSettings(_ proposed: ResetSubscriptionSettings) throws {
         let updated = try proposed.validated()
         guard updated != settings else { return }
@@ -232,9 +239,9 @@ final class ResetSubscriptionService: ObservableObject {
     private func refreshIfDue() {
         guard hasStarted else { return }
         checkIfDue()
-        // Use the existing heartbeat so failed/empty catalogs recover even while
-        // settings stays open. stop() cancels both the heartbeat and any request.
-        if let nextModelRetryAt, nextModelRetryAt <= now() { loadModels() }
+        // Check account changes and cache expiry even after a successful load.
+        // loadModels() handles freshness, in-flight requests, and retry backoff.
+        loadModels()
     }
 
     func loadModels() {

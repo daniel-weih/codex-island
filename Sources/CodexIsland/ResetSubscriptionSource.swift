@@ -62,7 +62,22 @@ enum ResetSubscriptionSource {
             guard type.isEmpty || type.contains("text/") || type.contains("xml") || type.contains("html") else {
                 throw ResetSubscriptionError.source("来源地址需要返回网页、RSS 或 JSON 内容。")
             }
-            text = plainText(decoded)
+            let prefix = removingComments(from: decoded).trimmingCharacters(in: .whitespacesAndNewlines)
+            if type.contains("xml") || prefix.hasPrefix("<?xml")
+                || prefix.range(of: #"^<(?:rss|feed|rdf:RDF)\b"#, options: .regularExpression) != nil {
+                let parser = XMLParser(data: data)
+                let delegate = FeedTextParser()
+                parser.delegate = delegate
+                parser.shouldProcessNamespaces = true
+                parser.shouldResolveExternalEntities = false
+                parser.externalEntityResolvingPolicy = .never
+                guard parser.parse() else {
+                    throw ResetSubscriptionError.source("来源 RSS/XML 无法解析，请检查资讯地址。")
+                }
+                text = delegate.text
+            } else {
+                text = plainText(decoded)
+            }
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ResetSubscriptionError.source("来源页面没有可分析的正文，可能需要登录或由 JavaScript 加载。")
@@ -120,25 +135,176 @@ enum ResetSubscriptionSource {
     }
 
     static func plainText(_ html: String) -> String {
-        var value = html
-        for pattern in ["(?is)<!--.*?-->", "(?is)<(script|style|noscript|svg)\\b[^>]*>.*?</\\1\\s*>", "(?is)<[^>]+>"] {
-            value = value.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
-        }
+        var value = removingTags(from: removingHiddenElements(from: removingComments(from: html)))
         for (entity, replacement) in [("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'")] {
             value = value.replacingOccurrences(of: entity, with: replacement)
         }
-        if let regex = try? NSRegularExpression(pattern: "&#(x[0-9A-Fa-f]+|[0-9]+);") {
-            let matches = regex.matches(in: value, range: NSRange(value.startIndex..., in: value))
-            for match in matches.reversed() {
-                guard let numberRange = Range(match.range(at: 1), in: value),
-                      let fullRange = Range(match.range, in: value) else { continue }
-                let number = String(value[numberRange])
+        let matches = numericEntityPattern.matches(in: value, range: NSRange(value.startIndex..., in: value))
+        if !matches.isEmpty {
+            // Keep the source immutable. Replacing matches backwards still
+            // repeatedly shifts/decodes the growing Unicode suffix.
+            let units = Array(value.utf16)
+            var decoded: [UInt16] = []
+            decoded.reserveCapacity(units.count)
+            var copiedThrough = 0
+            for match in matches {
+                let numberRange = match.range(at: 1)
+                let number = String(decoding: units[numberRange.location..<NSMaxRange(numberRange)], as: UTF16.self)
                 let code = number.hasPrefix("x") ? UInt32(number.dropFirst(), radix: 16) : UInt32(number)
-                if let code, let scalar = UnicodeScalar(code) { value.replaceSubrange(fullRange, with: String(scalar)) }
+                guard let code, let scalar = UnicodeScalar(code) else { continue }
+                decoded.append(contentsOf: units[copiedThrough..<match.range.location])
+                decoded.append(contentsOf: String(scalar).utf16)
+                copiedThrough = NSMaxRange(match.range)
             }
+            decoded.append(contentsOf: units[copiedThrough...])
+            value = String(decoding: decoded, as: UTF16.self)
         }
         return value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static let hiddenOpenPattern = try! NSRegularExpression(
+        pattern: #"<(?:(script)|(style)|(noscript)|(svg))\b"#, options: .caseInsensitive)
+    private static let hiddenClosePattern = try! NSRegularExpression(
+        pattern: #"</(?:(script)|(style)|(noscript)|(svg))\s*>"#, options: .caseInsensitive)
+    private static let numericEntityPattern = try! NSRegularExpression(pattern: "&#(x[0-9A-Fa-f]+|[0-9]+);")
+
+    private static func replacingRanges(_ ranges: [Range<Int>], in units: [UInt16]) -> String {
+        var output: [UInt16] = []
+        output.reserveCapacity(units.count)
+        var copiedThrough = 0
+        for range in ranges {
+            output.append(contentsOf: units[copiedThrough..<range.lowerBound])
+            output.append(32)
+            copiedThrough = range.upperBound
+        }
+        output.append(contentsOf: units[copiedThrough...])
+        return String(decoding: output, as: UTF16.self)
+    }
+
+    private static func removingComments(from html: String) -> String {
+        guard html.range(of: "<!--", options: .literal) != nil else { return html }
+        let units = Array(html.utf16)
+        var ranges: [Range<Int>] = []
+        var cursor = 0
+        while cursor + 3 < units.count {
+            guard units[cursor] == 60, units[cursor + 1] == 33,
+                  units[cursor + 2] == 45, units[cursor + 3] == 45 else { cursor += 1; continue }
+            var end = cursor + 4
+            while end + 2 < units.count,
+                  !(units[end] == 45 && units[end + 1] == 45 && units[end + 2] == 62) { end += 1 }
+            guard end + 2 < units.count else { break }
+            ranges.append(cursor..<(end + 3))
+            cursor = end + 3
+        }
+        return ranges.isEmpty ? html : replacingRanges(ranges, in: units)
+    }
+
+    private static func removingHiddenElements(from html: String) -> String {
+        let fullRange = NSRange(html.startIndex..., in: html)
+        guard hiddenOpenPattern.firstMatch(in: html, range: fullRange) != nil else { return html }
+        // Index closing tags once. An unterminated script must not make every
+        // subsequent opening tag search the same remaining document again.
+        var closes = Array(repeating: [NSRange](), count: 4)
+        hiddenClosePattern.enumerateMatches(in: html, range: fullRange) { match, _, _ in
+            guard let match,
+                  let kind = (1...4).first(where: { match.range(at: $0).location != NSNotFound }) else { return }
+            closes[kind - 1].append(match.range)
+        }
+        guard closes.contains(where: { !$0.isEmpty }) else { return html }
+        let units = Array(html.utf16)
+        var closeOffsets = Array(repeating: 0, count: 4)
+        var tagEnd = 0
+        var removedThrough = 0
+        var ranges: [Range<Int>] = []
+        hiddenOpenPattern.enumerateMatches(in: html, range: fullRange) { match, _, stop in
+            guard let match, match.range.location >= removedThrough,
+                  let group = (1...4).first(where: { match.range(at: $0).location != NSNotFound }) else { return }
+            let kind = group - 1
+            tagEnd = max(tagEnd, NSMaxRange(match.range))
+            while tagEnd < units.count, units[tagEnd] != 62 { tagEnd += 1 }
+            guard tagEnd < units.count else { stop.pointee = true; return }
+            while closeOffsets[kind] < closes[kind].count,
+                  closes[kind][closeOffsets[kind]].location <= tagEnd { closeOffsets[kind] += 1 }
+            guard closeOffsets[kind] < closes[kind].count else { return }
+            let end = NSMaxRange(closes[kind][closeOffsets[kind]])
+            ranges.append(match.range.location..<end)
+            removedThrough = end
+        }
+        return ranges.isEmpty ? html : replacingRanges(ranges, in: units)
+    }
+
+    private static func removingTags(from html: String) -> String {
+        guard html.utf8.contains(60) else { return html }
+        let units = Array(html.utf16)
+        var cursor = 0
+        var ranges: [Range<Int>] = []
+        while cursor < units.count {
+            guard units[cursor] == 60 else { cursor += 1; continue }
+            var end = cursor + 1
+            while end < units.count, units[end] != 62 { end += 1 }
+            guard end < units.count else { break }
+            // The old tag pattern leaves <> untouched.
+            if end > cursor + 1 { ranges.append(cursor..<(end + 1)) }
+            cursor = end + 1
+        }
+        return ranges.isEmpty ? html : replacingRanges(ranges, in: units)
+    }
+}
+
+private final class FeedTextParser: NSObject, XMLParserDelegate {
+    private var htmlText: [Bool] = []
+    private var ignoredDepth = 0
+    private var buffer = ""
+    private var parts: [String] = []
+
+    var text: String {
+        parts.joined(separator: " ").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String]) {
+        flushText()
+        if ignoredDepth > 0 || ["script", "style", "noscript", "svg"].contains(elementName.lowercased()) {
+            ignoredDepth += 1
+        }
+        let isAtom = namespaceURI == "http://www.w3.org/2005/Atom"
+        let isRSSHTML = !isAtom && (elementName == "description"
+            || (elementName == "encoded" && namespaceURI == "http://purl.org/rss/1.0/modules/content/"))
+        htmlText.append(isRSSHTML || (isAtom && attributeDict["type"] == "html"))
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        flushText()
+        htmlText.removeLast()
+        if ignoredDepth > 0 { ignoredDepth -= 1 }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if ignoredDepth == 0 { buffer += string }
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if ignoredDepth == 0 { buffer += String(decoding: CDATABlock, as: UTF8.self) }
+    }
+
+    // Feed text has no need for DTD entities. Reject declarations instead of
+    // allowing local-file reads or expanding an unbounded entity graph.
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
+        parser.abortParsing()
+    }
+
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) {
+        parser.abortParsing()
+    }
+
+    private func flushText() {
+        guard !buffer.isEmpty else { return }
+        // XMLParser already decodes XML entities. Only HTML-bearing feed fields
+        // need another pass, after complete character/CDATA chunks are joined.
+        parts.append(htmlText.last == true ? ResetSubscriptionSource.plainText(buffer) : buffer)
+        buffer = ""
     }
 }
 

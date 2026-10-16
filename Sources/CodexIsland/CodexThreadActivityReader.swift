@@ -8,9 +8,13 @@ enum CodexThreadActivityReader {
     private static let defaultRunningStaleInterval: TimeInterval = 30 * 60
     private static let taskStartedMarker = Data("task_started".utf8)
     private static let taskCompleteMarker = Data("task_complete".utf8)
+    private static let turnStartedMarker = Data("turn_started".utf8)
+    private static let turnCompleteMarker = Data("turn_complete".utf8)
     private static let turnAbortedMarker = Data("turn_aborted".utf8)
     private static let tokenCountMarker = Data("token_count".utf8)
-    private static let errorMarker = Data("\"type\":\"error\"".utf8)
+    // Whitespace between JSON keys and values is insignificant. This is only
+    // a cheap prefilter; the parsed payload type below identifies the event.
+    private static let errorMarker = Data("\"error\"".utf8)
     private static let inputRequestMarker = Data("request_user_input".utf8)
     private static let functionCallOutputMarker = Data("function_call_output".utf8)
     private static let cache = ThreadActivityCache()
@@ -116,39 +120,11 @@ enum CodexThreadActivityReader {
         // at that record's exact start. A fixed-size overlap can begin inside
         // a record larger than the overlap and permanently miss its event.
         let lowerBound = min(trailingLineStartOffset ?? previousFileSize, previousFileSize)
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: lowerBound)
-
-        var offset = lowerBound
-        var carry = Data()
         var reducer = initialReducer
-
-        while offset < fileSize {
-            let readCount = min(chunkSize, Int(fileSize - offset))
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-            offset += UInt64(chunk.count)
-
-            var block = Data(capacity: carry.count + chunk.count)
-            block.append(carry)
-            block.append(chunk)
-            let lines = block.split(separator: 0x0A, omittingEmptySubsequences: false)
-            if let lastLine = lines.last {
-                carry = Data(lastLine)
-            } else {
-                carry.removeAll(keepingCapacity: true)
+        try CodexRolloutLineReader.scanForward(url: url, from: lowerBound, to: fileSize) { line in
+            if let event = parseRolloutEvent(line) {
+                reducer.consume(event)
             }
-
-            for line in lines.dropLast() {
-                if let event = parseRolloutEvent(line) {
-                    reducer.consume(event)
-                }
-            }
-        }
-
-        if let event = parseRolloutEvent(carry) {
-            reducer.consume(event)
         }
         return reducer
     }
@@ -186,56 +162,19 @@ enum CodexThreadActivityReader {
         url: URL,
         fileSize: UInt64
     ) throws -> ActivityReducer {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        var position = fileSize
-        var carry = Data()
         var reverseLifecycleEvents: [RolloutEvent] = []
         var latestTokenUsage: ThreadTokenUsage?
         var foundLatestStart = false
 
-        while position > 0 {
-            let readCount = min(chunkSize, Int(position))
-            position -= UInt64(readCount)
-            try handle.seek(toOffset: position)
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-
-            var block = Data(capacity: chunk.count + carry.count)
-            block.append(chunk)
-            block.append(carry)
-            let lines = block.split(separator: 0x0A, omittingEmptySubsequences: false)
-            guard lines.count > 1 else {
-                carry = block
-                continue
-            }
-
-            carry = Data(lines[0])
-            for line in lines.dropFirst().reversed() {
-                guard let event = parseRolloutEvent(line) else { continue }
-                collectBackward(
-                    event,
-                    reverseLifecycleEvents: &reverseLifecycleEvents,
-                    latestTokenUsage: &latestTokenUsage,
-                    foundLatestStart: &foundLatestStart
-                )
-                if foundLatestStart, latestTokenUsage != nil {
-                    return reduceChronologically(
-                        reverseLifecycleEvents.reversed(),
-                        tokenUsage: latestTokenUsage
-                    )
-                }
-            }
-        }
-
-        if let event = parseRolloutEvent(carry) {
+        try CodexRolloutLineReader.scanBackwards(url: url, to: fileSize) { line in
+            guard let event = parseRolloutEvent(line) else { return false }
             collectBackward(
                 event,
                 reverseLifecycleEvents: &reverseLifecycleEvents,
                 latestTokenUsage: &latestTokenUsage,
                 foundLatestStart: &foundLatestStart
             )
+            return foundLatestStart && latestTokenUsage != nil
         }
         return reduceChronologically(
             reverseLifecycleEvents.reversed(),
@@ -290,6 +229,8 @@ enum CodexThreadActivityReader {
 
         guard data.range(of: taskStartedMarker) != nil
                 || data.range(of: taskCompleteMarker) != nil
+                || data.range(of: turnStartedMarker) != nil
+                || data.range(of: turnCompleteMarker) != nil
                 || data.range(of: turnAbortedMarker) != nil
                 || data.range(of: tokenCountMarker) != nil
                 || data.range(of: errorMarker) != nil,
@@ -301,19 +242,31 @@ enum CodexThreadActivityReader {
 
         let turnID = payload.string("turn_id")
         switch payload.string("type") {
-        case "task_started":
+        case "task_started", "turn_started":
             return .started(
                 turnID: turnID,
                 occurredAt: eventDate(object: object, payload: payload)
             )
-        case "task_complete": return .completed(turnID: turnID)
+        case "task_complete", "turn_complete":
+            return .completed(
+                turnID: turnID,
+                failed: payload.dictionary("error").map(errorAffectsTurnStatus) ?? false
+            )
         case "turn_aborted": return .aborted(turnID: turnID)
-        case "error": return .failed
+        case "error": return errorAffectsTurnStatus(payload) ? .failed : nil
         case "token_count":
             guard let usage = parseTokenUsage(payload) else { return nil }
             return .tokenUsage(usage)
         default: return nil
         }
+    }
+
+    private static func errorAffectsTurnStatus(_ error: JSONObject) -> Bool {
+        // These are failures of a separate control operation, not of the active
+        // turn. Match CodexErrorInfo.affects_turn_status when replaying history.
+        if error.string("codex_error_info") == "thread_rollback_failed" { return false }
+        if error.dictionary("codex_error_info")?["active_turn_not_steerable"] != nil { return false }
+        return true
     }
 
     private static func parseTokenUsage(_ payload: JSONObject) -> ThreadTokenUsage? {
@@ -373,7 +326,7 @@ private enum RolloutEvent {
     case started(turnID: String?, occurredAt: Date?)
     case inputRequested(callID: String)
     case inputReceived(callID: String)
-    case completed(turnID: String?)
+    case completed(turnID: String?, failed: Bool)
     case aborted(turnID: String?)
     case failed
     case tokenUsage(ThreadTokenUsage)
@@ -381,46 +334,51 @@ private enum RolloutEvent {
 
 private struct ActivityReducer {
     var executionState: ThreadExecutionState = .unknown
-    var activeTurnID: String?
+    var latestTurnID: String?
     var activeStartedAt: Date?
-    var activeInputRequestID: String?
+    var pendingInputRequestIDs = Set<String>()
     var tokenUsage: ThreadTokenUsage?
 
     mutating func consume(_ event: RolloutEvent) {
         switch event {
         case .started(let turnID, let occurredAt):
-            activeTurnID = turnID
+            latestTurnID = turnID
             activeStartedAt = occurredAt
-            activeInputRequestID = nil
+            pendingInputRequestIDs.removeAll()
             executionState = .running
 
         case .inputRequested(let callID):
-            activeInputRequestID = callID
+            guard executionState != .failed, executionState != .interrupted,
+                  executionState != .idle else { return }
+            pendingInputRequestIDs.insert(callID)
             executionState = .waitingForInput
 
         case .inputReceived(let callID):
-            guard activeInputRequestID == callID else { return }
-            activeInputRequestID = nil
-            executionState = .running
+            guard executionState == .waitingForInput,
+                  pendingInputRequestIDs.remove(callID) != nil else { return }
+            if pendingInputRequestIDs.isEmpty { executionState = .running }
 
         case .failed:
+            pendingInputRequestIDs.removeAll()
             executionState = .failed
 
-        case .completed(let turnID):
+        case .completed(let turnID, let failed):
             guard terminalMatches(turnID) else { return }
-            if executionState != .failed && executionState != .interrupted {
+            if failed {
+                executionState = .failed
+            } else if executionState != .failed && executionState != .interrupted {
                 executionState = .idle
             }
-            activeTurnID = nil
+            // Retain the last turn ID after it finishes too. A delayed terminal
+            // event from an older turn must not overwrite this outcome.
             activeStartedAt = nil
-            activeInputRequestID = nil
+            pendingInputRequestIDs.removeAll()
 
         case .aborted(let turnID):
             guard terminalMatches(turnID) else { return }
             executionState = .interrupted
-            activeTurnID = nil
             activeStartedAt = nil
-            activeInputRequestID = nil
+            pendingInputRequestIDs.removeAll()
 
         case .tokenUsage(let usage):
             tokenUsage = usage
@@ -446,8 +404,8 @@ private struct ActivityReducer {
     }
 
     private func terminalMatches(_ turnID: String?) -> Bool {
-        guard let activeTurnID, let turnID else { return true }
-        return activeTurnID == turnID
+        guard let latestTurnID, let turnID else { return true }
+        return latestTurnID == turnID
     }
 }
 

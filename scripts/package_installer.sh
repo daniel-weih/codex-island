@@ -22,7 +22,9 @@ swiftc -O -swift-version 5 -parse-as-library \
     -sdk "$SDK_PATH" -target "$(uname -m)-apple-macosx13.0" \
     -module-cache-path "$CACHE_DIR" \
     "$ROOT_DIR/Packaging/Installer/AppInstaller.swift" \
+    "$ROOT_DIR/Packaging/Installer/InstalledApplication.swift" \
     "$ROOT_DIR/Packaging/Installer/InstallerLaunchHandoff.swift" \
+    "$ROOT_DIR/Packaging/Installer/InstallerDiskImageEjector.swift" \
     "$ROOT_DIR/Packaging/Installer/InstallerMain.swift" \
     -o "$APP_DIR/Contents/MacOS/Install Codex Island"
 strip -S "$APP_DIR/Contents/MacOS/Install Codex Island"

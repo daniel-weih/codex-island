@@ -10,8 +10,11 @@ final class CodexStatusViewModel: ObservableObject {
     private let client: CodexAppServerClient
     private var pollTimer: Timer?
     private var activityTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration: UInt64 = 0
     private var threadRefreshGeneration: UInt64 = 0
     private var accountGeneration: UInt64 = 0
+    private var accountIdentity: Data?
     private var refreshPending = false
     private var nextUsageRefreshAt: Date?
     private var nextProfileRefreshAt: Date?
@@ -21,6 +24,7 @@ final class CodexStatusViewModel: ObservableObject {
     private var tokenConsumptionHighWater: Int64?
     private var tokenConsumptionDayStart: Date?
     private var hasStarted = false
+    private var isStopped = false
     var resetSubscriptionUsage: [ResetUsageRecord] = [] {
         didSet { resetUsageRevision &+= 1 }
     }
@@ -41,7 +45,7 @@ final class CodexStatusViewModel: ObservableObject {
 
         client.onConnectionChanged = { [weak self] connected, message in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.isStopped else { return }
                 self.snapshot.connection = connected ? .connected : .disconnected(message)
             }
         }
@@ -49,25 +53,9 @@ final class CodexStatusViewModel: ObservableObject {
         client.onNotification = { [weak self] method, _ in
             guard method == "account/rateLimits/updated" || method == "account/updated" else { return }
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.isStopped else { return }
                 if method == "account/updated" {
-                    self.accountGeneration &+= 1
-                    self.nextUsageRefreshAt = nil
-                    self.nextProfileRefreshAt = nil
-                    self.snapshot.account = .empty
-                    self.snapshot.rateLimit = nil
-                    self.snapshot.resetCredits = nil
-                    self.snapshot.usage = .empty
-                    self.snapshot.profileIdentity = .empty
-                    self.snapshot.todayThreadTokens = nil
-                    self.snapshot.hourlyThreadTokens = []
-                    self.snapshot.dailyThreadTokens = []
-                    self.snapshot.chartCreditTotals = [:]
-                    self.tokenConsumptionHighWater = nil
-                    self.tokenConsumptionDayStart = nil
-                    self.localActivityRolloutPaths = []
-                    self.hasDiscoveredLocalActivity = false
-                    self.nextDailyThreadDiscoveryAt = nil
+                    self.invalidateAccountState()
                 }
                 self.refresh()
             }
@@ -77,6 +65,7 @@ final class CodexStatusViewModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        isStopped = false
         snapshot.connection = .connecting
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -93,18 +82,27 @@ final class CodexStatusViewModel: ObservableObject {
                 }
                 guard let self, !Task.isCancelled else { return }
                 await self.refreshRecentThreadStates()
+                guard !Task.isCancelled else { return }
                 await self.refreshDailyThreadTokens()
             }
         }
     }
 
     func stop() {
+        isStopped = true
         pollTimer?.invalidate()
         pollTimer = nil
         activityTask?.cancel()
         activityTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshGeneration &+= 1
+        refreshPending = false
+        isRefreshing = false
+        accountGeneration &+= 1
         threadRefreshGeneration &+= 1
         hasStarted = false
+        snapshot.connection = .disconnected(nil)
         client.stop()
     }
 
@@ -119,32 +117,41 @@ final class CodexStatusViewModel: ObservableObject {
     }
 
     func refresh() {
+        // Standalone manual refresh is supported before start(), but an explicit
+        // stop must remain stopped until start() begins a new lifecycle.
+        guard !isStopped else { return }
         guard !isRefreshing else {
             refreshPending = true
             return
         }
         isRefreshing = true
-
-        Task {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        refreshTask = Task {
             repeat {
                 refreshPending = false
                 await performRefresh()
+                guard !Task.isCancelled, generation == refreshGeneration else { return }
             } while refreshPending
             isRefreshing = false
+            refreshTask = nil
         }
     }
 
     private func performRefresh() async {
+        guard !Task.isCancelled else { return }
         do {
             try await client.start()
+            guard !Task.isCancelled else { return }
             snapshot.connection = .connected
         } catch {
+            guard !Task.isCancelled else { return }
             snapshot.connection = .disconnected(error.localizedDescription)
             snapshot.warning = error.localizedDescription
             return
         }
 
-        let generation = accountGeneration
+        var generation = accountGeneration
         var updated = snapshot
         updated.connection = .connected
         var warnings: [String] = []
@@ -156,30 +163,36 @@ final class CodexStatusViewModel: ObservableObject {
                 method: "account/read",
                 params: ["refreshToken": false]
             )
-            updated.account = CodexStatusPayloadParser.parseAccount(result)
+            guard !Task.isCancelled, generation == accountGeneration else { return }
+            let identity = try JSONSerialization.data(
+                withJSONObject: result.dictionary("account") ?? [:], options: [.sortedKeys]
+            )
+            // A replacement app-server can observe a login/logout performed by
+            // another client without emitting account/updated. Compare the raw
+            // account (including its identity fields), not just the plan label.
+            let account = CodexStatusPayloadParser.parseAccount(result)
+            if (accountIdentity != nil && accountIdentity != identity)
+                || updated.account.authType != account.authType {
+                invalidateAccountState()
+                generation = accountGeneration
+                updated = snapshot
+                updated.connection = .connected
+                resolvedNextUsageRefreshAt = nil
+                resolvedNextProfileRefreshAt = nil
+            }
+            accountIdentity = identity
+            updated.account = account
         } catch {
             warnings.append("账户信息不可用")
         }
 
+        guard !Task.isCancelled, generation == accountGeneration else { return }
+
         let now = Date()
         let shouldRefreshProfile = updated.account.authType == "chatgpt"
             && isRefreshDue(nextRefreshAt: nextProfileRefreshAt, now: now)
-        let profileTask: Task<ProfileIdentityLoadResult, Never>?
-        if shouldRefreshProfile {
-            profileTask = Task { [weak self] in
-                guard let self else {
-                    return ProfileIdentityLoadResult(
-                        identity: .empty,
-                        isRemoteProfile: false,
-                        authorizationRejected: false,
-                        retrySoon: true
-                    )
-                }
-                return await self.requestProfileIdentity()
-            }
-        } else {
-            profileTask = nil
-        }
+        async let profileResult: ProfileIdentityLoadResult? = shouldRefreshProfile
+            ? requestProfileIdentity() : nil
 
         do {
             let result = try await client.request(method: "account/rateLimits/read")
@@ -189,6 +202,8 @@ final class CodexStatusViewModel: ObservableObject {
         } catch {
             warnings.append("额度信息不可用")
         }
+
+        guard !Task.isCancelled, generation == accountGeneration else { return }
 
         if isRefreshDue(nextRefreshAt: nextUsageRefreshAt, now: now) {
             do {
@@ -206,6 +221,8 @@ final class CodexStatusViewModel: ObservableObject {
                 }
             }
         }
+
+        guard !Task.isCancelled, generation == accountGeneration else { return }
 
         let threadGeneration = beginThreadRefresh()
         var refreshedThreads: [ThreadSummary]?
@@ -227,8 +244,7 @@ final class CodexStatusViewModel: ObservableObject {
             $0.executionState == .running
         }
 
-        if let profileTask {
-            let loadedProfile = await profileTask.value
+        if let loadedProfile = await profileResult {
             if loadedProfile.isRemoteProfile {
                 updated.profileIdentity = loadedProfile.retrySoon
                     ? Self.fillingMissingProfileFields(
@@ -254,7 +270,7 @@ final class CodexStatusViewModel: ObservableObject {
 
         // Account changes invalidate every result captured above. The queued
         // refresh will run immediately after this one and load the new account.
-        guard generation == accountGeneration else { return }
+        guard !Task.isCancelled, generation == accountGeneration else { return }
         nextUsageRefreshAt = resolvedNextUsageRefreshAt
         nextProfileRefreshAt = resolvedNextProfileRefreshAt
         updated.lastUpdated = Date()
@@ -277,6 +293,28 @@ final class CodexStatusViewModel: ObservableObject {
             updated.connection = snapshot.connection
         }
         snapshot = updated
+    }
+
+    private func invalidateAccountState() {
+        accountGeneration &+= 1
+        threadRefreshGeneration &+= 1
+        accountIdentity = nil
+        nextUsageRefreshAt = nil
+        nextProfileRefreshAt = nil
+        snapshot.account = .empty
+        snapshot.rateLimit = nil
+        snapshot.resetCredits = nil
+        snapshot.usage = .empty
+        snapshot.profileIdentity = .empty
+        snapshot.todayThreadTokens = nil
+        snapshot.hourlyThreadTokens = []
+        snapshot.dailyThreadTokens = []
+        snapshot.chartCreditTotals = [:]
+        tokenConsumptionHighWater = nil
+        tokenConsumptionDayStart = nil
+        localActivityRolloutPaths = []
+        hasDiscoveredLocalActivity = false
+        nextDailyThreadDiscoveryAt = nil
     }
 
     private func requestProfileIdentity() async -> ProfileIdentityLoadResult {
@@ -315,7 +353,7 @@ final class CodexStatusViewModel: ObservableObject {
     }
 
     /// Refreshes the small, state-db-backed thread list every second without
-    /// touching account or quota endpoints. Runtime settings and config
+    /// touching account or quota endpoints. Runtime settings and request-log
     /// fallbacks are only resolved when a thread enters or leaves the recent
     /// list; the common path only reads appended rollout activity.
     private func refreshRecentThreadStates() async {
@@ -415,10 +453,11 @@ final class CodexStatusViewModel: ObservableObject {
     /// activity boundary, so timestamp-rewritten parent history is skipped.
     /// The recent candidate rows remain an immediate fallback while a new rollout
     /// awaits discovery.
-    private func refreshDailyThreadTokens() async {
+    func refreshDailyThreadTokens(clock: () -> Date = Date.init) async {
+        guard !isStopped, !Task.isCancelled else { return }
         let generation = accountGeneration
-        let now = Date()
-        let dayStart = Calendar.autoupdatingCurrent.startOfDay(for: now)
+        let now = clock()
+        let dayStart = CodexUsageTimeline.calendar().startOfDay(for: now)
         if tokenConsumptionDayStart != dayStart {
             tokenConsumptionDayStart = dayStart
             tokenConsumptionHighWater = nil
@@ -429,7 +468,7 @@ final class CodexStatusViewModel: ObservableObject {
                     now: now
                 )
             }.value
-            guard generation == accountGeneration else { return }
+            guard !Task.isCancelled, generation == accountGeneration else { return }
             if let discovered {
                 localActivityRolloutPaths = discovered
                 hasDiscoveredLocalActivity = true
@@ -479,21 +518,25 @@ final class CodexStatusViewModel: ObservableObject {
             }
             return (usage, hasRunningSession)
         }.value
-        guard generation == accountGeneration else { return }
+        guard !Task.isCancelled, generation == accountGeneration else { return }
         // Ephemeral subscription turns have no rollout. A fresh installation or
         // unreadable local logs must still show their independently recorded usage.
         if localActivity.0 != nil || !resetSubscriptionUsage.isEmpty {
+            // Usage can arrive while the local scan is suspended. Capture its
+            // cutoff with the records so it cannot be cached as future usage.
+            let aggregationNow = clock()
             let revision = resetUsageRevision
             let subscriptionAggregation: ResetSubscriptionUsage.Aggregation
-            if let cached = resetUsageCache.value(revision: revision, now: now) {
+            if let cached = resetUsageCache.value(revision: revision, now: aggregationNow) {
                 subscriptionAggregation = cached
             } else {
                 let records = resetSubscriptionUsage
                 let result = await Task.detached(priority: .utility) {
-                    ResetSubscriptionUsage.aggregate(records: records, now: now)
+                    ResetSubscriptionUsage.aggregate(records: records, now: aggregationNow)
                 }.value
-                guard generation == accountGeneration, revision == resetUsageRevision else { return }
-                resetUsageCache.store(result, revision: revision, now: now)
+                guard !Task.isCancelled, generation == accountGeneration,
+                      revision == resetUsageRevision else { return }
+                resetUsageCache.store(result, revision: revision, now: aggregationNow)
                 subscriptionAggregation = result
             }
             let usage = localActivity.0
@@ -533,9 +576,8 @@ final class CodexStatusViewModel: ObservableObject {
 
     private func resolveNewThreadList(_ threads: [ThreadSummary]) async -> [ThreadSummary] {
         let recordedThreads = await Self.loadRuntimeSettings(for: threads)
-        let configuredThreads = await loadEffectiveServiceTierFallbacks(for: recordedThreads)
-        let activities = await Self.loadExecutionSnapshots(for: configuredThreads)
-        return Self.applying(activities, to: configuredThreads)
+        let activities = await Self.loadExecutionSnapshots(for: recordedThreads)
+        return Self.applying(activities, to: recordedThreads)
     }
 
     private static func mergingListMetadata(
@@ -620,48 +662,19 @@ final class CodexStatusViewModel: ObservableObject {
             for await (index, settings) in group {
                 guard resolved.indices.contains(index), let settings else { continue }
                 resolved[index].model = settings.model ?? resolved[index].model
-                resolved[index].reasoningEffort = settings.reasoningEffort
-                    ?? resolved[index].reasoningEffort
+                if settings.hasRecordedReasoningEffort {
+                    resolved[index].reasoningEffort = settings.reasoningEffort
+                }
                 if let serviceTier = settings.serviceTier {
                     resolved[index].serviceTier = serviceTier
                     resolved[index].serviceTierSource = .recorded
                 }
             }
         }
-        return resolved
-    }
-
-    /// TUI rollouts do not always persist `service_tier`. In that case, use the
-    /// task directory's current effective config as a clearly marked fallback.
-    /// This is the tier Codex would use on the next resume, not historical proof.
-    private func loadEffectiveServiceTierFallbacks(
-        for threads: [ThreadSummary]
-    ) async -> [ThreadSummary] {
-        var resolved = threads
-        var attemptedDirectories = Set<String>()
-        var tierByDirectory: [String: String] = [:]
-
-        for index in resolved.indices where resolved[index].serviceTier == nil {
-            let directory = resolved[index].cwd ?? ""
-            if !attemptedDirectories.contains(directory) {
-                attemptedDirectories.insert(directory)
-                var params: JSONObject = ["includeLayers": false]
-                if !directory.isEmpty {
-                    params["cwd"] = directory
-                }
-                if let result = try? await client.request(
-                    method: "config/read",
-                    params: params
-                ), let tier = CodexStatusPayloadParser.parseEffectiveServiceTier(result) {
-                    tierByDirectory[directory] = tier
-                }
-            }
-
-            if let tier = tierByDirectory[directory] {
-                resolved[index].serviceTier = tier
-                resolved[index].serviceTierSource = .effectiveConfig
-            }
-        }
-        return resolved
+        guard resolved.contains(where: { $0.serviceTier == nil }) else { return resolved }
+        let recordedThreads = resolved
+        return await Task.detached(priority: .utility) {
+            CodexThreadServiceTierReader.fillingMissing(in: recordedThreads)
+        }.value
     }
 }

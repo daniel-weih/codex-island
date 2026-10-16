@@ -82,7 +82,7 @@ enum CodexPreviewRenderer {
                     model: "gpt-5.5",
                     reasoningEffort: "high",
                     serviceTier: "priority",
-                    serviceTierSource: .effectiveConfig,
+                    serviceTierSource: .runtimeLog,
                     tokenUsage: ThreadTokenUsage(
                         inputTokens: 152_424_863,
                         cachedInputTokens: 145_716_480,
@@ -709,6 +709,15 @@ enum CodexPreviewRenderer {
             previewLanguagePreference: .english
         )
 
+        var extremeContextSnapshot = snapshot
+        extremeContextSnapshot.recentThreads[0].tokenUsage?.contextTokensUsed = Int64.max
+        extremeContextSnapshot.recentThreads[0].tokenUsage?.contextWindowTokens = 1
+        try renderMatrixPreview(
+            named: "matrix-expanded-context-overflow.png",
+            snapshot: extremeContextSnapshot,
+            initialHoveredContextThreadID: extremeContextSnapshot.recentThreads[0].id
+        )
+
         var lightReasoningSnapshot = snapshot
         lightReasoningSnapshot.recentThreads[0].reasoningEffort = "low"
         try renderMatrixPreview(
@@ -728,8 +737,8 @@ enum CodexPreviewRenderer {
         var longIdentitySnapshot = snapshot
         longIdentitySnapshot.profileIdentity.displayName =
             "Codex Island · Visual Design Review"
-        longIdentitySnapshot.account.planType = "enterprise-unlimited-organization"
-        longIdentitySnapshot.rateLimit?.planType = "enterprise-unlimited-organization"
+        longIdentitySnapshot.account.planType = "enterprise_cbp_automation"
+        longIdentitySnapshot.rateLimit?.planType = "enterprise_cbp_automation"
         try renderMatrixPreview(
             named: "matrix-expanded-notch-long-nickname-plan-scale-2x.png",
             snapshot: longIdentitySnapshot
@@ -1034,6 +1043,34 @@ enum CodexPreviewRenderer {
             outputURLs.append(errorURL)
         }
 
+        // Exercise every current subscription badge and the per-plan estimate
+        // with the same initialized account card in both interface languages.
+        for plan in CodexSubscriptionPlan.allCases {
+            var planSnapshot = snapshot
+            planSnapshot.account.planType = plan.rawValue
+            planSnapshot.rateLimit?.planType = plan.rawValue
+            planSnapshot.rateLimit?.primary?.usedPercent = 3
+            for language in [IslandLanguagePreference.chinese, .english] {
+                for credits in plan.isPro ? [false, true] : [true] {
+                    let mode = credits ? "credits" : "tokens"
+                    let url = directory.appendingPathComponent(
+                        "matrix-plan-\(plan.rawValue)-\(language.rawValue)-\(mode)-2x.png"
+                    )
+                    try render(
+                        snapshot: planSnapshot,
+                        displayGeometry: geometry,
+                        expanded: true,
+                        previewLanguagePreference: language,
+                        previewShowsCredits: credits,
+                        size: expandedSize,
+                        scale: 2,
+                        to: url
+                    )
+                    outputURLs.append(url)
+                }
+            }
+        }
+
         return outputURLs
     }
 
@@ -1276,7 +1313,10 @@ enum CodexPreviewRenderer {
                 transaction.disablesAnimations = true
             }
 
-        if page.isSubscriptionPage || hasPreviewOverrides {
+        // Static dashboard cards render completely with ImageRenderer. AppKit
+        // cacheDisplay can omit glyphs when many hidden preview windows follow
+        // one another, so reserve hosting for pages with native controls.
+        if page.isSubscriptionPage || (hasPreviewOverrides && page != .dashboard) {
             try renderHostedView(view, size: renderedSize, scale: scale, to: url)
             return
         }

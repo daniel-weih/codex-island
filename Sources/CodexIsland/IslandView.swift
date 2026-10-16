@@ -84,10 +84,7 @@ enum IslandHeaderAction: Sendable {
     case quit
 }
 
-enum CreditChartLegendKind: String, Equatable, Sendable {
-    case standard
-    case actual
-
+extension CreditChartLegendKind {
     func title(for language: IslandInterfaceLanguage) -> String {
         self == .standard ? language.text("标准", "Standard")
             : language.text("实际", "Actual")
@@ -159,21 +156,7 @@ private struct IslandPopoverPlacement {
     let scale: CGFloat
 }
 
-private enum IslandPopoverContent: Equatable {
-    case token(threadID: String, rank: Int, usage: ThreadTokenUsage)
-    case context(threadID: String, rank: Int, usage: ThreadTokenUsage?)
-    case reset(ResetCreditSummary)
-    case chartLegend(CreditChartLegendKind)
-
-    var identity: String {
-        switch self {
-        case .token(let threadID, _, _): return "token-\(threadID)"
-        case .context(let threadID, _, _): return "context-\(threadID)"
-        case .reset: return "reset"
-        case .chartLegend(let kind): return "chart-legend-\(kind.rawValue)"
-        }
-    }
-
+private extension IslandPopoverContent {
     func size(for language: IslandInterfaceLanguage) -> CGSize {
         switch self {
         case .token(_, _, let usage):
@@ -642,6 +625,11 @@ struct IslandView: View {
         .onChange(of: viewModel.snapshot.recentThreads) { threads in
             handleThreadStateChanges(threads)
         }
+        .onChange(of: viewModel.snapshot) { snapshot in
+            if let activePopover, activePopover.content.resolved(in: snapshot) == nil {
+                hidePopover()
+            }
+        }
     }
 
     private static func threadStates(
@@ -683,24 +671,25 @@ struct IslandView: View {
 
     private func islandPopoverLayer(canvasSize: CGSize) -> some View {
         GeometryReader { _ in
-            if let displayedPopover = activePopover ?? initialPopover {
+            if let displayedPopover = activePopover ?? initialPopover,
+               let content = displayedPopover.content.resolved(in: viewModel.snapshot) {
                 let pointer = displayedPopover.pointer
                     ?? defaultPopoverPointer(
-                        for: displayedPopover.content,
+                        for: content,
                         canvasSize: canvasSize
                     )
-                let popoverSize = displayedPopover.content.size(
+                let popoverSize = content.size(
                     for: interfaceLanguage
                 )
                 let placement = popoverPlacement(
-                    for: displayedPopover.content,
+                    for: content,
                     pointer: pointer,
                     popoverSize: popoverSize,
                     canvasSize: canvasSize
                 )
 
-                popoverView(for: displayedPopover.content)
-                    .id(displayedPopover.content.identity)
+                popoverView(for: content)
+                    .id(content.identity)
                     .scaleEffect(placement.scale)
                     .position(placement.center)
             }
@@ -1443,7 +1432,7 @@ struct IslandView: View {
                 )
             },
             chartRange: $tokenChartRange,
-            planLabel: CodexDisplayPolicy.planBadgeLabel(
+            plan: CodexDisplayPolicy.subscriptionPlan(
                 accountPlanType: viewModel.snapshot.account.planType,
                 rateLimitPlanType: viewModel.snapshot.rateLimit?.planType
             )
@@ -1875,7 +1864,7 @@ private struct IslandSettingsPanel: View {
                         .frame(width: 1 / max(1, displayScale), height: 22)
 
                     HStack(spacing: 6) {
-                        Text(language.text("水印", "Watermark"))
+                        Text(language.text("背景图", "Background"))
                             .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.56))
 
@@ -1885,10 +1874,10 @@ private struct IslandSettingsPanel: View {
                         .labelsHidden()
                         .toggleStyle(IslandToggleStyle(tint: theme.accent))
                         .frame(width: 30, height: 17)
-                        .accessibilityLabel(Text(language.text("显示水印", "Show watermark")))
+                        .accessibilityLabel(Text(language.text("显示背景图", "Show background image")))
                         .accessibilityValue(Text(themeWatermarkEnabled
                             ? language.text("开启", "On") : language.text("关闭", "Off")))
-                        .help(language.text("显示主题背景水印，不影响配色", "Show the theme watermark without changing its colors"))
+                        .help(language.text("显示主题背景图，不影响配色", "Show the theme background image without changing its colors"))
                     }
                 }
                 .fixedSize(horizontal: true, vertical: true)
@@ -3187,11 +3176,10 @@ private struct ThreadFastStatusIconView: View {
             return .white.opacity(0.08)
         }
         let isFast = tier == "priority" || tier == "fast"
-        let isInferred = thread.serviceTierSource == .effectiveConfig
         if isFast {
-            return theme.accent.opacity(isInferred ? 0.62 : 0.94)
+            return theme.accent.opacity(0.94)
         }
-        return .white.opacity(isInferred ? 0.08 : 0.12)
+        return .white.opacity(0.12)
     }
 
     private var fastHelp: String {
@@ -3203,10 +3191,10 @@ private struct ThreadFastStatusIconView: View {
         } else {
             fast = language.text("Fast 状态未知", "Fast status unknown")
         }
-        let source = thread.serviceTierSource == .effectiveConfig
+        let source = thread.serviceTierSource == .runtimeLog
             ? language.text(
-                "，Fast 按当前配置推断",
-                ", Fast inferred from the current configuration"
+                "，来自本会话最近调用",
+                ", from this session's latest request"
             )
             : ""
         return "\(fast)\(source)"
@@ -3433,7 +3421,7 @@ private struct ContextWindowPopover: View {
                 .foregroundStyle(.white.opacity(0.42))
 
             if let values = contextWindowValues(usage) {
-                Text(usageSummary(values))
+                Text(usageSummary())
                     .font(.system(size: IslandTypography.emphasized, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.86))
                     .lineLimit(1)
@@ -3474,10 +3462,8 @@ private struct ContextWindowPopover: View {
         .accessibilityLabel(contextWindowHelp(usage, language: language))
     }
 
-    private func usageSummary(
-        _ values: (used: Int64, window: Int64)
-    ) -> String {
-        let usedPercent = contextWindowUsedPercent(values)
+    private func usageSummary() -> String {
+        let usedPercent = usage?.contextUsedPercent ?? 0
         let remainingPercent = max(0, 100 - usedPercent)
         return language.text(
             "已使用 \(usedPercent)%（剩余 \(remainingPercent)%）",
@@ -3612,7 +3598,7 @@ private struct AccountActivityCard: View {
     let onOpenResetSubscription: () -> Void
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     let onLegendHoverChange: (CreditChartLegendKind, Bool, CGPoint?) -> Void
-    let planLabel: String?
+    let plan: CodexSubscriptionPlan?
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
@@ -3646,7 +3632,7 @@ private struct AccountActivityCard: View {
             CGPoint?
         ) -> Void,
         chartRange: Binding<TokenChartRange>,
-        planLabel: String?
+        plan: CodexSubscriptionPlan?
     ) {
         self.identity = identity
         self.usage = usage
@@ -3660,7 +3646,7 @@ private struct AccountActivityCard: View {
         self.onOpenResetSubscription = onOpenResetSubscription
         self.onResetHoverChange = onResetHoverChange
         self.onLegendHoverChange = onLegendHoverChange
-        self.planLabel = planLabel
+        self.plan = plan
         _avatarImage = State(initialValue: identity.avatarData.flatMap(NSImage.init(data:)))
         _chartRange = chartRange
     }
@@ -3687,8 +3673,8 @@ private struct AccountActivityCard: View {
                             .truncationMode(.tail)
                             .layoutPriority(1)
 
-                        if let planLabel {
-                            Text(compactPlanBadgeLabel(planLabel))
+                        if let plan {
+                            Text(plan.badgeLabel)
                                 .font(.system(size: IslandTypography.body, weight: .bold, design: .rounded))
                                 .foregroundStyle(theme.accent.opacity(0.88))
                                 .lineLimit(1)
@@ -3706,7 +3692,7 @@ private struct AccountActivityCard: View {
                                         )
                                 )
                                 .fixedSize(horizontal: true, vertical: true)
-                                .help(planLabel)
+                                .help(plan.displayName)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -3715,7 +3701,7 @@ private struct AccountActivityCard: View {
 
                 QuotaMetric(
                     window: window,
-                    planLabel: planLabel,
+                    plan: plan,
                     resetSummary: resetSummary,
                     onResetHoverChange: onResetHoverChange
                 )
@@ -3898,8 +3884,11 @@ private struct AccountActivityCard: View {
     }
 
     private var activityDetail: AttributedString? {
+        // Hover state identifies the selected bucket. Resolve its current data
+        // on every refresh so a stationary pointer does not freeze token totals
+        // while the chart and credit estimates continue to update.
         if chartRange == .hours48,
-           let bucket = hoveredHourlyBucket ?? hourlyUsage.last {
+           let bucket = hourlyUsage.first(where: { $0.id == hoveredHourlyBucket?.id }) ?? hourlyUsage.last {
             return chartDetail(
                 dateText: hourlyUsageDateText(bucket.hourStart, language: language),
                 actualTokens: bucket.tokens,
@@ -3907,7 +3896,7 @@ private struct AccountActivityCard: View {
             )
         }
         if chartRange == .days30,
-           let bucket = hoveredBucket ?? recentUsage.last {
+           let bucket = recentUsage.first(where: { $0.id == hoveredBucket?.id }) ?? recentUsage.last {
             return chartDetail(
                 dateText: shortUsageDate(bucket.startDate, language: language),
                 actualTokens: bucket.tokens,
@@ -3922,15 +3911,7 @@ private struct AccountActivityCard: View {
     }
 
     private var dailyCreditTotals: [String: CodexChartCreditTotal] {
-        let calendar = Calendar.autoupdatingCurrent
-        var totals: [String: CodexChartCreditTotal] = [:]
-        for (hour, value) in chartCreditTotals {
-            let components = calendar.dateComponents([.year, .month, .day], from: hour)
-            let key = String(format: "%04d-%02d-%02d", components.year ?? 0,
-                             components.month ?? 0, components.day ?? 0)
-            totals[key, default: CodexChartCreditTotal()].merge(value)
-        }
-        return totals
+        CodexUsageTimeline.dailyCreditTotals(from: chartCreditTotals)
     }
 
     private func chartDetail(
@@ -4666,7 +4647,7 @@ private struct HourlyTokenActivityChart: View {
 
 private struct QuotaMetric: View {
     let window: RateLimitWindow?
-    let planLabel: String?
+    let plan: CodexSubscriptionPlan?
     @AppStorage("codexIsland.remainingShowsCredits")
     private var showsRemainingCredits = false
     let resetSummary: ResetCreditSummary?
@@ -4783,15 +4764,22 @@ private struct QuotaMetric: View {
 
     private var remainingCreditsText: String {
         guard let credits = CodexDisplayPolicy.remainingCredits(
-            planLabel: planLabel, remainingPercent: window?.remainingPercent
+            plan: plan, remainingPercent: window?.remainingPercent
         ) else { return language.text("— 额度点", "— credits") }
         return localizedCredits(String(format: "%.0f credits", credits), language: language)
     }
 
     private var remainingCreditsHelp: String {
-        language.text(
-            "按 Plus 2,750 额度点、PRO5X 13,750 额度点、Pro 20X 55,000 额度点 乘以当前剩余额度比例计算",
-            "Calculated from the remaining quota percentage: Plus 2,750 credits, PRO5X 13,750, Pro 20X 55,000"
+        guard let plan, let allowance = plan.referenceCreditAllowance else {
+            return language.text(
+                "当前套餐没有已确认的额度点参考基准，仍可查看剩余百分比",
+                "No confirmed credit reference allowance for this plan; remaining quota is shown as a percentage"
+            )
+        }
+        let amount = String(format: "%.0f", allowance)
+        return language.text(
+            "按 \(plan.displayName) 参考基准 \(amount) 额度点 × 当前剩余比例估算，并非账户实际余额",
+            "Estimated from the \(plan.displayName) reference allowance of \(amount) credits × remaining quota; not an account balance"
         )
     }
 
@@ -5228,12 +5216,6 @@ private func windowLabel(
     return fallback
 }
 
-private func compactPlanBadgeLabel(_ value: String) -> String {
-    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard normalized.count > 10 else { return normalized }
-    return String(normalized.prefix(8)) + "…"
-}
-
 private func displayModelName(_ rawValue: String) -> String {
     CodexDisplayPolicy.displayModelName(rawValue)
 }
@@ -5404,24 +5386,9 @@ private func contextWindowValues(
     return (used, window)
 }
 
-private func contextWindowUsedPercent(
-    _ values: (used: Int64, window: Int64)
-) -> Int {
-    min(
-        100,
-        max(
-            0,
-            Int(
-                (Double(values.used) / Double(values.window) * 100)
-                    .rounded()
-            )
-        )
-    )
-}
-
 private func contextWindowFraction(_ usage: ThreadTokenUsage?) -> CGFloat? {
-    guard let values = contextWindowValues(usage) else { return nil }
-    return CGFloat(contextWindowUsedPercent(values)) / 100
+    guard let percent = usage?.contextUsedPercent else { return nil }
+    return CGFloat(percent) / 100
 }
 
 private func contextWindowHelp(
@@ -5434,7 +5401,7 @@ private func contextWindowHelp(
             "Context window: usage unavailable for this session"
         )
     }
-    let usedPercent = contextWindowUsedPercent(values)
+    let usedPercent = usage?.contextUsedPercent ?? 0
     let remainingPercent = max(0, 100 - usedPercent)
     return language.text(
         "上下文窗口：已使用 \(usedPercent)%（剩余 \(remainingPercent)%），\(compactTokenCount(values.used)) / \(compactTokenCount(values.window)) 词元",

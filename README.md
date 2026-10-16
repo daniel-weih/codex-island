@@ -51,7 +51,7 @@ The Tokens / Credits switch controls the remaining-usage display, the 30-day / 4
 - **Credits:** A reference cost calculated using each call’s recorded model and Fast tier, with separate rates for uncached input, cached input, and output. Cached input is not charged again at the uncached rate; reasoning is already included in output.
 - **Standard / ⚡ Actual:** Standard is the cost of the same usage with Fast off. Actual includes Standard and Fast surcharges; Actual minus Standard is the extra cost of enabling Fast. For Standard usage of 100 at 2.5×, Actual is 250 and the extra cost is 150. The solid bar shows Standard; the outline shows the Actual total. Each series can be toggled independently.
 - **Local scope:** Chart and session credits are calculated from this computer’s logs. Account token totals can include other computers and need not match. `≥` marks a priced subtotal when some local calls cannot be priced; `—` indicates missing details.
-- **Remaining credits:** The app uses a fixed reference allowance of 2,750 for Plus, 13,750 for Pro 5X, and 55,000 for Pro 20X, multiplied by the remaining primary-quota percentage. For example, Pro 20X at 97% displays `≈ 53350 credits`. This is an app estimate, not a credit balance returned by the account API. Unrecognized plan tiers display `—`.
+- **Remaining credits:** The app uses a fixed reference allowance of 2,000 for Plus, 10,000 for Pro 100 (5×), and 20,000 for Pro 200 (10×), multiplied by the remaining primary-quota percentage. For example, Pro 200 at 97% displays `≈ 19400 credits`. Badges follow the subscription enum (`prolite` → Pro 100, `pro` → Pro 200, `promax` → Pro 500), independently of the calculation. This is an app estimate, not a credit balance returned by the account API. Plans without a confirmed reference allowance, including Pro 500, display `—` for credits while retaining the quota percentage.
 
 Session hover cards show “TOTAL USAGE,” with the selected measure first and the other measure in parentheses. Tokens and credits both follow the selected theme, including credit balances, charts, legends, and the mode switch. See [calculation details and sources](docs/token-estimate.md).
 
@@ -110,7 +110,7 @@ After a successful DMG build and validation, `dist` keeps only DMG files. The te
 
 In newly built disk images, double-click **Install Codex Island** to install or update the app in Applications. It validates the new app, quits the installed version, replaces it atomically, and opens it again. Account data and preferences are preserved. If validation or replacement fails, the previous app is kept or restored. This also avoids Finder's intermittent duplicate-name error when replacing an app by dragging it. The Applications shortcut remains available for manual installation.
 
-The installer exits automatically and does not add a Dock icon. Opening the same installer again only opens the installed app when its contents already match; it does not reinstall or restart that app.
+After installation and opening the app, the installer exits and automatically ejects its source DMG without adding a Dock icon. Opening the same installer again only opens the installed app when its contents already match; it does not reinstall or restart that app. The image stays mounted if installation or opening the app fails, and it is never forcibly ejected while another program is using it.
 
 Pushing an annotated `vYYYY.MM.DD` tag (or `vYYYY.MM.DD-N` for a later build that day) matching the app version runs the installer checks and builds the DMG on an Apple Silicon GitHub runner. The release uses the tag annotation as its notes and is published only after the uploaded DMG's SHA-256 matches the build output.
 If a release needs to be retried, push a `release/<tag>` branch. The workflow still checks out the existing tag and leaves published assets intact.
@@ -139,7 +139,15 @@ Run the checks, including missing/corrupt resource and relocated-app regression 
 ./scripts/test.sh
 ```
 
-Packaging also runs `--check-resources` on the built app to decode its bundled images and sounds without starting services or playing audio. Runtime resource loading uses the installed app's own paths: unavailable watermarks are omitted, and unavailable task sounds fall back to the system alert.
+Real DMG ejection and desktop application launch checks run separately in a desktop session:
+
+```bash
+./scripts/test-installer.sh --integration
+```
+
+Ordinary checks do not launch desktop test apps. Integration launch fixtures stay under the ignored `.build/installer-launch-fixtures` directory so Finder never receives an immediately deleted application path.
+
+Packaging also runs `--check-resources` on the built app to decode its bundled images and sounds without starting services or playing audio. Runtime resource loading uses the installed app's own paths: unavailable background images are omitted, and unavailable task sounds fall back to the system alert.
 
 Probe the local App Server connection in read-only mode (without printing tokens, email addresses, or thread content):
 
@@ -164,7 +172,7 @@ swift run CodexIsland --render-preview dist/previews
 - Profile avatar and name, lifetime account tokens, and switchable charts for the latest 30 calendar days or previous 48 hours; Tokens mode shows actual tokens; Credits mode can show Standard cost, Actual cost, or both, with hover explanations
 - Activation of the Codex App by clicking any non-thread area in the expanded island; the top-right actions can copy a transparent rounded PNG, open Codex settings, open Island settings, or quit the app
 - Settings for status animation, token-consumption animation, task-completion sound, color theme, interface language, target display, and launch at login; the completion sound and launch at login are disabled by default; target display defaults to automatic and can be pinned to the built-in display or any connected external display, with temporary fallback after disconnection and automatic restoration after reconnection
-- The watermark switch beside the color themes defaults to on and is saved independently, so any theme can keep its colors without showing the background graphic.
+- The Background switch beside the color themes defaults to on and is saved independently, so any theme can keep its colors without showing the background image.
 - Codex account plan plus the source, compact model name (for example `5.6-Sol`), reasoning effort, and Fast status of the three most recent CLI/App threads, with running threads prioritized
 - Near-real-time execution state for the three most recent threads: running, idle, interrupted, or failed
 - Cumulative token usage for the three most recent threads, with input, cached-input, output, and reasoning-output details on hover

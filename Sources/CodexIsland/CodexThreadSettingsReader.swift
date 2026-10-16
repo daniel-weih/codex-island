@@ -12,7 +12,7 @@ enum CodexThreadSettingsReaderError: LocalizedError {
 enum CodexThreadSettingsReader {
     private static let chunkSize = 64 * 1024
     private static let threadSettingsMarker = Data("thread_settings_applied".utf8)
-    private static let turnContextMarker = Data("\"type\":\"turn_context\"".utf8)
+    private static let turnContextMarker = Data("turn_context".utf8)
     private static let cache = SettingsCache()
 
     static func readLatest(
@@ -27,6 +27,7 @@ enum CodexThreadSettingsReader {
         )
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let modifiedAt = attributes[.modificationDate] as? Date ?? .distantPast
         let fileIdentity = [
             (attributes[.systemNumber] as? NSNumber)?.stringValue,
             (attributes[.systemFileNumber] as? NSNumber)?.stringValue
@@ -36,7 +37,8 @@ enum CodexThreadSettingsReader {
 
         if let cached = cache.entry(for: url.path),
            cached.fileIdentity == fileIdentity,
-           cached.fileSize == fileSize {
+           cached.fileSize == fileSize,
+           cached.modifiedAt == modifiedAt {
             return cached.settings
         }
 
@@ -45,11 +47,9 @@ enum CodexThreadSettingsReader {
             && fileSize > (previous?.fileSize ?? fileSize)
         let lowerBound: UInt64
         if isAppendingToSameFile, let previous {
-            // Include one full settings-sized overlap in case the prior read
-            // observed a JSONL record while it was still being appended.
-            lowerBound = previous.fileSize > UInt64(chunkSize)
-                ? previous.fileSize - UInt64(chunkSize)
-                : 0
+            // Re-read an unfinished record from its exact start, even when it
+            // spans multiple chunks. Completed records are already in the cache.
+            lowerBound = min(previous.trailingLineStartOffset ?? previous.fileSize, previous.fileSize)
         } else {
             lowerBound = 0
         }
@@ -65,8 +65,11 @@ enum CodexThreadSettingsReader {
            let newlyRead {
             resolved = ThreadRuntimeSettings(
                 model: newlyRead.model ?? previousSettings.model,
-                reasoningEffort: newlyRead.reasoningEffort ?? previousSettings.reasoningEffort,
-                serviceTier: newlyRead.serviceTier ?? previousSettings.serviceTier
+                reasoningEffort: newlyRead.hasRecordedReasoningEffort
+                    ? newlyRead.reasoningEffort : previousSettings.reasoningEffort,
+                serviceTier: newlyRead.serviceTier ?? previousSettings.serviceTier,
+                hasRecordedReasoningEffort: newlyRead.hasRecordedReasoningEffort
+                    || previousSettings.hasRecordedReasoningEffort
             )
         } else {
             resolved = newlyRead ?? (isAppendingToSameFile ? previous?.settings : nil)
@@ -75,11 +78,33 @@ enum CodexThreadSettingsReader {
             CacheEntry(
                 fileIdentity: fileIdentity,
                 fileSize: fileSize,
-                settings: resolved
+                modifiedAt: modifiedAt,
+                settings: resolved,
+                trailingLineStartOffset: try findTrailingLineStartOffset(url: url, fileSize: fileSize)
             ),
             for: url.path
         )
         return resolved
+    }
+
+    private static func findTrailingLineStartOffset(url: URL, fileSize: UInt64) throws -> UInt64? {
+        guard fileSize > 0 else { return nil }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: fileSize - 1)
+        if try handle.read(upToCount: 1)?.first == 0x0A { return nil }
+
+        var position = fileSize
+        while position > 0 {
+            let readCount = min(chunkSize, Int(position))
+            position -= UInt64(readCount)
+            try handle.seek(toOffset: position)
+            let chunk = try handle.read(upToCount: readCount) ?? Data()
+            if let newline = chunk.lastIndex(of: 0x0A) {
+                return position + UInt64(newline) + 1
+            }
+        }
+        return 0
     }
 
     private static func scanBackwards(
@@ -87,56 +112,30 @@ enum CodexThreadSettingsReader {
         fileSize: UInt64,
         lowerBound: UInt64
     ) throws -> ThreadRuntimeSettings? {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
+        var latest: ThreadRuntimeSettings?
 
-        var position = fileSize
-        var carry = Data()
-        var turnContextFallback: ThreadRuntimeSettings?
-
-        while position > lowerBound {
-            let readCount = min(chunkSize, Int(position - lowerBound))
-            guard readCount > 0 else { break }
-
-            position -= UInt64(readCount)
-            try handle.seek(toOffset: position)
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-
-            var block = Data(capacity: chunk.count + carry.count)
-            block.append(chunk)
-            block.append(carry)
-
-            let lines = block.split(separator: 0x0A, omittingEmptySubsequences: false)
-            guard lines.count > 1 else {
-                carry = block
-                continue
-            }
-
-            // The first item may start in the preceding block. Every later item
-            // is a complete JSONL record, so inspect them newest-first.
-            carry = Data(lines[0])
-            for line in lines.dropFirst().reversed() {
-                if let settings = parseThreadSettings(line) {
-                    return settings
-                }
-                if turnContextFallback == nil {
-                    turnContextFallback = parseTurnContext(line)
-                }
-            }
+        func mergeOlder(_ older: ThreadRuntimeSettings?) -> Bool {
+            guard let older else { return false }
+            // Both event types can update only some fields. Scan newest-first
+            // and let earlier records fill only fields that are still unknown.
+            let merged = ThreadRuntimeSettings(
+                model: latest?.model ?? older.model,
+                reasoningEffort: latest?.hasRecordedReasoningEffort == true
+                    ? latest?.reasoningEffort : older.reasoningEffort,
+                serviceTier: latest?.serviceTier ?? older.serviceTier,
+                hasRecordedReasoningEffort: latest?.hasRecordedReasoningEffort == true
+                    || older.hasRecordedReasoningEffort
+            )
+            latest = merged
+            return merged.model != nil
+                && merged.hasRecordedReasoningEffort
+                && merged.serviceTier != nil
         }
 
-        // At file start this is certainly a complete line. At an incremental
-        // boundary strict JSON decoding safely rejects a truncated prefix.
-        if !carry.isEmpty {
-            if let settings = parseThreadSettings(carry) {
-                return settings
-            }
-            if turnContextFallback == nil {
-                turnContextFallback = parseTurnContext(carry)
-            }
+        try CodexRolloutLineReader.scanBackwards(url: url, from: lowerBound, to: fileSize) { line in
+            mergeOlder(parseThreadSettings(line) ?? parseTurnContext(line))
         }
-        return turnContextFallback
+        return latest
     }
 
     private static func parseThreadSettings<D: DataProtocol>(
@@ -155,7 +154,9 @@ enum CodexThreadSettingsReader {
         return runtimeSettings(
             model: settings.string("model"),
             reasoningEffort: settings.string("reasoning_effort"),
-            serviceTier: settings.string("service_tier")
+            serviceTier: recordedServiceTier(in: settings, isSettingsSnapshot: true),
+            hasRecordedReasoningEffort: settings["reasoning_effort"] != nil
+                || isCompleteSettingsSnapshot(settings)
         )
     }
 
@@ -172,22 +173,42 @@ enum CodexThreadSettingsReader {
 
         return runtimeSettings(
             model: payload.string("model"),
-            reasoningEffort: payload.string("effort") ?? payload.string("reasoning_effort"),
-            serviceTier: payload.string("service_tier")
+            reasoningEffort: payload["effort"] != nil
+                ? payload.string("effort") : payload.string("reasoning_effort"),
+            serviceTier: recordedServiceTier(in: payload),
+            hasRecordedReasoningEffort: payload["effort"] != nil || payload["reasoning_effort"] != nil
         )
     }
 
     private static func runtimeSettings(
         model: String?,
         reasoningEffort: String?,
-        serviceTier: String?
+        serviceTier: String?,
+        hasRecordedReasoningEffort: Bool
     ) -> ThreadRuntimeSettings? {
-        guard model != nil || reasoningEffort != nil || serviceTier != nil else { return nil }
+        guard model != nil || hasRecordedReasoningEffort || serviceTier != nil else { return nil }
         return ThreadRuntimeSettings(
             model: model,
             reasoningEffort: reasoningEffort,
-            serviceTier: serviceTier
+            serviceTier: serviceTier,
+            hasRecordedReasoningEffort: hasRecordedReasoningEffort
         )
+    }
+
+    /// Codex's full ThreadSettingsSnapshot omits default optional fields during
+    /// serialization. Partial historical events still leave omitted fields alone.
+    private static func isCompleteSettingsSnapshot(_ settings: JSONObject) -> Bool {
+        settings.string("model") != nil && settings.string("model_provider_id") != nil
+            && settings.string("cwd") != nil && settings["approval_policy"] != nil
+    }
+
+    static func recordedServiceTier(in settings: JSONObject, isSettingsSnapshot: Bool = false) -> String? {
+        if settings["service_tier"] is NSNull { return "default" }
+        if let tier = settings.string("service_tier") { return tier }
+        if settings["service_tier"] == nil, isSettingsSnapshot, isCompleteSettingsSnapshot(settings) {
+            return "default"
+        }
+        return nil
     }
 
     private static func jsonObject(_ line: Data) -> JSONObject? {
@@ -239,7 +260,9 @@ enum CodexThreadSettingsReader {
 private struct CacheEntry {
     var fileIdentity: String
     var fileSize: UInt64
+    var modifiedAt: Date
     var settings: ThreadRuntimeSettings?
+    var trailingLineStartOffset: UInt64?
 }
 
 private final class SettingsCache: @unchecked Sendable {

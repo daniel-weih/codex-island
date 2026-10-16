@@ -8,6 +8,8 @@ enum ResetSubscriptionUsage {
         var hourly: [HourlyUsageBucket] = []
         var daily: [DailyUsageBucket] = []
         var credits: [Date: CodexChartCreditTotal] = [:]
+        /// Clock corrections can leave persisted records ahead of the current time.
+        var nextChangeAt: Date?
     }
 
     /// The expensive reduction changes only with turn records or calendar boundaries.
@@ -28,14 +30,19 @@ enum ResetSubscriptionUsage {
         }
         private var key: Key?
         private var aggregation: Aggregation?
+        private var evaluatedAt: Date?
 
         func value(revision: UInt64, now: Date, calendar: Calendar = .autoupdatingCurrent) -> Aggregation? {
-            key == Key(revision: revision, now: now, calendar: calendar) ? aggregation : nil
+            guard key == Key(revision: revision, now: now, calendar: calendar),
+                  let evaluatedAt, now >= evaluatedAt,
+                  aggregation?.nextChangeAt.map({ now < $0 }) ?? true else { return nil }
+            return aggregation
         }
 
         mutating func store(_ value: Aggregation, revision: UInt64, now: Date, calendar: Calendar = .autoupdatingCurrent) {
             key = Key(revision: revision, now: now, calendar: calendar)
             aggregation = value
+            evaluatedAt = now
         }
     }
 
@@ -66,7 +73,8 @@ enum ResetSubscriptionUsage {
                 days.map { DailyUsageBucket(startDate: $0.key, tokens: $0.value) }.sorted { $0.startDate < $1.startDate }, prices)
     }
 
-    static func aggregate(records: [ResetUsageRecord], now: Date, calendar: Calendar = .autoupdatingCurrent) -> Aggregation {
+    static func aggregate(records: [ResetUsageRecord], now: Date, calendar inputCalendar: Calendar = .autoupdatingCurrent) -> Aggregation {
+        let calendar = CodexUsageTimeline.calendar(timeZone: inputCalendar.timeZone)
         var total: Int64 = 0
         var hours: [Date: Int64] = [:]
         var days: [String: Int64] = [:]
@@ -99,7 +107,9 @@ enum ResetSubscriptionUsage {
         }
         return Aggregation(today: total,
             hourly: hours.map { HourlyUsageBucket(hourStart: $0.key, tokens: $0.value) }.sorted { $0.hourStart < $1.hourStart },
-            daily: days.map { DailyUsageBucket(startDate: $0.key, tokens: $0.value) }.sorted { $0.startDate < $1.startDate }, credits: prices)
+            daily: days.map { DailyUsageBucket(startDate: $0.key, tokens: $0.value) }.sorted { $0.startDate < $1.startDate },
+            credits: prices,
+            nextChangeAt: records.values.lazy.filter { $0.totalTokens >= 0 && $0.recordedAt > now }.map(\.recordedAt).min())
     }
 
     private static func add(_ lhs: Int64, _ rhs: Int64) -> Int64 {

@@ -192,9 +192,7 @@ struct ResetSubscriptionSettingCard: View {
 
     private var enabled: Binding<Bool> {
         Binding(get: { service.settings.enabled }, set: { value in
-            var settings = service.settings
-            settings.setAutomaticChecksEnabled(value)
-            do { try service.updateSettings(settings); error = nil }
+            do { try service.setAutomaticChecksEnabled(value); error = nil }
             catch { self.error = error.localizedDescription }
         })
     }
@@ -596,7 +594,12 @@ struct ResetSubscriptionSettingsPage: View {
     }
 
     private var automaticChecks: Binding<Bool> {
-        Binding(get: { draft.enabled }, set: { draft.setAutomaticChecksEnabled($0) })
+        Binding(get: { draft.enabled }, set: { enabled in
+            draft.setAutomaticChecksEnabled(enabled)
+            // Stop immediately, even while another field is invalid or the
+            // normal debounced save has not run yet.
+            if !enabled { commit() }
+        })
     }
 
     private func compactToggle(_ title: String, isOn: Binding<Bool>) -> some View {
@@ -675,10 +678,14 @@ struct ResetSubscriptionSettingsPage: View {
     }
     private func commit() {
         pendingSave?.cancel()
-        guard validationError == nil, let interval = Int(intervalText) else { return }
-        var value = draft
-        value.intervalValue = interval
         do {
+            // Disabling is independent of draft validation. Keep unfinished
+            // edits in the form, while persisting the last valid configuration
+            // with scheduling off and cancelling an ongoing automatic check.
+            if !draft.enabled { try service.setAutomaticChecksEnabled(false) }
+            guard validationError == nil, let interval = Int(intervalText) else { return }
+            var value = draft
+            value.intervalValue = interval
             try service.updateSettings(value)
             saveError = nil
         } catch { saveError = error.localizedDescription }

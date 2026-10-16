@@ -179,6 +179,10 @@ struct ResetSubscriptionReport: Codable, Equatable, Identifiable {
 }
 
 enum ResetDateParser {
+    private static let timestamp = try! NSRegularExpression(
+        pattern: #"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})$"#,
+        options: .caseInsensitive
+    )
     // Only fully specified dates with an explicit, unambiguous zone can prove an
     // instant. Do not infer the machine's time zone or interpret words like "soon".
     private static let explicitDate = try! NSRegularExpression(
@@ -187,10 +191,17 @@ enum ResetDateParser {
     )
 
     static func date(_ value: String?) -> Date? {
-        guard let value else { return nil }
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let range = NSRange(value.startIndex..., in: value)
+        guard timestamp.firstMatch(in: value, range: range)?.range == range else { return nil }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        // ISO8601DateFormatter accepts trailing garbage and normalizes invalid
+        // dates/offsets. Structured source dates need the same calendar and
+        // timezone validation as quoted evidence before enabling a countdown.
+        guard let date = fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value),
+              containsExplicitDate(value, matching: date) else { return nil }
+        return date
     }
 
     static func containsExplicitDate(_ evidence: String, matching target: Date?) -> Bool {

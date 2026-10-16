@@ -51,9 +51,13 @@ jobs:
           assert platform.machine() == 'arm64', 'An Apple Silicon runner is required'
           PY
 
-      - name: Test installer
+      - name: Test application and packaging
+        id: checks
+        run: ./scripts/test.sh 2>&1 | tee "$RUNNER_TEMP/checks.log"
+
+      - name: Test installer integration
         id: installer
-        run: ./scripts/test-installer.sh 2>&1 | tee "$RUNNER_TEMP/installer-checks.log"
+        run: ./scripts/test-installer.sh --integration 2>&1 | tee "$RUNNER_TEMP/installer-checks.log"
 
       - name: Build and verify DMG
         id: package
@@ -69,13 +73,14 @@ jobs:
       - name: Report failed checks
         if: failure()
         env:
+          CHECKS_OUTCOME: ${{ steps.checks.outcome }}
           INSTALLER_OUTCOME: ${{ steps.installer.outcome }}
           PACKAGE_OUTCOME: ${{ steps.package.outcome }}
           PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
         run: |
           python3 - <<'PYDIAG'
           import os, pathlib
-          for name, key in (('installer-checks', 'INSTALLER'), ('package-dmg', 'PACKAGE'), ('publish', 'PUBLISH')):
+          for name, key in (('checks', 'CHECKS'), ('installer-checks', 'INSTALLER'), ('package-dmg', 'PACKAGE'), ('publish', 'PUBLISH')):
               if os.environ[f'{key}_OUTCOME'] != 'failure':
                   continue
               path = pathlib.Path(os.environ['RUNNER_TEMP']) / f'{name}.log'

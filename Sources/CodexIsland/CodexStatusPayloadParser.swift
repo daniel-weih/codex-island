@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 enum CodexStatusPayloadParser {
     static func parseAccount(_ result: JSONObject) -> AccountSummary {
@@ -95,21 +96,33 @@ enum CodexStatusPayloadParser {
         guard limit > 0 else { return [] }
         let payloads = result.array("data")?
             .compactMap { $0 as? JSONObject }
-            .prefix(limit)
             ?? []
         var fallbackIDOccurrences: [String: Int] = [:]
+        let explicitIDs = Set(payloads.compactMap { explicitThreadID(in: $0) })
+        var seenIDs = Set<String>()
+        var threads: [ThreadSummary] = []
 
-        return payloads.map { payload in
+        for payload in payloads {
             if let id = explicitThreadID(in: payload) {
-                return parseThread(payload, id: id)
+                // List payloads can overlap during reconciliation. Stable IDs
+                // must remain unique for both SwiftUI and state dictionaries.
+                guard seenIDs.insert(id).inserted else { continue }
+                threads.append(parseThread(payload, id: id))
+            } else {
+                let baseID = fallbackThreadID(for: payload)
+                var occurrence = fallbackIDOccurrences[baseID, default: 0]
+                var uniqueID: String
+                repeat {
+                    uniqueID = occurrence == 0 ? baseID : "\(baseID)-\(occurrence + 1)"
+                    occurrence += 1
+                } while explicitIDs.contains(uniqueID) || seenIDs.contains(uniqueID)
+                fallbackIDOccurrences[baseID] = occurrence
+                seenIDs.insert(uniqueID)
+                threads.append(parseThread(payload, id: uniqueID))
             }
-
-            let baseID = fallbackThreadID(for: payload)
-            let occurrence = fallbackIDOccurrences[baseID, default: 0]
-            fallbackIDOccurrences[baseID] = occurrence + 1
-            let uniqueID = occurrence == 0 ? baseID : "\(baseID)-\(occurrence + 1)"
-            return parseThread(payload, id: uniqueID)
+            if threads.count == limit { break }
         }
+        return threads
     }
 
     static func parseDefaultModel(_ result: JSONObject) -> ModelSummary? {
@@ -121,16 +134,6 @@ enum CodexStatusPayloadParser {
             displayName: selected.string("displayName") ?? id,
             isDefault: selected.bool("isDefault") ?? false
         )
-    }
-
-    /// Resolves the service tier Codex would currently apply for a task directory.
-    /// A missing tier means Standard mode; a disabled Fast feature also forces Standard.
-    static func parseEffectiveServiceTier(_ result: JSONObject) -> String? {
-        guard let config = result.dictionary("config") else { return nil }
-        if config.dictionary("features")?.bool("fast_mode") == false {
-            return "default"
-        }
-        return config.string("service_tier") ?? "default"
     }
 
     private static func parseWindow(_ payload: JSONObject?) -> RateLimitWindow? {
@@ -286,24 +289,37 @@ extension Dictionary where Key == String, Value == Any {
     }
 
     func int(_ key: String) -> Int? {
-        if let value = self[key] as? Int { return value }
-        if let value = self[key] as? NSNumber { return value.intValue }
-        if let value = self[key] as? String { return Int(value) }
-        return nil
+        int64(key).flatMap(Int.init(exactly:))
     }
 
     func int64(_ key: String) -> Int64? {
-        if let value = self[key] as? Int64 { return value }
-        if let value = self[key] as? NSNumber { return value.int64Value }
         if let value = self[key] as? String { return Int64(value) }
-        return nil
+        guard let value = self[key] as? NSNumber,
+              CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
+        // Parse integer NSNumber values without passing through Double, which
+        // would round Int64.max upward. Floating-point input must be exact;
+        // NSNumber.int64Value silently truncates fractions and wraps overflow.
+        if let integer = Int64(value.stringValue) { return integer }
+        guard let integer = Int64(exactly: value.doubleValue) else { return nil }
+        // JSONSerialization preserves some long fractions as NSDecimalNumber.
+        // Keep their extra precision; ordinary NSNumber's decimal conversion
+        // instead rounds some valid large binary integers, so do not use it there.
+        if let decimal = value as? NSDecimalNumber,
+           decimal.decimalValue != Decimal(integer) { return nil }
+        return integer
     }
 
     func double(_ key: String) -> Double? {
-        if let value = self[key] as? Double { return value }
-        if let value = self[key] as? NSNumber { return value.doubleValue }
-        if let value = self[key] as? String { return Double(value) }
-        return nil
+        let value: Double?
+        if let string = self[key] as? String {
+            value = Double(string)
+        } else if let number = self[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID() {
+            value = number.doubleValue
+        } else {
+            value = nil
+        }
+        return value.flatMap { $0.isFinite ? $0 : nil }
     }
 
     func unixDate(_ key: String) -> Date? {

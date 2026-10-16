@@ -1,32 +1,24 @@
 import Darwin
 import Foundation
+import SQLite3
 
 @main
 struct ParserChecks {
     private static var failures = 0
 
     static func main() {
-        for (account, quota, expected) in [
-            ("plus", "plus", 2_750.0),
-            ("pro", "prolite", 13_750.0),
-            ("prolite", "prolite", 13_750.0),
-            ("pro", "pro", 55_000.0)
-        ] {
-            let label = CodexDisplayPolicy.planBadgeLabel(
-                accountPlanType: account, rateLimitPlanType: quota
-            )
-            expect(CodexDisplayPolicy.remainingCredits(planLabel: label, remainingPercent: 100) == expected,
-                   "account and quota plan types resolve the correct credits allowance: \(account)/\(quota)")
-        }
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PLUS", remainingPercent: 100) == 2750,
-               "Plus credits use the requested 2750 baseline")
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO5X", remainingPercent: 50) == 6875,
+        checkTerminalInputRaces()
+        expect(CodexDisplayPolicy.remainingCredits(plan: .plus, remainingPercent: 100) == 2000,
+               "Plus credits use the requested 2000 baseline")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .prolite, remainingPercent: 50) == 5000,
                "5X credits scale the baseline and remaining percentage")
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO 20X", remainingPercent: 99) == 54450,
-               "20X credits scale the baseline and remaining percentage")
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PRO", remainingPercent: 99) == nil,
-               "unknown Pro tier does not guess a credits allowance")
-        expect(CodexDisplayPolicy.remainingCredits(planLabel: "PLUS", remainingPercent: nil) == nil,
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 99) == 19800,
+               "Pro 200 credits use 10X instead of the obsolete 20X multiplier")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 97) == 19400,
+               "the documented remaining balance uses the current Plus baseline")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .promax, remainingPercent: 99) == nil,
+               "Pro 500 does not infer an unconfirmed allowance from its price")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .plus, remainingPercent: nil) == nil,
                "missing quota cannot show a credits balance")
         expect(CodexChartCreditTotal(tokens: 100, credits: 12.346, unpricedCalls: 1)
             .displayText(matching: 100) == "≥12.3 credits",
@@ -79,19 +71,27 @@ struct ParserChecks {
         checkHeaderTokenCounts()
         checkTaskCompletionTransitions()
         checkVisibleThreadPriority()
+        checkLivePopoverContent()
         checkAccountUsageThreadAndModel()
         checkPlanBadgeLabels()
         checkLanguageResolution()
         checkDisplayTargetResolution()
         checkLaunchAtLoginSetting()
+        checkLegacyLaunchAgentCleanup()
+        checkCodexExecutableLocator()
         checkThreadDeepLinks()
         checkUsageTimeline()
         checkRecentThreads()
-        checkEffectiveServiceTier()
+        checkThreadRequestServiceTiers()
         checkThreadRuntimeSettings()
+        checkPartiallyWrittenThreadSettings()
         checkThreadActivityStates()
+        checkLargeRolloutRecords()
         checkThreadCreditUsage()
+        checkOversizedUsageRecords()
         checkDailyTokenUsage()
+        checkReviewBoundaryRegressions()
+        checkProtocolStateRegressions()
 
         guard failures == 0 else {
             fputs("\(failures) parser check(s) failed\n", stderr)
@@ -100,10 +100,549 @@ struct ParserChecks {
         print("All parser checks passed")
     }
 
+    private static func checkTerminalInputRaces() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("island-input-races-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#
+        let request = #"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"input-a"}}"#
+        let response = #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"input-a","output":"cancelled"}}"#
+        let complete = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"#
+        let error = #"{"type":"event_msg","payload":{"type":"error","codex_error_info":"unauthorized"}}"#
+        let abort = #"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"a"}}"#
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            for (index, terminal) in [error, abort, complete].enumerated() {
+                let url = directory.appendingPathComponent("incremental-\(index).jsonl")
+                let expected: ThreadExecutionState = index == 0 ? .failed : (index == 1 ? .interrupted : .idle)
+                var content = ""
+                for (step, line) in [start, request, terminal, response, request, complete].enumerated() {
+                    content += line + "\n"
+                    if step == 0 { try Data(content.utf8).write(to: url) }
+                    else {
+                        let handle = try FileHandle(forWritingTo: url)
+                        try handle.seekToEnd()
+                        try handle.write(contentsOf: Data((line + "\n").utf8))
+                        try handle.close()
+                    }
+                    let incremental = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                    let coldURL = directory.appendingPathComponent("cold-\(index)-\(step).jsonl")
+                    try Data(content.utf8).write(to: coldURL)
+                    let cold = try CodexThreadActivityReader.readLatest(from: coldURL.path, validatePath: false)
+                    expect(incremental.executionState == cold.executionState,
+                           "cold and incremental lifecycle scans agree after late input events")
+                    if step >= 2 {
+                        expect(incremental.executionState == expected,
+                               "late input requests/results cannot resurrect terminal turn \(index), step \(step)")
+                    }
+                }
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                let staleTerminal = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"older-turn","error":{"message":"old failure"}}}"#
+                try handle.write(contentsOf: Data((staleTerminal + "\n").utf8))
+                let afterStaleTerminal = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                expect(afterStaleTerminal.executionState == expected,
+                       "late terminal records from another turn cannot replace the finished turn state")
+                try handle.write(contentsOf: Data((start + "\n" + request + "\n").utf8))
+                try handle.close()
+                let restarted = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                expect(restarted.executionState == .waitingForInput, "an explicit new turn restores input tracking")
+            }
+            let url = directory.appendingPathComponent("parallel-inputs.jsonl")
+            let secondRequest = request.replacingOccurrences(of: "input-a", with: "input-b")
+            let secondResponse = response.replacingOccurrences(of: "input-a", with: "input-b")
+            let content = [start, request, secondRequest, secondResponse].joined(separator: "\n") + "\n"
+            try Data(content.utf8).write(to: url)
+            let waiting = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+            expect(waiting.executionState == .waitingForInput,
+                   "answering one of two pending input calls must not clear the other")
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data((response + "\n").utf8))
+            try handle.close()
+            let resumed = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+            expect(resumed.executionState == .running, "receiving all pending answers resumes the turn")
+        } catch { expect(false, "terminal input races: \(error)") }
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         guard !condition() else { return }
         failures += 1
         fputs("FAIL: \(message)\n", stderr)
+    }
+
+    private static func checkProtocolStateRegressions() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-protocol-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            func line(_ type: String, _ payload: JSONObject) throws -> Data {
+                var data = try JSONSerialization.data(withJSONObject: [
+                    "timestamp": "2026-10-16T12:00:00Z", "type": type, "payload": payload
+                ], options: [.sortedKeys])
+                data.append(10)
+                return data
+            }
+            func append(_ data: Data, to url: URL) throws {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            }
+            let start = try line("event_msg", ["type": "task_started", "turn_id": "active"])
+            for (index, info) in (["thread_rollback_failed",
+                                   ["active_turn_not_steerable": ["turn_kind": "review"]]] as [Any]).enumerated() {
+                let url = directory.appendingPathComponent("nonfatal-\(index).jsonl")
+                try start.write(to: url)
+                _ = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                try append(line("event_msg", ["type": "error", "codex_error_info": info]), to: url)
+                let running = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                expect(running.executionState == .running, "nonfatal protocol error \(index) does not stop the active turn")
+                try append(line("event_msg", ["type": "task_complete", "turn_id": "active"]), to: url)
+                let finished = try CodexThreadActivityReader.readLatest(from: url.path, validatePath: false)
+                expect(finished.executionState == .idle, "successful completion survives nonfatal protocol error \(index)")
+                let coldURL = directory.appendingPathComponent("nonfatal-cold-\(index).jsonl")
+                try FileManager.default.copyItem(at: url, to: coldURL)
+                let cold = try CodexThreadActivityReader.readLatest(from: coldURL.path, validatePath: false)
+                expect(cold.executionState == .idle, "cold replay agrees about nonfatal protocol error \(index)")
+            }
+            let aliases = directory.appendingPathComponent("turn-aliases.jsonl")
+            try line("event_msg", ["type": "turn_started", "turn_id": "active"]).write(to: aliases)
+            let aliasStart = try CodexThreadActivityReader.readLatest(from: aliases.path, validatePath: false)
+            expect(aliasStart.executionState == .running, "v2 turn_started alias starts activity")
+            try append(line("event_msg", ["type": "turn_complete", "turn_id": "active"]), to: aliases)
+            let aliasEnd = try CodexThreadActivityReader.readLatest(from: aliases.path, validatePath: false)
+            expect(aliasEnd.executionState == .idle, "v2 turn_complete alias completes activity")
+
+            let url = directory.appendingPathComponent("default-tier.jsonl")
+            var settings: JSONObject = ["model": "gpt-6-sol", "model_provider_id": "openai",
+                "cwd": directory.path, "approval_policy": "never", "reasoning_effort": "max",
+                "service_tier": "priority"]
+            func settingsLine() throws -> Data {
+                try line("event_msg", ["type": "thread_settings_applied", "thread_settings": settings])
+            }
+            func token(_ total: Int64) throws -> Data {
+                try line("event_msg", ["type": "token_count", "info": [
+                    "total_token_usage": ["input_tokens": total, "cached_input_tokens": 0,
+                                          "output_tokens": 0, "total_tokens": total],
+                    "last_token_usage": ["input_tokens": 1_000_000, "cached_input_tokens": 0,
+                                         "output_tokens": 0, "total_tokens": 1_000_000]
+                ]])
+            }
+            var content = try line("session_meta", ["source": "cli", "model_provider": "openai"])
+            content.append(try settingsLine())
+            content.append(try token(1_000_000))
+            try content.write(to: url)
+            _ = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            var usage = ThreadTokenUsage(inputTokens: 1_000_000, cachedInputTokens: 0,
+                outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
+            _ = try CodexThreadCreditUsageReader.estimate(from: url.path, matching: usage, validatePath: false)
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 16, hour: 13))!
+            try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+            _ = try CodexDailyTokenUsageReader.readRecentHours(from: [url.path], now: now, calendar: calendar)
+            settings.removeValue(forKey: "service_tier")
+            settings.removeValue(forKey: "reasoning_effort")
+            try append(settingsLine(), to: url)
+            try append(token(2_000_000), to: url)
+            usage.inputTokens = 2_000_000; usage.totalTokens = 2_000_000
+            for path in [url, directory.appendingPathComponent("default-tier-cold.jsonl")] {
+                if path != url { try FileManager.default.copyItem(at: url, to: path) }
+                try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: path.path)
+                let resolved = try CodexThreadSettingsReader.readLatest(from: path.path, validatePath: false)
+                expect(resolved?.serviceTier == "default", "complete snapshots clear omitted Fast tier in \(path.lastPathComponent)")
+                expect(resolved?.reasoningEffort == nil, "complete snapshots clear omitted reasoning effort in \(path.lastPathComponent)")
+                let price = try CodexThreadCreditUsageReader.estimate(from: path.path, matching: usage, validatePath: false)
+                expect(price?.credits == 175 && price?.assumesStandardTier == false,
+                       "thread credits price Fast then Standard separately in \(path.lastPathComponent)")
+                let daily = try CodexDailyTokenUsageReader.readRecentHours(from: [path.path], now: now, calendar: calendar)
+                expect(daily.todayTokens == 2_000_000 && daily.chartCreditTotals.values.reduce(0, { $0 + $1.credits }) == 175,
+                       "daily credits agree after leaving Fast in \(path.lastPathComponent)")
+            }
+            let cleared = directory.appendingPathComponent("cleared-effort.jsonl")
+            try line("turn_context", ["model": "gpt-6-sol", "effort": "max"]).write(to: cleared)
+            _ = try CodexThreadSettingsReader.readLatest(from: cleared.path, validatePath: false)
+            try append(line("turn_context", ["effort": NSNull()]), to: cleared)
+            let clearedSettings = try CodexThreadSettingsReader.readLatest(from: cleared.path, validatePath: false)
+            expect(clearedSettings?.reasoningEffort == nil, "an explicit null effort clears a cached effort")
+        } catch {
+            expect(false, "protocol state regressions: \(error)")
+        }
+
+        let repeated = CodexStatusPayloadParser.parseRecentThreads(["data": [
+            ["id": "same", "name": "newest"], ["threadId": "same", "name": "duplicate"],
+            ["id": "next", "name": "next"]
+        ]], limit: 2)
+        expect(repeated.map(\.id) == ["same", "next"] && repeated.first?.title == "newest",
+               "duplicate explicit thread identities cannot crash state dictionaries or consume the row limit")
+    }
+
+    private static func checkReviewBoundaryRegressions() {
+        let numbers: JSONObject = [
+            "max": NSNumber(value: Int64.max), "min": NSNumber(value: Int64.min),
+            "maxString": String(Int64.max), "one": 1, "zero": 0,
+            "overflow": NSNumber(value: UInt64.max), "fraction": 1.5,
+            "integralDouble": 42.0, "largeIntegralDouble": Double(Int64.max - 1023),
+            "boolean": true, "nan": "NaN", "infinity": "inf"
+        ]
+        expect(numbers.int64("max") == .max && numbers.int64("min") == .min,
+               "JSON integers preserve the exact Int64 range")
+        expect(numbers.int64("maxString") == .max && numbers.int64("one") == 1
+               && numbers.int64("zero") == 0,
+               "integer strings and numeric zero and one remain distinct from booleans")
+        expect(numbers.int64("overflow") == nil && numbers.int("overflow") == nil,
+               "out-of-range JSON integers never wrap into negative counters")
+        expect(numbers.int64("fraction") == nil && numbers.int64("boolean") == nil,
+               "fractional and boolean JSON values are not token counters")
+        expect(numbers.int64("integralDouble") == 42
+               && numbers.int64("largeIntegralDouble") == Int64.max - 1023,
+               "exact integral floating-point JSON values remain supported")
+        let decimalNumbers = try? JSONSerialization.jsonObject(
+            with: Data(#"{"fraction":1.00000000000000000001,"integer":1.00000000000000000000}"#.utf8)
+        ) as? JSONObject
+        expect(decimalNumbers?.int64("fraction") == nil && decimalNumbers?.int64("integer") == 1,
+               "decimal JSON fractions cannot disappear through Double rounding")
+        expect(numbers.double("nan") == nil && numbers.double("infinity") == nil
+               && numbers.double("boolean") == nil,
+               "invalid numeric quota inputs cannot enter UI arithmetic")
+
+        var usage = ThreadTokenUsage(inputTokens: 0, cachedInputTokens: 0,
+                                    outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0,
+                                    contextTokensUsed: .max, contextWindowTokens: 1)
+        expect(usage.contextUsedPercent == 100, "extreme context counters clamp before Int conversion")
+        usage.contextTokensUsed = 1; usage.contextWindowTokens = 3
+        expect(usage.contextUsedPercent == 33, "normal context percentages round to the nearest integer")
+        usage.contextTokensUsed = 2
+        expect(usage.contextUsedPercent == 67, "context percentage rounding retains its upward half")
+        usage.contextTokensUsed = -1
+        expect(usage.contextUsedPercent == nil, "negative context counters stay unavailable")
+        usage.contextTokensUsed = 0; usage.contextWindowTokens = 0
+        expect(usage.contextUsedPercent == nil, "zero context capacity cannot be divided")
+        usage.contextWindowTokens = 1
+        expect(usage.contextUsedPercent == 0, "empty contexts display zero percent")
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 16))!
+        let timeline = CodexUsageTimeline.lastDaysIncludingToday(
+            from: [.init(startDate: "2026-10-16", tokens: .max),
+                   .init(startDate: "2026-10-16", tokens: 1)],
+            count: 1, now: now, calendar: calendar
+        )
+        expect(timeline.first?.tokens == .max, "duplicate date totals saturate without crashing")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-review-boundaries-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("settings.jsonl")
+            let old = #"{"type":"turn_context","payload":{"model":"gpt-6-sol","service_tier":"default"}}"# + "\n"
+            let new = old.replacingOccurrences(of: "gpt-6-sol", with: "gpt-5.4  ")
+            try Data(old.utf8).write(to: url)
+            let before = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            expect(before?.model == "gpt-6-sol", "settings rewrite fixture primes the cache")
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.write(contentsOf: Data(new.utf8))
+            try handle.close()
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                                 ofItemAtPath: url.path)
+            let after = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            expect(after?.model == "gpt-5.4  ", "same-inode same-length rewrites invalidate settings")
+
+            let activityURL = directory.appendingPathComponent("activity.jsonl")
+            let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"# + "\n"
+            try Data(start.utf8).write(to: activityURL)
+            let running = try CodexThreadActivityReader.readLatest(from: activityURL.path, validatePath: false)
+            expect(running.executionState == .running, "whitespace error fixture primes activity cache")
+            let error = #"{"type": "event_msg", "payload": {"type": "error", "codex_error_info": "unauthorized"}}"# + "\n"
+            let activityHandle = try FileHandle(forWritingTo: activityURL)
+            try activityHandle.seekToEnd()
+            try activityHandle.write(contentsOf: Data(error.utf8))
+            try activityHandle.close()
+            let failed = try CodexThreadActivityReader.readLatest(from: activityURL.path, validatePath: false)
+            expect(failed.executionState == .failed, "spaced error JSON marks an appended turn failed")
+            let coldURL = directory.appendingPathComponent("activity-cold.jsonl")
+            try FileManager.default.copyItem(at: activityURL, to: coldURL)
+            let cold = try CodexThreadActivityReader.readLatest(from: coldURL.path, validatePath: false)
+            expect(cold.executionState == .failed, "spaced error JSON also marks a cold-read turn failed")
+
+            let usageURL = directory.appendingPathComponent("usage.jsonl")
+            let timestamp = ISO8601DateFormatter().string(from: now)
+            func usageLines(input: Int64, output: Int64, total: Int64) throws -> Data {
+                let counts: JSONObject = ["input_tokens": input, "cached_input_tokens": 0,
+                                          "output_tokens": output, "total_tokens": total]
+                let records: [JSONObject] = [
+                    ["type": "session_meta", "timestamp": timestamp,
+                     "payload": ["source": "cli", "model_provider": "openai"]],
+                    ["type": "turn_context", "timestamp": timestamp,
+                     "payload": ["model": "gpt-6-sol", "service_tier": "default "]],
+                    ["type": "event_msg", "timestamp": timestamp,
+                     "payload": ["type": "token_count",
+                                 "info": ["total_token_usage": counts, "last_token_usage": counts]]]
+                ]
+                return try records.reduce(into: Data()) { data, record in
+                    data.append(try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]))
+                    data.append(0x0A)
+                }
+            }
+            let originalUsage = try usageLines(input: 1_000_000, output: 0, total: 1_000_000)
+            try originalUsage.write(to: usageURL)
+            try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: usageURL.path)
+            var matchingUsage = ThreadTokenUsage(inputTokens: 1_000_000, cachedInputTokens: 0,
+                                                outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
+            let originalThreadCredits = try CodexThreadCreditUsageReader.estimate(
+                from: usageURL.path, matching: matchingUsage, validatePath: false)
+            let originalDaily = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [usageURL.path], now: now, calendar: calendar)
+            expect(originalThreadCredits?.credits == 50
+                   && originalDaily.chartCreditTotals.values.reduce(0, { $0 + $1.credits }) == 50,
+                   "usage rewrite fixtures prime both incremental caches")
+            let rewrittenUsage = String(decoding: originalUsage, as: UTF8.self)
+                .replacingOccurrences(of: "default ", with: "priority")
+            let usageHandle = try FileHandle(forWritingTo: usageURL)
+            try usageHandle.write(contentsOf: Data(rewrittenUsage.utf8))
+            try usageHandle.close()
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(2)],
+                                                 ofItemAtPath: usageURL.path)
+            let rewrittenThreadCredits = try CodexThreadCreditUsageReader.estimate(
+                from: usageURL.path, matching: matchingUsage, validatePath: false)
+            let rewrittenDaily = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [usageURL.path], now: now, calendar: calendar)
+            expect(rewrittenThreadCredits?.credits == 125
+                   && rewrittenDaily.chartCreditTotals.values.reduce(0, { $0 + $1.credits }) == 125
+                   && rewrittenDaily.todayTokens == 1_000_000,
+                   "same-length usage rewrites rebuild both credits without double counting tokens")
+
+            let oversizedInteger: Int64 = 9_007_199_254_740_992
+            let inconsistentURL = directory.appendingPathComponent("inconsistent-counts.jsonl")
+            try usageLines(input: oversizedInteger, output: 1, total: oversizedInteger).write(to: inconsistentURL)
+            try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: inconsistentURL.path)
+            let inconsistentDaily = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [inconsistentURL.path], now: now, calendar: calendar)
+            matchingUsage.inputTokens = oversizedInteger
+            matchingUsage.outputTokens = 1
+            matchingUsage.totalTokens = oversizedInteger
+            let inconsistentCredits = try CodexThreadCreditUsageReader.estimate(
+                from: inconsistentURL.path, matching: matchingUsage, validatePath: false)
+            expect(inconsistentDaily.chartCreditTotals.values.reduce(0, { $0 + $1.credits }) == 0
+                   && inconsistentDaily.chartCreditTotals.values.reduce(0, { $0 + $1.unpricedCalls }) == 1
+                   && inconsistentCredits == nil,
+                   "inconsistent token counts above Double precision stay unpriced in both readers")
+        } catch {
+            expect(false, "review boundary regressions: \(error.localizedDescription)")
+        }
+    }
+
+    private static func checkCodexExecutableLocator() {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("codex-island-cli-checks-\(UUID().uuidString) space")
+        defer { try? fm.removeItem(at: root) }
+        do {
+            let bin = root.appendingPathComponent("bin", isDirectory: true)
+            try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+            let executable = bin.appendingPathComponent("codex")
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+            var environment = ProcessInfo.processInfo.environment
+            // Never read or change the user's actual login profiles.
+            environment["ZDOTDIR"] = root.path
+            let profile = root.appendingPathComponent(".zprofile")
+            let customPath = "export PATH=\"$ZDOTDIR/bin\"\n"
+            try Data(customPath.utf8).write(to: profile)
+            expect(CodexExecutableLocator.locateWithLoginShell(environment: environment)?.executableURL == executable,
+                   "login-shell lookup finds a custom CLI path containing spaces")
+
+            let banner = root.appendingPathComponent("banner.txt")
+            try Data(repeating: 65, count: 512 * 1024).write(to: banner)
+            try Data(("/bin/cat \"$ZDOTDIR/banner.txt\"\n" + customPath).utf8).write(to: profile)
+            expect(CodexExecutableLocator.locateWithLoginShell(environment: environment)?.executableURL == executable,
+                   "large login-profile output neither blocks nor contaminates CLI lookup")
+
+            // The interpreter lives elsewhere, as with npm and a Node version
+            // manager. Adding only the CLI's directory to PATH is insufficient.
+            let runtimeBin = root.appendingPathComponent("version manager/bin", isDirectory: true)
+            try fm.createDirectory(at: runtimeBin, withIntermediateDirectories: true)
+            let interpreter = runtimeBin.appendingPathComponent("codex_fixture_node")
+            try Data("#!/bin/sh\n[ \"$CODEX_FIXTURE_MARKER\" = retained ]\n".utf8).write(to: interpreter)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: interpreter.path)
+            try Data("#!/usr/bin/env codex_fixture_node\n".utf8).write(to: executable)
+            environment["PATH"] = "/usr/bin:/bin"
+            environment["CODEX_FIXTURE_MARKER"] = "retained"
+            try Data("export PATH=\"$ZDOTDIR/bin:$ZDOTDIR/version manager/bin:/usr/bin:/bin\"\n".utf8).write(to: profile)
+            func runCLI(environment: [String: String], executableURL: URL? = nil) throws -> Int32 {
+                let process = Process()
+                process.executableURL = executableURL ?? executable
+                process.environment = environment
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                process.waitUntilExit()
+                return process.terminationStatus
+            }
+            let withoutShellPath = try runCLI(environment: environment)
+            expect(withoutShellPath == 127, "isolated CLI requires its login-shell interpreter path")
+            if let launch = CodexExecutableLocator.locateWithLoginShell(environment: environment) {
+                expect(launch.executableURL == executable, "launch configuration retains the located CLI")
+                let withShellPath = try runCLI(environment: launch.environment)
+                expect(withShellPath == 0, "located CLI starts with its interpreter PATH and inherited environment")
+            } else {
+                expect(false, "login shell returns a launch configuration for the custom CLI")
+            }
+
+            let selectedCLI = root.appendingPathComponent("selected-codex")
+            try fm.copyItem(at: executable, to: selectedCLI)
+            environment["CODEX_CLI_PATH"] = selectedCLI.path
+            if let launch = CodexExecutableLocator.locate(environment: environment) {
+                expect(launch.executableURL == selectedCLI,
+                       "explicit CLI path keeps precedence over a different CLI on the login-shell PATH")
+                let status = try runCLI(environment: launch.environment, executableURL: launch.executableURL)
+                expect(status == 0,
+                       "direct CLI candidate restores a missing login-shell interpreter PATH")
+            } else {
+                expect(false, "direct CLI candidate remains discoverable")
+            }
+            try Data("export PATH=\"$ZDOTDIR/version manager/bin:/usr/bin:/bin\"\n".utf8).write(to: profile)
+            if let launch = CodexExecutableLocator.locate(environment: environment) {
+                expect(launch.executableURL == selectedCLI,
+                       "PATH recovery retains an explicit CLI absent from the shell PATH")
+                let status = try runCLI(environment: launch.environment, executableURL: launch.executableURL)
+                expect(status == 0,
+                       "PATH recovery succeeds independently of shell CLI discovery")
+            } else {
+                expect(false, "shell CLI discovery is not required for an explicit candidate")
+            }
+
+            try Data("#!/usr/bin/env -S codex_fixture_node --fixture-option\n".utf8).write(to: selectedCLI)
+            if let launch = CodexExecutableLocator.locate(environment: environment) {
+                let status = try runCLI(environment: launch.environment, executableURL: launch.executableURL)
+                expect(status == 0, "env -S scripts also recover their missing interpreter PATH")
+            } else {
+                expect(false, "env -S CLI remains discoverable")
+            }
+
+            try Data("exit 7\n".utf8).write(to: profile)
+            let failedRecovery = CodexExecutableLocator.locate(environment: environment)
+            expect(failedRecovery?.executableURL == selectedCLI
+                && failedRecovery?.environment == CodexExecutableLocator.augmentedEnvironment(environment: environment),
+                   "a failing login shell retains the explicit CLI and its fallback environment")
+
+            try Data("trap '' TERM\nexec /bin/sleep 30\n".utf8).write(to: profile)
+            let recoveryBegan = ProcessInfo.processInfo.systemUptime
+            expect(CodexExecutableLocator.locate(environment: environment, loginShellTimeout: 0.1)?.executableURL == selectedCLI,
+                   "a stalled PATH recovery does not discard the explicit CLI")
+            expect(ProcessInfo.processInfo.systemUptime - recoveryBegan < 2,
+                   "direct-candidate PATH recovery respects the shell deadline")
+
+            let profileMarker = root.appendingPathComponent("profile-ran")
+            try Data("print -r -- reached > \"$ZDOTDIR/profile-ran\"\nexec /bin/sleep 30\n".utf8).write(to: profile)
+            let nativeCLI = root.appendingPathComponent("native-codex")
+            try fm.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: nativeCLI)
+            var nativeEnvironment = environment
+            nativeEnvironment["CODEX_CLI_PATH"] = nativeCLI.path
+            expect(CodexExecutableLocator.locate(environment: nativeEnvironment, loginShellTimeout: 0.1)?.executableURL == nativeCLI,
+                   "native CLI retains the direct lookup path")
+            expect(!fm.fileExists(atPath: profileMarker.path), "native CLI lookup never evaluates a login profile")
+            try? fm.removeItem(at: profileMarker)
+
+            var readyEnvironment = environment
+            readyEnvironment["PATH"] = runtimeBin.path + ":/usr/bin:/bin"
+            if let launch = CodexExecutableLocator.locate(environment: readyEnvironment, loginShellTimeout: 0.1) {
+                let status = try runCLI(environment: launch.environment, executableURL: launch.executableURL)
+                expect(status == 0, "scripts with an available interpreter launch without PATH recovery")
+            } else {
+                expect(false, "script with an available interpreter remains discoverable")
+            }
+            expect(!fm.fileExists(atPath: profileMarker.path), "available interpreters do not incur a login-shell delay")
+
+            try Data("export PATH=\"$ZDOTDIR/empty\"\n".utf8).write(to: profile)
+            expect(CodexExecutableLocator.locateWithLoginShell(environment: environment) == nil,
+                   "missing CLI in the login-shell path returns no executable")
+
+            let pidURL = root.appendingPathComponent("pid")
+            try Data("trap '' TERM\nprint -r -- $$ > \"$ZDOTDIR/pid\"\nexec /bin/sleep 30\n".utf8).write(to: profile)
+            let began = ProcessInfo.processInfo.systemUptime
+            expect(CodexExecutableLocator.locateWithLoginShell(environment: environment, timeout: 1) == nil,
+                   "a stalled login profile returns no executable after its deadline")
+            expect(ProcessInfo.processInfo.systemUptime - began < 4,
+                   "CLI lookup timeout is bounded even when the child ignores termination")
+            let pidText = try String(contentsOf: pidURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pid = Int32(pidText) {
+                let result = kill(pid, 0)
+                expect(result == -1 && errno == ESRCH, "timed-out CLI lookup reaps its own child")
+            } else {
+                expect(false, "stalled login profile records its child PID")
+            }
+
+            let childPIDURL = root.appendingPathComponent("child-pid")
+            let stubbornChild = "/bin/sh -c 'trap \"\" TERM; echo \"$$\" > \"$ZDOTDIR/child-pid\"; exec /bin/sleep 30' &\nwait $!\n"
+            try Data(stubbornChild.utf8).write(to: profile)
+            expect(CodexExecutableLocator.locateWithLoginShell(environment: environment, timeout: 1) == nil,
+                   "CLI lookup times out when a profile waits for an unresponsive subprocess")
+            let childPIDText = try String(contentsOf: childPIDURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pid = Int32(childPIDText) {
+                // Also clean this isolated fixture if the regression returns.
+                defer { if kill(pid, 0) == 0 { kill(pid, SIGKILL) } }
+                let reapDeadline = ProcessInfo.processInfo.systemUptime + 1
+                while kill(pid, 0) == 0, ProcessInfo.processInfo.systemUptime < reapDeadline {
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
+                let result = kill(pid, 0)
+                expect(result == -1 && errno == ESRCH,
+                       "timed-out CLI lookup leaves no stubborn subprocess behind after its shell exits")
+            } else {
+                expect(false, "stalled login profile records its subprocess PID")
+            }
+        } catch {
+            expect(false, "login-shell CLI lookup: \(error.localizedDescription)")
+        }
+    }
+
+    private static func checkLargeRolloutRecords() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-large-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let settings = #"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"high","service_tier":"default"}}"# + "\n"
+            let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"large-image"}}"# + "\n"
+            let tokens = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":5,"output_tokens":5,"total_tokens":15}}}}"# + "\n"
+            let image = #"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,"#
+                + String(repeating: "A", count: 16 * 1024 * 1024) + #""}]}}"# + "\n"
+            let complete = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"large-image"}}"# + "\n"
+            let cold = root.appendingPathComponent("cold.jsonl")
+            let appended = root.appendingPathComponent("appended.jsonl")
+            try Data((settings + start + tokens + image + complete).utf8).write(to: cold)
+            try Data((settings + start + tokens).utf8).write(to: appended)
+            _ = try CodexThreadSettingsReader.readLatest(from: appended.path, validatePath: false)
+            _ = try CodexThreadActivityReader.readLatest(from: appended.path, validatePath: false)
+            let handle = try FileHandle(forWritingTo: appended)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data((image + complete).utf8))
+            try handle.close()
+
+            let began = ProcessInfo.processInfo.systemUptime
+            for file in [cold, appended] {
+                let actualSettings = try CodexThreadSettingsReader.readLatest(from: file.path, validatePath: false)
+                let actualActivity = try CodexThreadActivityReader.readLatest(from: file.path, validatePath: false)
+                expect(actualSettings == ThreadRuntimeSettings(model: "gpt-6.1-sol", reasoningEffort: "high", serviceTier: "default"),
+                       "large image records preserve settings on cold and incremental reads")
+                expect(actualActivity.executionState == .idle && actualActivity.tokenUsage?.totalTokens == 15,
+                       "large image records do not hide completion or cumulative tokens")
+            }
+            let elapsed = ProcessInfo.processInfo.systemUptime - began
+            // The old growing-buffer scan took over 30 seconds for the cold
+            // reads alone. Leave ample headroom for slow test machines.
+            expect(elapsed < 10, "large image logs must not stall state refresh for tens of seconds")
+            print(String(format: "Large log cold and incremental scan: %.2f s", elapsed))
+        } catch {
+            expect(false, "large rollout records: \(error.localizedDescription)")
+        }
     }
 
     private static func checkVisibleThreadPriority() {
@@ -144,6 +683,57 @@ struct ParserChecks {
                 > CodexDisplayPolicy.recentThreadLimit,
             "thread query keeps a wider candidate set than the visible dashboard"
         )
+    }
+
+    private static func checkLivePopoverContent() {
+        var snapshot = CodexSnapshot.initial
+        var usage = ThreadTokenUsage(inputTokens: 100, cachedInputTokens: 0,
+            outputTokens: 10, reasoningOutputTokens: 0, totalTokens: 110,
+            contextTokensUsed: 110, contextWindowTokens: 1000)
+        var thread = ThreadSummary(id: "hovered", title: "Task", status: "idle",
+            clientSource: .app, model: nil, reasoningEffort: nil, serviceTier: nil,
+            serviceTierSource: nil, tokenUsage: usage, executionState: .idle,
+            cwd: nil, rolloutPath: nil, updatedAt: nil)
+        snapshot.recentThreads = [thread]
+        let token = IslandPopoverContent.token(threadID: thread.id, rank: 0, usage: usage)
+        let context = IslandPopoverContent.context(threadID: thread.id, rank: 0, usage: usage)
+
+        // Keep the original hover selection while a refresh changes its values.
+        usage.totalTokens = 500
+        usage.contextTokensUsed = 300
+        thread.tokenUsage = usage
+        snapshot.recentThreads = [thread]
+        expect(token.resolved(in: snapshot) == .token(threadID: thread.id, rank: 0, usage: usage),
+               "stationary token tooltips reflect new counters without a mouse event")
+        expect(context.resolved(in: snapshot) == .context(threadID: thread.id, rank: 0, usage: usage),
+               "stationary context tooltips reflect new context usage")
+        snapshot.recentThreads[0].tokenUsage = nil
+        expect(token.resolved(in: snapshot) == nil,
+               "lost usage dismisses a token tooltip instead of retaining stale counters")
+        expect(context.resolved(in: snapshot) == .context(threadID: thread.id, rank: 0, usage: nil),
+               "context tooltips can return to the unavailable state")
+
+        var active = thread
+        active.id = "new-active"
+        active.executionState = .running
+        snapshot.recentThreads = [thread, active]
+        expect(token.resolved(in: snapshot) == nil && context.resolved(in: snapshot) == nil,
+               "active-thread reprioritization dismisses tooltips anchored to the previous row")
+        snapshot.recentThreads = []
+        expect(context.resolved(in: snapshot) == nil, "removed threads dismiss their tooltips")
+
+        let oldReset = ResetCreditSummary(availableCount: 3, earliestExpiration: nil)
+        let reset = IslandPopoverContent.reset(oldReset)
+        let newReset = ResetCreditSummary(availableCount: 1, earliestExpiration: Date(timeIntervalSince1970: 2_000_000_000))
+        snapshot.resetCredits = newReset
+        expect(reset.resolved(in: snapshot) == .reset(newReset),
+               "stationary reset tooltips update the count and expiration")
+        snapshot.resetCredits = .empty
+        expect(reset.resolved(in: snapshot) == nil, "exhausted reset credits dismiss their tooltip")
+        snapshot.resetCredits = nil
+        expect(reset.resolved(in: snapshot) == nil, "unavailable reset credits dismiss their tooltip")
+        expect(IslandPopoverContent.chartLegend(.actual).resolved(in: snapshot) == .chartLegend(.actual),
+               "unrelated account refreshes preserve static chart explanations")
     }
 
     private static func checkTaskCompletionTransitions() {
@@ -202,32 +792,58 @@ struct ParserChecks {
     }
 
     private static func checkPlanBadgeLabels() {
+        let labels: [(String, String)] = [
+            ("free", "FREE"), ("go", "GO"), ("plus", "PLUS"),
+            ("prolite", "PRO 100"), ("pro", "PRO 200"), ("promax", "PRO 500"),
+            ("team", "TEAM"), ("self_serve_business_prolite", "BUSINESS+"),
+            ("self_serve_business_usage_based", "BUSINESS"), ("business", "BUSINESS"),
+            ("ent26", "ENTERPRISE"), ("enterprise_cbp_automation", "ENTERPRISE"),
+            ("enterprise_cbp_usage_based", "ENTERPRISE"), ("enterprise", "ENTERPRISE"),
+            ("edu", "EDU"), ("edu_plus", "EDU PLUS"), ("edu_pro", "EDU PRO")
+        ]
+        expect(Set(labels.map(\.0) + ["unknown"]) == Set(CodexSubscriptionPlan.allCases.map(\.rawValue)),
+               "badge coverage includes every current protocol plan enum")
+        for (rawValue, label) in labels {
+            let account = CodexStatusPayloadParser.parseAccount([
+                "account": ["type": "chatgpt", "planType": rawValue]
+            ])
+            let limits = CodexStatusPayloadParser.parseRateLimits([
+                "rateLimits": ["planType": rawValue]
+            ])
+            expect(CodexDisplayPolicy.planBadgeLabel(
+                accountPlanType: account.planType, rateLimitPlanType: limits.bucket?.planType
+            ) == label, "protocol plan \(rawValue) has a readable badge")
+            expect(CodexDisplayPolicy.planBadgeLabel(
+                accountPlanType: nil, rateLimitPlanType: rawValue
+            ) == label, "quota-only plan \(rawValue) has the same badge")
+            expect(label.count <= 10, "\(rawValue) badge fits without truncating enum names")
+        }
         expect(
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: "pro",
                 rateLimitPlanType: "prolite"
-            ) == "PRO5X",
-            "Pro Lite quota bucket displays 5X"
+            ) == "PRO 100",
+            "specific Pro Lite quota resolves an older generic Pro account"
         )
         expect(
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: "pro",
                 rateLimitPlanType: "pro"
-            ) == "PRO 20X",
-            "Pro quota bucket displays 20X"
+            ) == "PRO 200",
+            "Pro quota bucket displays the current subscription name"
         )
         expect(
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: "pro",
                 rateLimitPlanType: nil
-            ) == "PRO",
-            "missing Pro subtype stays generic"
+            ) == "PRO 200",
+            "the current Pro enum identifies Pro 200 without quota metadata"
         )
         expect(
             CodexDisplayPolicy.planBadgeLabel(
                 accountPlanType: nil,
                 rateLimitPlanType: " PROLITE "
-            ) == "PRO5X",
+            ) == "PRO 100",
             "quota bucket can supply plan while account data is unavailable"
         )
         expect(
@@ -244,6 +860,47 @@ struct ParserChecks {
             ) == nil,
             "missing plan stays hidden"
         )
+        for (account, quota, expectedPlan, expectedAllowance) in [
+            ("plus", "plus", CodexSubscriptionPlan.plus, 2_000.0),
+            ("pro", "prolite", .prolite, 10_000.0),
+            ("prolite", "pro", .prolite, 10_000.0),
+            ("pro", "pro", .pro, 20_000.0),
+            ("pro", "", .pro, 20_000.0),
+            (" PRO ", " PRO ", .pro, 20_000.0)
+        ] {
+            let plan = CodexDisplayPolicy.subscriptionPlan(
+                accountPlanType: account, rateLimitPlanType: quota
+            )
+            expect(plan == expectedPlan, "account/quota precedence: \(account)/\(quota)")
+            expect(CodexDisplayPolicy.remainingCredits(plan: plan, remainingPercent: 100) == expectedAllowance,
+                   "resolved enum supplies its allowance independently of the badge: \(account)/\(quota)")
+        }
+        for (account, quota) in [("pro", "promax"), ("promax", "pro"), ("unknown", "promax")] {
+            expect(CodexDisplayPolicy.subscriptionPlan(
+                accountPlanType: account, rateLimitPlanType: quota
+            ) == .promax, "Pro Max remains distinct from Pro: \(account)/\(quota)")
+        }
+        for rawValue in ["unknown", "future_plan", "", "  "] {
+            expect(CodexDisplayPolicy.planBadgeLabel(
+                accountPlanType: rawValue, rateLimitPlanType: nil
+            ) == nil, "unrecognized plan does not expose an internal enum or invent a tier")
+        }
+        expect(CodexDisplayPolicy.subscriptionPlan(accountPlanType: "unknown", rateLimitPlanType: "plus") == .plus,
+               "unknown account plan can fall back to recognized quota metadata")
+        for plan in CodexSubscriptionPlan.allCases where ![.plus, .prolite, .pro].contains(plan) {
+            expect(CodexDisplayPolicy.remainingCredits(plan: plan, remainingPercent: 100) == nil,
+                   "no unconfirmed reference allowance for \(plan.rawValue)")
+        }
+        expect(CodexDisplayPolicy.remainingCredits(plan: nil, remainingPercent: 100) == nil,
+               "missing plan cannot produce a credits estimate")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: -1) == 0,
+               "negative remaining quota is clamped")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 101) == 20_000,
+               "remaining estimate cannot exceed the reference allowance")
+        for percent in [Double.nan, .infinity, -.infinity] {
+            expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: percent) == nil,
+                   "invalid quota does not produce a credits estimate")
+        }
     }
 
     private static func checkLanguageResolution() {
@@ -410,6 +1067,93 @@ struct ParserChecks {
         )
     }
 
+    private static func checkLegacyLaunchAgentCleanup() {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("island-legacy-agents-\(UUID())")
+        defer { try? fm.removeItem(at: root) }
+        let directory = root.appendingPathComponent("LaunchAgents")
+        let canonical = directory.appendingPathComponent("com.codexisland.app.login-item.plist")
+        let legacy = directory.appendingPathComponent("legacy.codex-island.login-item.plist")
+        let app = root.appendingPathComponent("Applications/Codex Island.app")
+        let oldApp = root.appendingPathComponent("deleted build/Codex Island.app")
+        let executable = app.appendingPathComponent("Contents/MacOS/Codex Island")
+        // Construct before any plists exist: inventory must stay live afterward.
+        let backend = LaunchAtLoginBackend.launchAgent(
+            plistURL: canonical, appBundleURL: app,
+            appExecutableURL: executable, bundleIdentifier: "com.codexisland.app"
+        )
+        func write(_ url: URL, label: String, arguments: [String], active: Bool = true) throws {
+            try PropertyListSerialization.data(fromPropertyList: [
+                "Label": label, "ProgramArguments": arguments, "RunAtLoad": active
+            ], format: .xml, options: 0).write(to: url, options: .atomic)
+        }
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Similar names or paths alone cannot establish ownership.
+            let unrelated = [
+                ("codex-island-helper.plist", "example.codex-island-helper", ["/usr/bin/true"]),
+                ("other.plist", "example.other", ["/usr/bin/open", "-g", oldApp.path]),
+                ("example.codex-island.plist", "example.codex-island", ["/usr/bin/open", "-g", "/Applications/Other.app"]),
+                ("codex-island-wrapper.plist", "example.codex-island", ["/bin/sh", "-c", executable.path])
+            ]
+            for (name, label, args) in unrelated {
+                try write(directory.appendingPathComponent(name), label: label, arguments: args)
+            }
+            var setting = LaunchAtLoginSettingModel(backend: backend)
+            expect(setting.state == .disabled, "unrelated launch jobs never enable the login switch")
+            for arguments in [
+                ["/usr/bin/open", "-g", oldApp.path],
+                [oldApp.appendingPathComponent("Contents/MacOS/Codex Island").path]
+            ] {
+                try write(legacy, label: "legacy.codex-island.login-item", arguments: arguments)
+                expect(backend.readStatus() == .legacyRegistered,
+                       "a renamed agent at a missing old installation is discovered after backend initialization")
+                setting.refresh()
+                expect(setting.state == .enabled && !fm.fileExists(atPath: legacy.path),
+                       "refresh migrates renamed and relocated agents and removes the old plist")
+                let plist = try? PropertyListSerialization.propertyList(
+                    from: Data(contentsOf: canonical), options: [], format: nil
+                ) as? JSONObject
+                expect(plist?["ProgramArguments"] as? [String] == [executable.path],
+                       "legacy migration targets the current executable")
+
+                // Old and current agents may coexist after an older build runs.
+                try write(legacy, label: "legacy.codex-island.login-item", arguments: arguments)
+                expect(backend.readStatus() == .legacyRegistered,
+                       "an enabled current agent does not hide a duplicate legacy registration")
+                setting.setEnabled(true)
+                expect(setting.state == .enabled && !fm.fileExists(atPath: legacy.path),
+                       "enabling an already enabled setting still removes duplicate legacy jobs")
+                try write(legacy, label: "legacy.codex-island.login-item", arguments: arguments)
+                setting.setEnabled(false)
+                expect(setting.state == .disabled && !fm.fileExists(atPath: canonical.path)
+                       && !fm.fileExists(atPath: legacy.path),
+                       "disable removes both current and relocated legacy registrations")
+
+                try write(legacy, label: "legacy.codex-island.login-item", arguments: arguments, active: false)
+                setting.refresh()
+                expect(setting.state == .disabled && !fm.fileExists(atPath: canonical.path),
+                       "refresh never enables an inactive legacy job")
+                setting.setEnabled(false)
+                expect(!fm.fileExists(atPath: legacy.path),
+                       "explicit disable cleans inactive legacy jobs at old paths too")
+            }
+            let renamed = directory.appendingPathComponent("renamed-registration.plist")
+            try write(renamed, label: "com.codexisland.app.login-item",
+                      arguments: [oldApp.appendingPathComponent("Contents/MacOS/Codex Island").path])
+            setting.refresh()
+            expect(setting.state == .enabled && !fm.fileExists(atPath: renamed.path),
+                   "the app-owned label identifies an agent even when its filename has changed")
+            setting.setEnabled(false)
+            for (name, _, _) in unrelated {
+                expect(fm.fileExists(atPath: directory.appendingPathComponent(name).path),
+                       "migration and disable preserve unrelated job \(name)")
+            }
+        } catch {
+            expect(false, "legacy launch agent cleanup: \(error.localizedDescription)")
+        }
+    }
+
     private static func checkLaunchAtLoginSetting() {
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory
@@ -499,6 +1243,66 @@ struct ParserChecks {
         expect(!fileManager.fileExists(atPath: plistURL.path), "disable removes only the launch agent plist")
         productionSetting.setEnabled(false)
         expect(productionSetting.state == .disabled, "repeated disable remains idempotent")
+
+        do {
+            let previousAppURL = directory.appendingPathComponent("dist/Codex Island.app")
+            let previousExecutableURL = previousAppURL
+                .appendingPathComponent("Contents/MacOS/Codex Island")
+            for arguments in [
+                [previousExecutableURL.path],
+                ["/usr/bin/open", "-g", previousAppURL.path]
+            ] {
+                var oldRegistration: [String: Any] = [
+                    "Label": "\(bundleIdentifier).login-item",
+                    "ProgramArguments": arguments,
+                    "RunAtLoad": true
+                ]
+                if arguments.count == 1 {
+                    oldRegistration["AssociatedBundleIdentifiers"] = [bundleIdentifier]
+                }
+                let oldData = try PropertyListSerialization.data(
+                    fromPropertyList: oldRegistration, format: .xml, options: 0
+                )
+                try oldData.write(to: plistURL, options: .atomic)
+                expect(
+                    productionBackend.readStatus() == .legacyRegistered,
+                    "registration at a previous installation path is recognized"
+                )
+                let relocatedSetting = LaunchAtLoginSettingModel(backend: productionBackend)
+                let relocated = try PropertyListSerialization.propertyList(
+                    from: Data(contentsOf: plistURL), options: [], format: nil
+                ) as? [String: Any]
+                expect(
+                    relocatedSetting.state == .enabled
+                        && relocated?["ProgramArguments"] as? [String] == [appExecutableURL.path],
+                    "moving the app migrates login launch to its current executable"
+                )
+
+                // The app may move after the setting model has been initialized.
+                try oldData.write(to: plistURL, options: .atomic)
+                productionSetting.setEnabled(false)
+                expect(
+                    productionSetting.state == .disabled
+                        && !fileManager.fileExists(atPath: plistURL.path),
+                    "explicit disable removes the registration at the old installation path"
+                )
+            }
+            let inactiveData = try PropertyListSerialization.data(
+                fromPropertyList: [
+                    "Label": "\(bundleIdentifier).login-item",
+                    "RunAtLoad": false
+                ],
+                format: .xml, options: 0
+            )
+            try inactiveData.write(to: plistURL, options: .atomic)
+            productionSetting.setEnabled(false)
+            expect(
+                !fileManager.fileExists(atPath: plistURL.path),
+                "explicit disable also cleans an inactive app launch agent"
+            )
+        } catch {
+            expect(false, "relocated launch agent: \(error.localizedDescription)")
+        }
 
         do {
             try fileManager.createDirectory(
@@ -625,7 +1429,7 @@ struct ParserChecks {
         expect(enabledSetting.state == .disabled, "successful unregistration disables login item")
         expect(enabledService.unregisterCallCount == 1, "disable unregisters exactly once")
         enabledSetting.setEnabled(false)
-        expect(enabledService.unregisterCallCount == 1, "already disabled login item is idempotent")
+        expect(enabledService.unregisterCallCount == 2, "explicit disable always requests idempotent cleanup")
 
         let failedEnableService = FakeLaunchAtLoginService(status: .notRegistered)
         failedEnableService.registerError = LaunchAtLoginTestError.operationFailed
@@ -1068,6 +1872,109 @@ struct ParserChecks {
 
         } catch {
             expect(false, "priced rollout credits: \(error.localizedDescription)")
+        }
+        checkLargeDailyUsageSettings()
+    }
+
+    private static func checkLargeDailyUsageSettings() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date()
+        let timestamp = now.addingTimeInterval(-60)
+        let formatter = ISO8601DateFormatter()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-large-usage-settings-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+        }
+        func line(_ type: String, _ payload: JSONObject, at date: Date = timestamp) throws -> String {
+            // Deliberately put type after payload: field order is not part of JSON's contract.
+            let body = String(decoding: try JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), as: UTF8.self)
+            return "{\"payload\":\(body),\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"\(type)\"}\n"
+        }
+        let instructions = String(repeating: "Follow project rules; quoted \\\"type\\\":\\\"turn_context\\\" is prose. ", count: 2_000)
+        func settings(_ model: String, provider: String = "openai", tier: Any = "default", large: Bool = false, at date: Date = timestamp) throws -> String {
+            try line("event_msg", ["type": "thread_settings_applied", "thread_settings": [
+                "model": model, "model_provider_id": provider, "service_tier": tier,
+                "collaboration_mode": ["mode": "default", "settings": ["model": model, "developer_instructions": large ? instructions : ""]]
+            ]], at: date)
+        }
+        func token(_ total: Int64, at date: Date = timestamp) throws -> String {
+            try line("event_msg", ["type": "token_count", "info": [
+                "total_token_usage": ["total_tokens": total * 1_000_000],
+                "last_token_usage": ["total_tokens": 1_000_000, "input_tokens": 900_000,
+                                     "cached_input_tokens": 800_000, "output_tokens": 100_000]
+            ]], at: date)
+        }
+        func append(_ text: String, to url: URL) throws {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(text.utf8))
+        }
+        func read(_ url: URL) throws -> LocalTokenUsageSnapshot {
+            try CodexDailyTokenUsageReader.readRecentHours(from: [url.path], now: now, calendar: calendar)
+        }
+        func expectCost(_ snapshot: LocalTokenUsageSnapshot, _ credits: Double, unpriced: Int, _ message: String) {
+            expect(abs(snapshot.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - credits) < 0.000001
+                   && snapshot.chartCreditTotals.values.reduce(0) { $0 + $1.unpricedCalls } == unpriced, message)
+        }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("large-settings.jsonl")
+            let meta = try line("session_meta", ["source": "cli", "model_provider": "openai"])
+            try Data((meta + settings("gpt-6-luna") + token(1)).utf8).write(to: url)
+            expectCost(try read(url), 1.7, unpriced: 0, "large-settings fixture starts at Luna pricing")
+            let context = try line("turn_context", ["model": "gpt-6-astra", "service_tier": "priority",
+                "collaboration_mode": ["mode": "default", "settings": ["model": "gpt-6-astra", "developer_instructions": instructions]]])
+            expect(context.utf8.count > 64 * 1024, "large turn context exceeds the normal line buffer")
+            try append(String(context.dropLast()), to: url)
+            expectCost(try read(url), 1.7, unpriced: 0, "uncommitted large settings do not change pricing")
+            try append("\n" + token(2), to: url)
+            expectCost(try read(url), 426.7, unpriced: 0, "appended large turn context switches model and Fast pricing")
+            try append(settings("gpt-6-astra", provider: "custom", large: true) + token(3)
+                       + settings("gpt-6-sol", tier: NSNull(), large: true) + token(4), to: url)
+            expectCost(try read(url), 460.7, unpriced: 1, "large settings preserve provider changes and explicit Standard resets")
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            expectCost(try read(url), 460.7, unpriced: 1, "cold scans match incrementally applied large settings")
+
+            // A large unrelated record may mention settings in its text. It must
+            // remain skipped rather than being decoded or interpreted as settings.
+            let image = "{\"payload\":{\"type\":\"message\",\"text\":\"turn_context thread_settings_applied\",\"image\":\""
+                + String(repeating: "x", count: 16 * 1024 * 1024) + "\"},\"type\":\"response_item\"}\n"
+            try append(image, to: url)
+            let started = Date()
+            expectCost(try read(url), 460.7, unpriced: 1, "large image content cannot impersonate a settings record")
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            expectCost(try read(url), 460.7, unpriced: 1, "cold daily scans skip a payload-first image without changing its surrounding prices")
+            let imageElapsed = Date().timeIntervalSince(started)
+            print(String(format: "Daily usage payload-first 16 MB image cold and incremental scan: %.2f s", imageElapsed))
+            expect(imageElapsed < 10, "skipping a payload-first 16 MB image remains bounded and fast")
+
+            let tomorrow = calendar.date(byAdding: .day, value: 1, to: now)!
+            try append(settings("gpt-6-luna", large: true, at: tomorrow) + token(5, at: tomorrow), to: url)
+            let rolled = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [url.path], now: tomorrow, calendar: calendar
+            )
+            expectCost(rolled, 462.4, unpriced: 1, "large configuration changes retain correct pricing as the cached day rolls forward")
+            expect(rolled.todayTokens == 1_000_000, "day rollover keeps the new call separate from yesterday's tokens")
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let rolledCold = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [url.path], now: tomorrow, calendar: calendar
+            )
+            expect(rolled == rolledCold, "cold and warm oversized-setting scans agree after midnight")
+
+            let historyURL = directory.appendingPathComponent("large-settings-baseline.jsonl")
+            let old = calendar.date(byAdding: .day, value: -35, to: timestamp)!
+            let beforeRange = calendar.date(byAdding: .day, value: -31, to: timestamp)!
+            let oldMeta = try line("session_meta", ["source": "cli", "model_provider": "openai"], at: old)
+            try Data((oldMeta + settings("gpt-6-luna", at: old) + token(1, at: old)
+                      + settings("gpt-6-astra", tier: "priority", large: true, at: beforeRange)
+                      + token(2, at: beforeRange) + token(3)).utf8).write(to: historyURL)
+            expectCost(try read(historyURL), 425, unpriced: 0, "backward baseline search retains large settings before the 30-day boundary")
+        } catch {
+            expect(false, "large daily usage settings: \(error.localizedDescription)")
         }
     }
 
@@ -1523,6 +2430,25 @@ struct ParserChecks {
                 == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"],
             "usage timeline keeps calendar-day continuity across daylight saving time"
         )
+
+        for identifier: Calendar.Identifier in [.buddhist, .hebrew, .persian] {
+            var systemCalendar = Calendar(identifier: identifier)
+            systemCalendar.timeZone = shanghaiCalendar.timeZone
+            let timeline = CodexUsageTimeline.lastDaysIncludingToday(
+                from: [DailyUsageBucket(startDate: "2026-01-01", tokens: 175)],
+                count: 3, now: newYearNow, calendar: systemCalendar
+            )
+            expect(timeline.map(\.startDate) == ["2025-12-31", "2026-01-01", "2026-01-02"],
+                   "\(identifier) system calendars preserve Gregorian account date keys in the local time zone")
+            expect(timeline[1].tokens == 175,
+                   "\(identifier) system calendars retain account history instead of displaying zeros")
+            let credits = CodexUsageTimeline.dailyCreditTotals(
+                from: [newYearNow: CodexChartCreditTotal(tokens: 175, credits: 2)],
+                calendar: systemCalendar
+            )
+            expect(credits["2026-01-02"]?.credits == 2 && credits.count == 1,
+                   "\(identifier) chart credits use the same Gregorian keys as token history")
+        }
     }
 
     private static func checkThreadRuntimeSettings() {
@@ -1612,30 +2538,206 @@ struct ParserChecks {
             expect(false, "TUI settings fallback: \(error.localizedDescription)")
         }
         try? FileManager.default.removeItem(at: tuiURL)
+
+        let resumedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rollout-\(UUID().uuidString).jsonl")
+        let coldURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rollout-\(UUID().uuidString).jsonl")
+        defer {
+            try? FileManager.default.removeItem(at: resumedURL)
+            try? FileManager.default.removeItem(at: coldURL)
+        }
+        do {
+            try Data((older + "\n").utf8).write(to: resumedURL)
+            _ = try CodexThreadSettingsReader.readLatest(
+                from: resumedURL.path, validatePath: false
+            )
+            let resumedContext = #"{"type": "turn_context", "payload": {"model": "gpt-6-astra", "effort": "max", "service_tier": null}}"#
+            let handle = try FileHandle(forWritingTo: resumedURL)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data((resumedContext + "\n").utf8))
+            try handle.close()
+            try FileManager.default.copyItem(at: resumedURL, to: coldURL)
+            for path in [resumedURL.path, coldURL.path] {
+                let settings = try CodexThreadSettingsReader.readLatest(
+                    from: path, validatePath: false
+                )
+                expect(
+                    settings?.model == "gpt-6-astra"
+                        && settings?.reasoningEffort == "max"
+                        && settings?.serviceTier == "default",
+                    "latest turn context overrides old applied settings on warm and cold reads"
+                )
+            }
+            let partialApplied = #"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"reasoning_effort":"high"}}}"#
+            let partialContext = #"{"type":"turn_context","payload":{"model":"gpt-6-sol"}}"#
+            let appendHandle = try FileHandle(forWritingTo: resumedURL)
+            try appendHandle.seekToEnd()
+            try appendHandle.write(contentsOf: Data((partialApplied + "\n" + partialContext + "\n").utf8))
+            try appendHandle.close()
+            let merged = try CodexThreadSettingsReader.readLatest(
+                from: resumedURL.path, validatePath: false
+            )
+            expect(
+                merged?.model == "gpt-6-sol"
+                    && merged?.reasoningEffort == "high"
+                    && merged?.serviceTier == "default",
+                "partial settings and contexts preserve the newest value of each field"
+            )
+        } catch {
+            expect(false, "resumed thread settings: \(error.localizedDescription)")
+        }
     }
 
-    private static func checkEffectiveServiceTier() {
-        let fast = CodexStatusPayloadParser.parseEffectiveServiceTier([
-            "config": ["service_tier": "priority"]
-        ])
-        expect(fast == "priority", "effective Fast service tier")
+    private static func checkPartiallyWrittenThreadSettings() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-island-partial-settings-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("warm.jsonl")
+            let coldURL = directory.appendingPathComponent("cold.jsonl")
+            let old = #"{"type":"turn_context","payload":{"model":"gpt-6-sol","effort":"max","service_tier":"default"}}"# + "\n"
+            var new = try JSONSerialization.data(withJSONObject: [
+                "type": "turn_context", "payload": [
+                    "model": "gpt-6-astra", "effort": "ultra", "service_tier": "priority",
+                    "user_instructions": String(repeating: "x", count: 150_000)
+                ]
+            ], options: [.sortedKeys])
+            new.append(0x0A)
+            try Data(old.utf8).write(to: url)
+            _ = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            var offset = 0
+            for end in [90_000, 120_000] {
+                try handle.write(contentsOf: new[offset..<end])
+                offset = end
+                let partial = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+                expect(partial?.model == "gpt-6-sol" && partial?.serviceTier == "default",
+                       "incomplete large settings retain the previous complete values")
+            }
+            try handle.write(contentsOf: new[offset...])
+            let completed = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            try FileManager.default.copyItem(at: url, to: coldURL)
+            let cold = try CodexThreadSettingsReader.readLatest(from: coldURL.path, validatePath: false)
+            expect(completed?.model == "gpt-6-astra" && completed?.reasoningEffort == "ultra"
+                   && completed?.serviceTier == "priority" && completed == cold,
+                   "completing a settings line larger than the read chunk updates every field on warm and cold reads")
 
-        let standard = CodexStatusPayloadParser.parseEffectiveServiceTier([
-            "config": [:]
-        ])
-        expect(standard == "default", "missing service tier means Standard")
+            let partialUpdate = #"{"type":"turn_context","payload":{"service_tier":null}}"# + "\n"
+            try handle.write(contentsOf: Data(partialUpdate.utf8))
+            let merged = try CodexThreadSettingsReader.readLatest(from: url.path, validatePath: false)
+            expect(merged?.model == "gpt-6-astra" && merged?.reasoningEffort == "ultra"
+                   && merged?.serviceTier == "default",
+                   "subsequent partial settings preserve the recovered model and effort while clearing Fast")
+        } catch {
+            expect(false, "partially written thread settings: \(error.localizedDescription)")
+        }
+    }
 
-        let featureDisabled = CodexStatusPayloadParser.parseEffectiveServiceTier([
-            "config": [
-                "service_tier": "priority",
-                "features": ["fast_mode": false]
-            ]
-        ])
-        expect(featureDisabled == "default", "disabled Fast feature means Standard")
-        expect(
-            CodexStatusPayloadParser.parseEffectiveServiceTier([:]) == nil,
-            "invalid config response stays unknown"
-        )
+    private static func checkThreadRequestServiceTiers() {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent("codex-island-fast-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: directory) }
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("logs_2.sqlite")
+            let missingURL = directory.appendingPathComponent("missing.sqlite")
+            expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: missingURL).isEmpty
+                   && !fm.fileExists(atPath: missingURL.path), "missing request logs stay unknown and are not created")
+            var database: OpaquePointer?
+            guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else {
+                expect(false, "create Fast request-log fixture")
+                return
+            }
+            defer { sqlite3_close(database) }
+            func execute(_ sql: String) throws {
+                guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+                    throw NSError(domain: "FastFixture", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+                }
+            }
+            let indexSQL = "CREATE INDEX idx_logs_thread_id_ts ON logs(thread_id, ts DESC, ts_nanos DESC, id DESC)"
+            try execute("PRAGMA journal_mode=WAL")
+            try execute("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts INTEGER, ts_nanos INTEGER, target TEXT, feedback_log_body TEXT, thread_id TEXT)")
+            try execute(indexSQL)
+            func append(_ id: String, _ tier: String?, at time: Int64, nanos: Int64 = 0,
+                        target: String = "feedback_tags", body: String? = nil) throws {
+                let tags: [String: String] = tier.map { ["service_tier": $0] } ?? ["other": "tag"]
+                let payload = try JSONSerialization.data(withJSONObject: tags, options: [.sortedKeys])
+                let text = body ?? "session_loop{thread_id=\(id)}: feedback tags_json=\(String(decoding: payload, as: UTF8.self))"
+                var statement: OpaquePointer?
+                defer { sqlite3_finalize(statement) }
+                guard sqlite3_prepare_v2(database, "INSERT INTO logs(ts,ts_nanos,target,feedback_log_body,thread_id) VALUES(?,?,?,?,?)", -1, &statement, nil) == SQLITE_OK else {
+                    throw NSError(domain: "FastFixture", code: 2)
+                }
+                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                sqlite3_bind_int64(statement, 1, time)
+                sqlite3_bind_int64(statement, 2, nanos)
+                sqlite3_bind_text(statement, 3, target, -1, transient)
+                sqlite3_bind_text(statement, 4, text, -1, transient)
+                sqlite3_bind_text(statement, 5, id, -1, transient)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw NSError(domain: "FastFixture", code: 3)
+                }
+            }
+            let threads = CodexStatusPayloadParser.parseRecentThreads(["data": [
+                ["id": "top", "name": "same title", "cwd": directory.path, "source": "cli"],
+                ["id": "middle", "name": "same title", "cwd": directory.path, "source": "cli"],
+                ["id": "recorded", "cwd": directory.path, "serviceTier": "priority"],
+                ["id": "unknown", "cwd": directory.path]
+            ]])
+            try append("top", "priority", at: 100)
+            try append("middle", "priority", at: 100)
+            try append("recorded", "default", at: 100)
+            let initial = CodexThreadServiceTierReader.fillingMissing(in: threads, from: url)
+            expect(initial[0].serviceTier == "priority" && initial[1].serviceTier == "priority",
+                   "same-directory TUI tasks each recover their own Fast request")
+            expect(initial[1].serviceTierSource == .runtimeLog && initial[2].serviceTierSource == .recorded,
+                   "request-log fallback has distinct provenance and preserves recorded settings")
+
+            try Data("service_tier = \"default\"\n".utf8).write(to: directory.appendingPathComponent("config.toml"))
+            try append("top", "default", at: 200)
+            // Other targets can contain quoted tool output. They are not settings.
+            try append("middle", "default", at: 201, target: "codex_core::tools")
+            let refreshed = CodexThreadServiceTierReader.fillingMissing(in: threads, from: url)
+            expect(refreshed[0].serviceTier == "default" && refreshed[1].serviceTier == "priority",
+                   "turning off Fast in one TUI cannot clear another same-directory task's Fast state")
+            expect(refreshed[2].serviceTier == "priority" && refreshed[3].serviceTier == nil,
+                   "shared Standard config neither overrides recorded Fast nor invents missing state")
+            expect(CodexThreadServiceTierReader.readLatest(for: ["middle' OR 1=1 --"], from: url).isEmpty,
+                   "request tiers are matched by bound thread identity")
+
+            try append("middle", "default", at: 300, nanos: 1)
+            try append("middle", "fast", at: 300, nanos: 2)
+            expect(CodexThreadServiceTierReader.readLatest(for: ["middle"], from: url)["middle"] == "fast",
+                   "nanosecond ordering selects the latest request tier")
+            try append("middle", "default", at: 300, nanos: 2)
+            try append("middle", "priority", at: 299)
+            expect(CodexThreadServiceTierReader.readLatest(for: ["middle"], from: url)["middle"] == "default",
+                   "same-time row identity breaks ties without letting older backfilled requests win")
+            try append("middle", "unrecognized", at: 301)
+            expect(CodexThreadServiceTierReader.readLatest(for: ["middle"], from: url)["middle"] == nil,
+                   "unknown newer tiers do not resurrect an older Fast state")
+
+            try append("malformed", nil, at: 100, body: "feedback tags_json={invalid}")
+            try append("oversized", nil, at: 100,
+                       body: "feedback tags_json={\"padding\":\"\(String(repeating: "x", count: 70_000))\",\"service_tier\":\"priority\"}")
+            try append("buried", "priority", at: 100)
+            for offset in 0..<129 { try append("buried", nil, at: Int64(200 + offset), target: "other") }
+            expect(CodexThreadServiceTierReader.readLatest(for: ["malformed", "oversized", "buried"], from: url).isEmpty,
+                   "malformed, oversized, or outside-budget feedback leaves Fast unknown")
+            try execute("DROP INDEX idx_logs_thread_id_ts")
+            expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: url).isEmpty,
+                   "unsupported log indexes fail closed without scanning the database")
+            try execute(indexSQL)
+            expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: url)["top"] == "default",
+                   "read-only queries recover after an unavailable schema without a stale cache")
+        } catch {
+            expect(false, "thread request service tiers: \(error.localizedDescription)")
+        }
     }
 
     private static func checkThreadActivityStates() {
@@ -1738,14 +2840,45 @@ struct ParserChecks {
             try append(start3 + failure + complete3)
             try expectState(.failed, "fatal turn error survives task_complete")
 
-            let start4 = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-4"}}"# + "\n"
-            let delayedOldComplete = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-old"}}"# + "\n"
-            try append(start4 + delayedOldComplete)
-            try expectState(.running, "old turn completion does not stop active turn")
+            // Current Codex persists terminal errors inside task_complete,
+            // without a separate error event in the rollout.
+            let persistedStart = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"persisted-failure"}}"# + "\n"
+            let persistedFailure = #"{"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "persisted-failure", "error": {"message": "quota exceeded", "codex_error_info": "usage_limit_exceeded"}}}"# + "\n"
+            try append(persistedStart)
+            try expectState(.running, "persisted failure fixture starts running")
+            try append(persistedFailure)
+            let failedActivity = try snapshot()
+            expect(failedActivity.executionState == .failed,
+                   "appended task_complete error marks the turn failed")
 
-            let complete4 = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-4"}}"# + "\n"
+            let coldURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rollout-\(UUID().uuidString).jsonl")
+            defer { try? FileManager.default.removeItem(at: coldURL) }
+            try FileManager.default.copyItem(at: url, to: coldURL)
+            let coldFailure = try CodexThreadActivityReader.readLatest(
+                from: coldURL.path, validatePath: false
+            )
+            expect(coldFailure.executionState == .failed,
+                   "cold task_complete error also marks the turn failed")
+            var failedThread = CodexStatusPayloadParser.parseRecentThreads([
+                "data": [["id": threadID, "path": url.path]]
+            ])[0]
+            failedThread.executionState = failedActivity.executionState
+            expect(
+                CodexDisplayPolicy.completedThreadIDs(
+                    previousStates: [threadID: .running], currentThreads: [failedThread]
+                ).isEmpty,
+                "a persisted terminal error never triggers the success completion sound"
+            )
+
+            let start4 = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-4"}}"# + "\n"
+            let delayedOldComplete = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-old","error":{"message":"old turn failed"}}}"# + "\n"
+            try append(start4 + delayedOldComplete)
+            try expectState(.running, "old turn failure does not stop the active turn")
+
+            let complete4 = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-4","error":null}}"# + "\n"
             try append(complete4)
-            try expectState(.idle, "matching completion stops active turn")
+            try expectState(.idle, "matching completion with a null error stops the active turn")
 
             let start5 = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-5"}}"# + "\n"
             try append(start5)
@@ -1976,6 +3109,161 @@ struct ParserChecks {
         }
     }
 
+    private static func checkOversizedUsageRecords() {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent("island-oversized-usage-\(UUID())")
+        defer {
+            try? fm.removeItem(at: directory)
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.startOfDay(for: Date()).addingTimeInterval(12 * 3600)
+        let timestamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))
+        let instructions = String(repeating: "规则 { \"type\": \"turn_context\" } \\ thread_settings_applied; ", count: 24_000)
+        func line(_ type: String, _ payload: JSONObject, typeFirst: Bool = false, at date: Date? = nil) throws -> String {
+            let body = String(decoding: try JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), as: UTF8.self)
+            let dateString = date.map { ISO8601DateFormatter().string(from: $0) } ?? timestamp
+            let fields = "\"payload\":\(body),\"timestamp\":\"\(dateString)\""
+            return typeFirst ? "{\"type\":\"\(type)\",\(fields)}\n" : "{\(fields),\"type\":\"\(type)\"}\n"
+        }
+        func counts(_ n: Int64) -> JSONObject {
+            ["input_tokens": n * 900_000, "cached_input_tokens": n * 800_000,
+             "output_tokens": n * 100_000, "total_tokens": n * 1_000_000]
+        }
+        func token(_ n: Int64, large: Bool = false, at date: Date? = nil) throws -> String {
+            var payload: JSONObject = ["type": "token_count", "info": [
+                "total_token_usage": counts(n), "last_token_usage": counts(1)
+            ]]
+            if large { payload["extra"] = instructions }
+            return try line("event_msg", payload, at: date)
+        }
+        func settings(_ fields: JSONObject, context: Bool = false) throws -> String {
+            var fields = fields
+            fields["collaboration_mode"] = ["settings": ["developer_instructions": instructions]]
+            return try context ? line("turn_context", fields) : line("event_msg", [
+                "type": "thread_settings_applied", "thread_settings": fields
+            ], typeFirst: true)
+        }
+        func append(_ data: Data, to url: URL) throws {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        }
+        func thread(_ url: URL, _ n: Int64) throws -> CodexThreadCreditEstimate? {
+            try CodexThreadCreditUsageReader.estimate(from: url.path, matching: ThreadTokenUsage(
+                inputTokens: n * 900_000, cachedInputTokens: n * 800_000,
+                outputTokens: n * 100_000, reasoningOutputTokens: 0, totalTokens: n * 1_000_000
+            ), validatePath: false)
+        }
+        func daily(_ url: URL) throws -> LocalTokenUsageSnapshot {
+            try fm.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+            return try CodexDailyTokenUsageReader.readRecentHours(from: [url.path], now: now, calendar: calendar)
+        }
+        func verify(_ url: URL, _ n: Int64, _ credits: Double, unpriced: Int = 0, _ message: String) throws {
+            let estimate = try thread(url, n)
+            expect(unpriced > 0 ? estimate == nil : estimate.map { abs($0.credits - credits) < 0.000001 } == true,
+                   "thread credits: \(message)")
+            let snapshot = try daily(url)
+            expect(snapshot.todayTokens == n * 1_000_000
+                   && abs(snapshot.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - credits) < 0.000001
+                   && snapshot.chartCreditTotals.values.reduce(0) { $0 + $1.unpricedCalls } == unpriced,
+                   "daily credits and tokens: \(message)")
+        }
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            expect(instructions.utf8.count > 1024 * 1024, "oversized usage fixtures exceed both readers' former limits")
+            let url = directory.appendingPathComponent("mixed.jsonl")
+            let meta = try line("session_meta", ["source": "cli", "model_provider": "openai"])
+            let luna = try line("turn_context", ["model": "gpt-6-luna", "service_tier": "default"])
+            try Data((meta + luna + token(1)).utf8).write(to: url)
+            try verify(url, 1, 1.7, "initial Luna call")
+            let unrelated = try line("response_item", ["type": "function_call_output",
+                "output": "turn_context thread_settings_applied " + instructions,
+                "nested": ["type": "turn_context", "payload": ["model": "gpt-6-astra"]]
+            ])
+            try append(Data((unrelated + token(2)).utf8), to: url)
+            try verify(url, 2, 3.4, "settings words in large tool output do not change the model")
+
+            let context = try settings(["model": "gpt-6-astra", "service_tier": "priority"], context: true)
+            try append(Data(context.dropLast().utf8), to: url)
+            try verify(url, 2, 3.4, "a large valid JSON tail is not committed before its newline")
+            let largeToken = try token(3, large: true)
+            let bytes = Data(largeToken.utf8)
+            try append(Data("\n".utf8) + bytes.prefix(65_537), to: url)
+            try verify(url, 2, 3.4, "an incomplete oversized token event does not advance counters")
+            try append(Data(bytes.dropFirst(65_537)), to: url)
+            try verify(url, 3, 428.4, "large context and token records apply Astra Fast once")
+            try append(Data((settings(["service_tier": NSNull()]) + token(4)).utf8), to: url)
+            try verify(url, 4, 598.4, "large partial settings retain the model and reset Fast")
+            let cold = directory.appendingPathComponent("cold.jsonl")
+            try fm.copyItem(at: url, to: cold)
+            try verify(cold, 4, 598.4, "cold and incremental reads agree across field ordering and large records")
+            try append(Data((settings(["model": "gpt-6-luna", "model_provider_id": "custom"]) + token(5)).utf8), to: url)
+            try verify(url, 5, 598.4, unpriced: 1, "large provider changes cannot inherit OpenAI prices")
+            try append(Data((settings(["model_provider_id": "openai"]) + token(6)).utf8), to: url)
+            try verify(url, 6, 600.1, unpriced: 1, "restoring the provider does not invent costs for the unknown call")
+
+            // Backward baseline discovery must retain an oversized old token
+            // counter, or its repeated notification today becomes a new call.
+            let history = directory.appendingPathComponent("large-token-baseline.jsonl")
+            let old = calendar.date(byAdding: .day, value: -35, to: now)!
+            let oldMeta = try line("session_meta", ["source": "cli", "model_provider": "openai"], at: old)
+            let oldContext = try line("turn_context", ["model": "gpt-6-luna", "service_tier": "default"], at: old)
+            try Data((oldMeta + oldContext + token(1, large: true, at: old) + token(1)).utf8).write(to: history)
+            let repeated = try daily(history)
+            expect(repeated.todayTokens == 0 && repeated.chartCreditTotals.values.allSatisfy { $0.tokens == 0 },
+                   "backward scans retain large counters before the visible range and suppress duplicate notifications")
+            try append(Data(token(2).utf8), to: history)
+            let advanced = try daily(history)
+            expect(advanced.todayTokens == 1_000_000
+                   && abs(advanced.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 1.7) < 0.000001,
+                   "appends advance a large historical baseline by exactly the new call")
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let coldHistory = try daily(history)
+            expect(advanced == coldHistory, "large historical token baselines agree on cold and incremental scans")
+
+            for provider in ["openai", "custom"] {
+                let headerURL = directory.appendingPathComponent("large-header-\(provider).jsonl")
+                let header = try line("session_meta", ["source": "cli", "model_provider": provider,
+                    "base_instructions": ["text": instructions]])
+                try Data(header.utf8.prefix(700_000)).write(to: headerURL)
+                let pending = try daily(headerURL)
+                expect(pending.todayTokens == 0, "an incomplete large session header remains pending")
+                try append(Data(header.utf8.dropFirst(700_000)) + Data((luna + token(1)).utf8), to: headerURL)
+                try verify(headerURL, 1, provider == "openai" ? 1.7 : 0,
+                           unpriced: provider == "openai" ? 0 : 1,
+                           "large session metadata preserves its source and provider after append")
+            }
+
+            for kind in ["fork", "subagent"] {
+                let child = directory.appendingPathComponent("large-\(kind).jsonl")
+                var payload: JSONObject = ["id": kind, "source": "cli", "model_provider": "openai",
+                    "base_instructions": ["text": instructions]]
+                if kind == "fork" { payload["forked_from_id"] = "parent" }
+                else { payload["thread_source"] = "subagent" }
+                let header = try line("session_meta", payload)
+                let boundary = try kind == "fork" ? header : line("inter_agent_communication_metadata", [
+                    "trigger_turn": true, "message": instructions
+                ])
+                try Data((header + luna + token(1) + unrelated + String(boundary.dropLast())).utf8).write(to: child)
+                let pending = try daily(child)
+                expect(pending.todayTokens == 0, "\(kind) excludes inherited history while its large boundary is uncommitted")
+                try append(Data(("\n" + token(2)).utf8), to: child)
+                let warm = try daily(child)
+                expect(warm.todayTokens == 1_000_000
+                       && abs(warm.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 1.7) < 0.000001,
+                       "\(kind) recognizes its large activity boundary and counts only its own call")
+                CodexDailyTokenUsageReader.resetCacheForTesting()
+                let cold = try daily(child)
+                expect(warm == cold, "\(kind) large metadata has identical cold and incremental attribution")
+            }
+        } catch {
+            expect(false, "oversized usage records: \(error.localizedDescription)")
+        }
+    }
+
     private static func checkDailyTokenUsage() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
@@ -2059,8 +3347,8 @@ struct ParserChecks {
             threadSettings(date, serviceTier: value)
         }
 
-        func subagentBoundary(_ date: Date) -> String {
-            "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"inter_agent_communication_metadata\",\"payload\":{}}"
+        func subagentBoundary(_ date: Date, triggerTurn: Bool = true) -> String {
+            "{\"timestamp\":\"\(formatter.string(from: date))\",\"type\":\"inter_agent_communication_metadata\",\"payload\":{\"trigger_turn\":\(triggerTurn)}}"
         }
 
         func write(_ lines: [String], name: String) -> URL {
@@ -2109,6 +3397,61 @@ struct ParserChecks {
         }
 
         do {
+            let calendarFixture = write(
+                [sessionMeta(), token(afterMidnight, total: 100, last: 100)],
+                name: "calendar.jsonl"
+            )
+            let gregorianUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [calendarFixture.path], now: now, calendar: calendar
+            )
+            for identifier: Calendar.Identifier in [.buddhist, .hebrew, .persian] {
+                var systemCalendar = Calendar(identifier: identifier)
+                systemCalendar.timeZone = calendar.timeZone
+                let usage = try CodexDailyTokenUsageReader.readRecentHours(
+                    from: [calendarFixture.path], now: now, calendar: systemCalendar
+                )
+                expect(usage.dailyBuckets == gregorianUsage.dailyBuckets && usage.todayTokens == 100,
+                       "\(identifier) rollout dates remain compatible with Gregorian account history")
+            }
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let pricedCounts = #""input_tokens":1000,"cached_input_tokens":0,"output_tokens":100,"total_tokens":1100"#
+            for source in ["cli", "subagent", "fork"] {
+                let isChild = source != "cli"
+                let meta = sessionMeta(forked: source == "fork", subagent: source == "subagent")
+                let header = Data(meta.utf8)
+                let initialTotal: Int64 = isChild ? 9_000 : 0
+                let pricedCall = "{\"timestamp\":\"\(formatter.string(from: laterToday))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":\(initialTotal + 1100)},\"last_token_usage\":{\(pricedCounts)}}}}"
+                var body = [turnContext(laterToday, model: "gpt-6-sol", serviceTier: "default")]
+                if isChild {
+                    body.append(token(laterToday, total: initialTotal, last: initialTotal))
+                    body.append(source == "fork" ? meta : subagentBoundary(laterToday))
+                }
+                body.append(pricedCall)
+                for prefixSize in [0, header.count / 2, header.count - 1] {
+                    CodexDailyTokenUsageReader.resetCacheForTesting()
+                    let url = directory.appendingPathComponent("initializing-\(source)-\(prefixSize).jsonl")
+                    try Data(header.prefix(prefixSize)).write(to: url)
+                    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+                    let initial = try CodexDailyTokenUsageReader.readToday(from: [url.path], now: now, calendar: calendar)
+                    expect(initial == 0, "an empty or incomplete \(source) session header contributes no usage")
+                    let handle = try FileHandle(forWritingTo: url)
+                    try handle.seekToEnd()
+                    var remainder = Data(header.dropFirst(prefixSize))
+                    remainder.append(Data(("\n" + body.joined(separator: "\n") + "\n").utf8))
+                    try handle.write(contentsOf: remainder)
+                    try handle.close()
+                    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+                    let ready = try CodexDailyTokenUsageReader.readRecentHours(from: [url.path], now: now, calendar: calendar)
+                    expect(ready.todayTokens == 1100,
+                           "\(source) usage recovers after its initially incomplete header is appended, excluding inherited calls")
+                    let credits = ready.chartCreditTotals.values.reduce(0) { $0 + $1.credits }
+                    expect(abs(credits - 0.075) < 0.000001,
+                           "\(source) initialization restores provider and runtime settings for credit pricing")
+                    let repeated = try CodexDailyTokenUsageReader.readRecentHours(from: [url.path], now: now, calendar: calendar)
+                    expect(repeated == ready, "repeated reads of an initialized \(source) rollout do not count usage twice")
+                }
+            }
+
             CodexDailyTokenUsageReader.resetCacheForTesting()
             let normal = write(
                 [
@@ -2833,18 +4176,18 @@ struct ParserChecks {
             let forked = write(
                 [
                     sessionMeta(forked: true, startedAt: laterToday),
-                    token(laterToday.addingTimeInterval(0.5), total: 9_900, last: 9_900),
+                    token(laterToday, total: 9_900, last: 9_900),
                     threadSettings(
-                        laterToday.addingTimeInterval(0.75),
+                        laterToday,
                         model: "gpt-5.6-sol",
                         modelProviderID: "openai",
                         serviceTier: "priority"
                     ),
                     sessionMeta(
                         forked: true,
-                        startedAt: laterToday.addingTimeInterval(1)
+                        startedAt: laterToday
                     ),
-                    token(laterToday.addingTimeInterval(2), total: 9_999, last: 99)
+                    token(laterToday, total: 9_999, last: 99)
                 ],
                 name: "forked.jsonl"
             )
@@ -2916,10 +4259,11 @@ struct ParserChecks {
                         serviceTier: "priority"
                     ),
                     token(laterToday, total: 500, last: 500),
+                    subagentBoundary(laterToday, triggerTurn: false),
                     token(laterToday, total: 570, last: 70),
                     #"{"type":"response_item","payload":{"text":"inter_agent_communication_metadata"}}"#,
-                    subagentBoundary(laterToday.addingTimeInterval(1)),
-                    token(laterToday.addingTimeInterval(2), total: 640, last: 70)
+                    subagentBoundary(laterToday),
+                    token(laterToday, total: 640, last: 70)
                 ],
                 name: "subagent.jsonl"
             )
@@ -2974,8 +4318,8 @@ struct ParserChecks {
             let pendingHandle = try FileHandle(forWritingTo: pendingSubagent)
             try pendingHandle.seekToEnd()
             try pendingHandle.write(contentsOf: Data(([
-                subagentBoundary(laterToday.addingTimeInterval(1)),
-                token(laterToday.addingTimeInterval(2), total: 9_080, last: 80)
+                subagentBoundary(laterToday),
+                token(laterToday, total: 9_080, last: 80)
             ].joined(separator: "\n") + "\n").utf8))
             try pendingHandle.close()
             let readyValue = try CodexDailyTokenUsageReader.readToday(
@@ -2996,6 +4340,45 @@ struct ParserChecks {
             expect(
                 readyUsage.todayTokens == 80,
                 "appended subagent activity counts actual tokens after the boundary"
+            )
+
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            func pricedInputToken(total: Int64) -> String {
+                "{\"timestamp\":\"\(formatter.string(from: laterToday))\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":\(total)},\"last_token_usage\":{\"input_tokens\":1000000,\"cached_input_tokens\":0,\"output_tokens\":0,\"total_tokens\":1000000}}}}"
+            }
+            let pricedChild = write(
+                [
+                    sessionMeta(startedAt: laterToday, subagent: true),
+                    threadSettings(laterToday, model: "gpt-6-luna", serviceTier: "default"),
+                    pricedInputToken(total: 1_000_000),
+                    subagentBoundary(laterToday),
+                    pricedInputToken(total: 2_000_000)
+                ],
+                name: "same-timestamp-priced-child.jsonl"
+            )
+            let childUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [pricedChild.path], now: now, calendar: calendar
+            )
+            expect(
+                childUsage.todayTokens == 1_000_000
+                    && childUsage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } == 2.5
+                    && childUsage.chartCreditTotals.values.reduce(0) { $0 + $1.unpricedCalls } == 0,
+                "same-timestamp inherited calls supply settings without adding tokens or credits"
+            )
+            try appendLines([pricedInputToken(total: 3_000_000)], to: pricedChild)
+            let appendedChildUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [pricedChild.path], now: now, calendar: calendar,
+                priorityRolloutPaths: [pricedChild.path]
+            )
+            CodexDailyTokenUsageReader.resetCacheForTesting()
+            let coldChildUsage = try CodexDailyTokenUsageReader.readRecentHours(
+                from: [pricedChild.path], now: now, calendar: calendar
+            )
+            expect(
+                appendedChildUsage == coldChildUsage
+                    && coldChildUsage.todayTokens == 2_000_000
+                    && coldChildUsage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } == 5,
+                "cold and appended child usage count each new call once across the byte boundary"
             )
 
             CodexDailyTokenUsageReader.resetCacheForTesting()

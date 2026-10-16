@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 """Deterministic app-server fixture; never contacts Codex or the network."""
-import json, os, sys, time
+import json, os, signal, sys, time
 mode = os.environ.get('RESET_FIXTURE_MODE', 'success')
+received = []
 
 def emit(x):
     print(json.dumps(x), flush=True)
@@ -34,6 +35,32 @@ for line in sys.stdin:
         r = {'thread': {'id': 'fixture-thread', 'ephemeral': True}, 'model': p['model'], 'reasoningEffort': p['config']['model_reasoning_effort'], 'serviceTier': p['serviceTier'], 'sandbox': {'type': 'readOnly'}, 'approvalPolicy': 'never', 'instructionSources': []}
     elif method == 'fixture/hang':
         continue
+    elif method == 'fixture/pause-input':
+        if p.get('ignoreTerm'):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        emit({'id': rid, 'result': {'pid': os.getpid()}})
+        time.sleep(p['seconds'])
+        continue
+    elif method == 'fixture/echo':
+        received.append(p['label'])
+        r = {'label': p['label'], 'characters': len(p['text'])}
+    elif method == 'fixture/received':
+        r = {'labels': received}
+    elif method == 'fixture/close-input':
+        # Python's standard stream wrapper uses closefd=False.
+        os.close(sys.stdin.fileno())
+        emit({'id': rid, 'result': {}})
+        time.sleep(5)
+        sys.exit(0)
+    elif method == 'fixture/restart-race':
+        emit({'id': rid, 'result': {'pid': os.getpid()}})
+        emit({'id': 'hold-old-connection', 'method': 'fixture/hold', 'params': {}})
+        deadline = time.monotonic() + 5
+        while not os.path.exists(p['releaseFile']):
+            if time.monotonic() >= deadline:
+                sys.exit(1)
+            time.sleep(0.01)
+        sys.exit(0)
     elif method == 'turn/start':
         assert p['outputSchema']['additionalProperties'] is False
         if mode == 'pending':

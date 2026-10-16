@@ -95,7 +95,7 @@ private struct ThreadCreditReducer {
         case "event_msg":
             if payload.string("type") == "thread_settings_applied",
                let settings = payload.dictionary("thread_settings") {
-                applySettings(settings)
+                applySettings(settings, isSettingsSnapshot: true)
             } else if payload.string("type") == "token_count",
                       let info = payload.dictionary("info"),
                       let total = CreditTokenCounts(json: info.dictionary("total_token_usage")) {
@@ -106,12 +106,12 @@ private struct ThreadCreditReducer {
         }
     }
 
-    private mutating func applySettings(_ settings: JSONObject) {
+    private mutating func applySettings(_ settings: JSONObject, isSettingsSnapshot: Bool = false) {
         model = settings.string("model") ?? model
         provider = settings.string("model_provider_id") ?? provider
-        if settings["service_tier"] is NSNull {
-            serviceTier = "default"
-        } else if let tier = settings.string("service_tier") {
+        if let tier = CodexThreadSettingsReader.recordedServiceTier(
+            in: settings, isSettingsSnapshot: isSettingsSnapshot
+        ) {
             serviceTier = tier
         }
     }
@@ -164,8 +164,6 @@ private final class ThreadCreditCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
-    private static let chunkSize = 64 * 1024
-    private static let maximumLineSize = 1024 * 1024
 
     func estimate(url: URL, matching usage: ThreadTokenUsage) throws -> CodexThreadCreditEstimate? {
         lock.lock()
@@ -201,48 +199,12 @@ private final class ThreadCreditCache: @unchecked Sendable {
         url: URL, from start: UInt64, to end: UInt64,
         reducer: inout ThreadCreditReducer
     ) throws -> UInt64 {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: start)
-        var position = start
-        var resumeOffset = start
-        var carry = Data()
-        var oversized = false
-        while position < end {
-            let didRead = try autoreleasepool {
-                let data = try handle.read(upToCount: min(Self.chunkSize, Int(end - position))) ?? Data()
-                guard !data.isEmpty else { return false }
-                let parts = data.split(separator: 0x0A, omittingEmptySubsequences: false)
-                for (index, part) in parts.enumerated() {
-                    if !oversized {
-                        if carry.count + part.count <= Self.maximumLineSize {
-                            carry.append(contentsOf: part)
-                        } else {
-                            // Do not keep using a stale model if a very large
-                            // settings record could not be decoded.
-                            let prefix = String(decoding: carry.prefix(512), as: UTF8.self)
-                            if prefix.contains("turn_context") || prefix.contains("thread_settings_applied") {
-                                reducer.model = nil
-                            }
-                            carry.removeAll(keepingCapacity: false)
-                            oversized = true
-                        }
-                    }
-                    position += UInt64(part.count)
-                    if index < parts.count - 1 {
-                        if !oversized { reducer.consume(carry) }
-                        carry.removeAll(keepingCapacity: true)
-                        oversized = false
-                        position += 1
-                        resumeOffset = position
-                    }
-                }
-                return true
-            }
-            if !didRead { break }
+        try CodexRolloutLineReader.scanCommittedLines(
+            url: url, from: start, to: end,
+            oversizedKinds: [.sessionMeta, .turnContext, .threadSettings, .tokenCount]
+        ) { line, _, _ in
+            if let line { reducer.consume(line) }
+            return false
         }
-        // Wait for a complete newline-terminated record. The next poll reads
-        // an unfinished record from its start, without retaining its contents.
-        return resumeOffset
     }
 }

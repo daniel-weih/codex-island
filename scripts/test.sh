@@ -23,13 +23,16 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexCreditRateCard.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/IslandPopoverContent.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandDisplaySelection.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexExecutableLocator.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexLauncher.swift" \
     "$ROOT_DIR/Sources/CodexIsland/LaunchAtLoginSetting.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexStatusPayloadParser.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexRolloutLineReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadSettingsReader.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexThreadServiceTierReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadActivityReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadCreditUsageReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexDailyTokenUsageReader.swift" \
@@ -57,7 +60,9 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/CodexExecutableLocator.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexAppServerClient.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexStatusPayloadParser.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexRolloutLineReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadSettingsReader.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexThreadServiceTierReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadActivityReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadCreditUsageReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexDailyTokenUsageReader.swift" \
@@ -65,6 +70,8 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/ResetSubscriptionSource.swift" \
     "$ROOT_DIR/Sources/CodexIsland/ResetSubscriptionService.swift" \
     "$ROOT_DIR/Sources/CodexIsland/ResetSubscriptionUsage.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexProfileIdentityProvider.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexStatusViewModel.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexResetAnalyzer.swift" \
     "$ROOT_DIR/Tests/ResetSubscriptionChecks/main.swift" \
     -o "$RESET_OUTPUT"
@@ -72,3 +79,6 @@ swiftc \
 "$RESET_OUTPUT"
 
 "$ROOT_DIR/scripts/test-reset-analyzer.sh"
+
+"$ROOT_DIR/scripts/test-runtime.sh"
+"$ROOT_DIR/scripts/test-packaging.sh"

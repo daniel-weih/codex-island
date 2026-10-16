@@ -4,6 +4,7 @@ import AppKit
 enum CodexIslandApp {
     @MainActor
     static func main() {
+        atexit { CodexAppServerClient.shutdownAll() }
         if CommandLine.arguments.contains("--check-resources") {
             exit(CodexResourceProbe.run())
         }

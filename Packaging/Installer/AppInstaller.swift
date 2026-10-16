@@ -39,9 +39,12 @@ struct AppInstaller {
         let source = source.standardizedFileURL
         let destination = destination.standardizedFileURL
         let parent = destination.deletingLastPathComponent()
+        let resolvedSource = source.resolvingSymlinksInPath().path
+        let resolvedParent = parent.resolvingSymlinksInPath().path
         guard destination.lastPathComponent == Self.appName,
-              source.resolvingSymlinksInPath().path != destination.resolvingSymlinksInPath().path,
-              !parent.resolvingSymlinksInPath().path.hasPrefix(source.resolvingSymlinksInPath().path + "/") else {
+              resolvedSource != destination.resolvingSymlinksInPath().path,
+              resolvedParent != resolvedSource,
+              !resolvedParent.hasPrefix(resolvedSource + "/") else {
             throw InstallationError(message: InstallerText.choose("安装位置无效。", "Invalid installation location."))
         }
 
@@ -120,6 +123,10 @@ struct AppInstaller {
             try rename(candidate, destination, UInt32(RENAME_EXCL))
             do {
                 try validate(destination)
+                guard try Self.identity(destination) == newIdentity else {
+                    throw InstallationError(message: InstallerText.choose(
+                        "安装完成前应用已被移动。", "The application moved before installation finished."))
+                }
             } catch {
                 if (try? Self.identity(destination)) == newIdentity {
                     try? rename(destination, candidate, UInt32(RENAME_EXCL))

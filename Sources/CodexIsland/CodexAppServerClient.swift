@@ -50,6 +50,12 @@ final class CodexAppServerClient: @unchecked Sendable {
         let completion: (Result<JSONObject, Error>) -> Void
     }
 
+    private struct PendingWrite {
+        let data: Data
+        let requestID: Int?
+        var offset = 0
+    }
+
     var onNotification: NotificationHandler?
     var onConnectionChanged: ConnectionHandler?
     var onServerRequest: ServerRequestHandler?
@@ -61,12 +67,21 @@ final class CodexAppServerClient: @unchecked Sendable {
     private var errorPipe: Pipe?
     private var outputBuffer = Data()
     private var pending: [Int: PendingRequest] = [:]
+    private var pendingWrites: [PendingWrite] = []
+    private var writeSource: DispatchSourceWrite?
     private var nextID = 1
     private var ready = false
     private var intentionallyStopping = false
     private let clientName: String
     private let launchArguments: [String]
     private let workingDirectory: URL?
+
+    /// Called by the application's exit handler, including probe exits. The
+    /// normal asynchronous stop path cannot rely on its delayed SIGKILL after
+    /// the parent process has already exited.
+    static func shutdownAll() {
+        AppServerProcesses.shared.shutdown()
+    }
 
     init(clientName: String = "codex_island", launchArguments: [String] = [], workingDirectory: URL? = nil) {
         self.clientName = clientName
@@ -171,7 +186,8 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     private func launchLocked() throws {
-        guard let executable = CodexExecutableLocator.locate() else {
+        if process != nil { abandonProcessLocked() }
+        guard let launch = CodexExecutableLocator.locate() else {
             throw CodexAppServerError.executableNotFound
         }
 
@@ -183,35 +199,56 @@ final class CodexAppServerClient: @unchecked Sendable {
         let input = Pipe()
         let output = Pipe()
         let standardError = Pipe()
+        // The child can exit between our liveness check and a write, including
+        // replies to server requests. Report EPIPE instead of killing the app.
+        let inputDescriptor = input.fileHandleForWriting.fileDescriptor
+        let flags = fcntl(inputDescriptor, F_GETFL)
+        guard flags != -1,
+              fcntl(inputDescriptor, F_SETFL, flags | O_NONBLOCK) != -1,
+              fcntl(inputDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw CodexAppServerError.launchFailed(
+                NSError(domain: NSPOSIXErrorDomain, code: Int(errno)).localizedDescription
+            )
+        }
 
-        process.executableURL = executable
+        process.executableURL = launch.executableURL
         process.arguments = ["app-server"] + launchArguments
-        process.environment = CodexExecutableLocator.augmentedEnvironment()
+        process.environment = launch.environment
         process.currentDirectoryURL = workingDirectory ?? FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = input
         process.standardOutput = output
         process.standardError = standardError
 
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            if data.isEmpty { handle.readabilityHandler = nil }
+            guard let process else { return }
             self?.queue.async {
-                self?.consumeOutputLocked(data)
+                guard let self, self.process === process else { return }
+                guard !data.isEmpty else {
+                    // EOF is a broken transport even if the child remains alive.
+                    // Otherwise start() keeps accepting the unusable connection
+                    // and every subsequent RPC waits for its own timeout.
+                    self.failTransportLocked(with: CodexAppServerError.serverStopped)
+                    return
+                }
+                self.consumeOutputLocked(data)
             }
         }
 
         standardError.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            if handle.availableData.isEmpty { handle.readabilityHandler = nil }
         }
 
         process.terminationHandler = { [weak self] process in
+            AppServerProcesses.shared.didExit(process)
             self?.queue.async {
-                self?.handleTerminationLocked(status: process.terminationStatus)
+                self?.handleTerminationLocked(process)
             }
         }
 
         do {
-            try process.run()
+            try AppServerProcesses.shared.launch(process)
         } catch {
             output.fileHandleForReading.readabilityHandler = nil
             standardError.fileHandleForReading.readabilityHandler = nil
@@ -240,18 +277,19 @@ final class CodexAppServerClient: @unchecked Sendable {
         nextID += 1
         pending[id] = PendingRequest(method: method, cancellationID: cancellationID, completion: completion)
 
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, let request = self.pending[id] else { return }
+            self.failRequestLocked(id, with: CodexAppServerError.requestTimedOut(request.method))
+        }
+
         do {
-            try writeLocked(["method": method, "id": id, "params": params])
+            try writeLocked(["method": method, "id": id, "params": params], requestID: id)
         } catch {
             pending.removeValue(forKey: id)
             completion(.failure(error))
             return
         }
 
-        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-            guard let self, let request = self.pending.removeValue(forKey: id) else { return }
-            request.completion(.failure(CodexAppServerError.requestTimedOut(request.method)))
-        }
     }
 
     private func sendNotificationLocked(method: String, params: JSONObject) throws {
@@ -259,16 +297,83 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     private func cancelRequestLocked(_ cancellationID: UUID) {
-        guard let id = pending.first(where: { $0.value.cancellationID == cancellationID })?.key,
-              let request = pending.removeValue(forKey: id) else { return }
-        request.completion(.failure(CancellationError()))
+        guard let id = pending.first(where: { $0.value.cancellationID == cancellationID })?.key else { return }
+        failRequestLocked(id, with: CancellationError())
     }
 
-    private func writeLocked(_ object: JSONObject) throws {
-        guard let inputPipe else { throw CodexAppServerError.serverStopped }
+    private func failRequestLocked(_ id: Int, with error: Error) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        if let index = pendingWrites.firstIndex(where: { $0.requestID == id }) {
+            if pendingWrites[index].offset > 0 {
+                // A partial JSON line cannot be discarded on a live connection:
+                // the next message would complete a corrupt frame or run a
+                // cancelled request. Close this connection before restarting.
+                failTransportLocked(with: error)
+            } else {
+                pendingWrites.remove(at: index)
+                if pendingWrites.isEmpty { cancelWriteSourceLocked() }
+            }
+        }
+        request.completion(.failure(error))
+    }
+
+    private func writeLocked(_ object: JSONObject, requestID: Int? = nil) throws {
+        guard let inputPipe, let process else { throw CodexAppServerError.serverStopped }
         var data = try JSONSerialization.data(withJSONObject: object, options: [])
         data.append(0x0A)
-        try inputPipe.fileHandleForWriting.write(contentsOf: data)
+        pendingWrites.append(PendingWrite(data: data, requestID: requestID))
+        guard writeSource == nil else { return }
+
+        let handle = inputPipe.fileHandleForWriting
+        let source = DispatchSource.makeWriteSource(fileDescriptor: handle.fileDescriptor, queue: queue)
+        source.setEventHandler { [weak self, weak process] in
+            guard let self, let process, self.process === process else { return }
+            self.flushWritesLocked()
+        }
+        // Dispatch must finish observing the descriptor before its owner closes
+        // it. Otherwise a cancelled source could observe a replacement pipe.
+        source.setCancelHandler { withExtendedLifetime(handle) {} }
+        writeSource = source
+        source.resume()
+    }
+
+    private func flushWritesLocked() {
+        guard let inputPipe else { return }
+        // Nonblocking writes and a bounded batch keep deadlines, cancellation,
+        // and stop() responsive even when the child stops reading stdin.
+        var budget = 64 * 1024
+        while let first = pendingWrites.first, budget > 0 {
+            let count = min(first.data.count - first.offset, budget)
+            let written = first.data.withUnsafeBytes { bytes in
+                Darwin.write(inputPipe.fileHandleForWriting.fileDescriptor,
+                             bytes.baseAddress!.advanced(by: first.offset), count)
+            }
+            if written > 0 {
+                pendingWrites[0].offset += written
+                budget -= written
+                if pendingWrites[0].offset == first.data.count { pendingWrites.removeFirst() }
+            } else if written == -1, errno == EINTR {
+                continue
+            } else if written == -1, errno == EAGAIN || errno == EWOULDBLOCK {
+                return
+            } else {
+                let error = NSError(domain: NSPOSIXErrorDomain, code: Int(written == 0 ? EIO : errno))
+                failTransportLocked(with: error)
+                return
+            }
+        }
+        if pendingWrites.isEmpty { cancelWriteSourceLocked() }
+    }
+
+    private func cancelWriteSourceLocked() {
+        writeSource?.cancel()
+        writeSource = nil
+    }
+
+    private func failTransportLocked(with error: Error) {
+        let wasReady = ready
+        abandonProcessLocked(with: error)
+        if wasReady { dispatchConnectionChanged(false, error.localizedDescription) }
     }
 
     private func consumeOutputLocked(_ data: Data) {
@@ -325,13 +430,16 @@ final class CodexAppServerClient: @unchecked Sendable {
         }
     }
 
-    private func handleTerminationLocked(status: Int32) {
+    private func handleTerminationLocked(_ terminatedProcess: Process) {
+        // A replacement may have started before this callback reached our
+        // queue. The old child's output and exit must never touch that connection.
+        guard process === terminatedProcess else { return }
         let wasIntentional = intentionallyStopping
         ready = false
         failAllPendingLocked(with: CodexAppServerError.serverStopped)
         cleanUpLocked()
         if !wasIntentional {
-            dispatchConnectionChanged(false, "App Server 已退出（\(status)）")
+            dispatchConnectionChanged(false, "App Server 已退出（\(terminatedProcess.terminationStatus)）")
         }
     }
 
@@ -342,6 +450,8 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     private func cleanUpLocked() {
+        cancelWriteSourceLocked()
+        pendingWrites.removeAll()
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
@@ -351,25 +461,19 @@ final class CodexAppServerClient: @unchecked Sendable {
         outputBuffer.removeAll(keepingCapacity: false)
     }
 
-    private func abandonProcessLocked() {
+    private func abandonProcessLocked(with error: Error = CodexAppServerError.serverStopped) {
         intentionallyStopping = true
         ready = false
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         terminateProcessLocked()
-        failAllPendingLocked(with: CodexAppServerError.serverStopped)
+        failAllPendingLocked(with: error)
         cleanUpLocked()
     }
 
     private func terminateProcessLocked() {
         guard let process else { return }
-        process.terminationHandler = nil
-        guard process.isRunning else { return }
-        process.terminate()
-        // A stuck app-server must not keep consuming a scheduled analysis after cancellation.
-        queue.asyncAfter(deadline: .now() + 2) {
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        }
+        AppServerProcesses.shared.terminate(process)
     }
 
     private func dispatchConnectionChanged(_ connected: Bool, _ message: String?) {
@@ -377,5 +481,93 @@ final class CodexAppServerClient: @unchecked Sendable {
         DispatchQueue.main.async {
             handler(connected, message)
         }
+    }
+}
+
+/// Owns both active connections and children still in their termination grace
+/// period. Only processes launched here are ever signalled; an application
+/// exit closes registration before waiting, so queued starts cannot escape it.
+private final class AppServerProcesses: @unchecked Sendable {
+    private final class Child {
+        let process: Process
+        let group: pid_t?
+        var isStopping = false // Protected by the registry lock.
+
+        init(_ process: Process) {
+            self.process = process
+            let pid = process.processIdentifier
+            // Foundation normally creates a child process group. Signal it
+            // only after proving that our child, not the app, owns that group.
+            group = getpgid(pid) == pid && getpgrp() != pid ? pid : nil
+        }
+
+        var isAlive: Bool {
+            process.isRunning || group.map { kill(-$0, 0) == 0 } == true
+        }
+
+        func signal(_ signal: Int32) {
+            if let group { kill(-group, signal) }
+            else if process.isRunning { kill(process.processIdentifier, signal) }
+        }
+    }
+
+    static let shared = AppServerProcesses()
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Child] = [:]
+    private var isShuttingDown = false
+
+    func launch(_ process: Process) throws {
+        try lock.withLock {
+            guard !isShuttingDown else { throw CodexAppServerError.serverStopped }
+            try process.run()
+            processes[ObjectIdentifier(process)] = Child(process)
+        }
+    }
+
+    func didExit(_ process: Process) {
+        // An npm/shell launcher may exit while its server is still alive.
+        // Keep ownership of that group until termination has completed.
+        terminate(process)
+    }
+
+    func terminate(_ process: Process) {
+        let key = ObjectIdentifier(process)
+        let child: Child? = lock.withLock {
+            guard let child = processes[key] else { return nil }
+            guard child.isAlive else {
+                processes.removeValue(forKey: key)
+                return nil
+            }
+            guard !child.isStopping else { return nil }
+            child.isStopping = true
+            child.signal(SIGTERM)
+            return child
+        }
+        guard let child else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            self.lock.withLock {
+                guard self.processes[key] === child else { return }
+                if child.isAlive { child.signal(SIGKILL) }
+                self.processes.removeValue(forKey: key)
+            }
+        }
+    }
+
+    func shutdown() {
+        let children = lock.withLock {
+            isShuttingDown = true
+            return Array(processes.values)
+        }
+        for child in children where child.isAlive { child.signal(SIGTERM) }
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while children.contains(where: \.isAlive), ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        for child in children where child.isAlive {
+            child.signal(SIGKILL)
+        }
+        // Foundation reaps the owned children. Keep exit handlers alive until
+        // that happens instead of leaving orphaned model calls behind.
+        for child in children { child.process.waitUntilExit() }
     }
 }

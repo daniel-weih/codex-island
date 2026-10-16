@@ -1,27 +1,5 @@
 import AppKit
 
-enum InstalledApplication {
-    static func stop(at destination: URL) throws {
-        let path = destination.resolvingSymlinksInPath().path
-        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: AppInstaller.bundleIdentifier)
-            .filter { $0.bundleURL?.resolvingSymlinksInPath().path == path }
-        for application in applications { application.terminate() }
-        let deadline = Date().addingTimeInterval(8)
-        while applications.contains(where: { !$0.isTerminated }), Date() < deadline {
-            if Thread.isMainThread {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-            } else {
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-        }
-        guard applications.allSatisfy(\.isTerminated) else {
-            throw InstallationError(message: InstallerText.choose(
-                "Codex Island 尚未退出，现有版本已保留。请稍后重试。",
-                "Codex Island has not quit. The installed version is unchanged. Please retry shortly."))
-        }
-    }
-}
-
 @main
 enum InstallerMain {
     static let source = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(AppInstaller.appName)
@@ -122,14 +100,15 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.async { self.status.stringValue = message }
                 }
                 let outcome = try installer.install(from: InstallerMain.source, to: InstallerMain.destination)
-                DispatchQueue.main.async { self.finishInstallation(outcome) }
+                let image = InstallerDiskImageEjector.prepare(installerURL: Bundle.main.bundleURL, destination: InstallerMain.destination)
+                DispatchQueue.main.async { self.finishInstallation(outcome, sourceImage: image) }
             } catch {
                 DispatchQueue.main.async { self.showFailure(error) }
             }
         }
     }
 
-    private func finishInstallation(_ outcome: AppInstaller.Outcome) {
+    private func finishInstallation(_ outcome: AppInstaller.Outcome, sourceImage: InstallerDiskImageEjector.Target?) {
         // The app is safely in place now. Quitting must no longer be vetoed
         // while Launch Services opens (or activates) the installed application.
         installing = false
@@ -140,11 +119,11 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         let handoff = InstallerLaunchHandoff()
         launchHandoff = handoff
         handoff.start(open: { completion in
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.createsNewApplicationInstance = false
-            NSWorkspace.shared.openApplication(at: InstallerMain.destination, configuration: configuration) { _, error in
+            InstalledApplication.open(at: InstallerMain.destination) { _, error in
                 completion(error)
             }
+        }, onOpened: {
+            if let sourceImage { try? InstallerDiskImageEjector.schedule(sourceImage) }
         }, completion: { outcome in
             if case .failed(let error) = outcome {
                 let alert = NSAlert()

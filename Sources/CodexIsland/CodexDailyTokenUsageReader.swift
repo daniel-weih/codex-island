@@ -53,7 +53,7 @@ enum CodexDailyTokenUsageReader {
         try cache.readRecentHours(
             from: rolloutPaths,
             now: now,
-            calendar: calendar,
+            calendar: CodexUsageTimeline.calendar(timeZone: calendar.timeZone),
             hourCount: recentHourCount,
             usesChatGPTCredits: usesChatGPTCredits,
             priorityRolloutPaths: priorityRolloutPaths
@@ -68,7 +68,7 @@ enum CodexDailyTokenUsageReader {
     ) throws -> [String] {
         try cache.discoverLocalUsageRollouts(
             now: now,
-            calendar: calendar
+            calendar: CodexUsageTimeline.calendar(timeZone: calendar.timeZone)
         )
     }
 
@@ -127,6 +127,7 @@ private struct DailyTokenFileEntry: Equatable {
     var trailingLineStartOffset: UInt64?
     var countingStart: Date
     var isExcluded: Bool
+    var isWaitingForSessionMeta: Bool
     var isWaitingForActivityBoundary: Bool
     var activityBoundaryKind: ActivityBoundaryKind?
     var activityBoundarySearchOffset: UInt64?
@@ -162,9 +163,7 @@ private struct DailyTokenCalendarSignature: Equatable {
 
 private final class DailyTokenUsageCache: @unchecked Sendable {
     private static let chunkSize = 64 * 1024
-    private static let boundarySearchChunkSize = 1024 * 1024
     private static let maximumRelevantLineSize = 64 * 1024
-    private static let maximumSessionMetaSize = 512 * 1024
     private static let tokenCountMarker = Data("token_count".utf8)
     private static let threadSettingsMarker = Data("thread_settings_applied".utf8)
     private static let turnContextMarker = Data("turn_context".utf8)
@@ -745,6 +744,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if var cached = entries[url.path],
            cached.fileIdentity == fileIdentity,
            fileSize > cached.fileSize,
+           !cached.isWaitingForSessionMeta,
            cached.isWaitingForActivityBoundary,
            let boundaryKind = cached.activityBoundaryKind {
             let search = try Self.firstActivityBoundary(
@@ -787,7 +787,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 fileSize: fileSize,
                 dayStart: resumedCountingStart,
                 baselineSearchUpperBound: search.activityStartOffset
-            ) { record in
+            ) { record, offset in
                 Self.consume(
                     record,
                     previousTotal: &cached.previousTotal,
@@ -799,6 +799,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     dailyTotals: &cached.dailyTotals,
                     chartCreditTotals: &cached.chartCreditTotals,
                     countingStart: resumedCountingStart,
+                    isAfterActivityBoundary: search.activityStartOffset.map { offset >= $0 } ?? true,
                     dayStart: dayStart,
                     nextDayStart: nextDayStart,
                     hourlyRangeStart: hourlyRangeStart,
@@ -813,6 +814,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         if var cached = entries[url.path],
            cached.fileIdentity == fileIdentity,
            fileSize > cached.fileSize,
+           !cached.isWaitingForSessionMeta,
            !cached.isWaitingForActivityBoundary {
             let originalSize = cached.fileSize
             let scanStart = min(
@@ -834,7 +836,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     url: url,
                     from: scanStart,
                     to: fileSize
-                ) { record in
+                ) { record, _ in
                     Self.consume(
                         record,
                         previousTotal: &previousTotal,
@@ -870,6 +872,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             return cached
         }
 
+        // A newly-created rollout may have been observed before its header was
+        // complete. Reclassify it after an append before using any reducer state.
         let session = try Self.localUsageSession(url: url, fileSize: fileSize)
         let countingStart = max(
             dailyRangeStart,
@@ -913,7 +917,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 fileSize: fileSize
             ),
             countingStart: countingStart,
-            isExcluded: !session.isIncluded || session.isWaitingForActivityBoundary,
+            isExcluded: !session.isIncluded || session.isWaitingForSessionMeta
+                || session.isWaitingForActivityBoundary,
+            isWaitingForSessionMeta: session.isWaitingForSessionMeta,
             isWaitingForActivityBoundary: session.isWaitingForActivityBoundary,
             activityBoundaryKind: session.activityBoundaryKind,
             activityBoundarySearchOffset: session.activityBoundarySearchOffset
@@ -927,7 +933,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             dayStart: countingStart,
             knownLowerBound: knownBaselineLowerBound,
             baselineSearchUpperBound: baselineSearchUpperBound
-        ) { record in
+        ) { record, offset in
             Self.consume(
                 record,
                 previousTotal: &entry.previousTotal,
@@ -939,6 +945,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 dailyTotals: &entry.dailyTotals,
                 chartCreditTotals: &entry.chartCreditTotals,
                 countingStart: countingStart,
+                isAfterActivityBoundary: session.activityBoundaryOffset.map { offset >= $0 } ?? true,
                 dayStart: dayStart,
                 nextDayStart: nextDayStart,
                 hourlyRangeStart: hourlyRangeStart,
@@ -961,6 +968,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         dailyTotals: inout [Date: Int64],
         chartCreditTotals: inout [Date: CodexChartCreditTotal],
         countingStart: Date,
+        isAfterActivityBoundary: Bool = true,
         dayStart: Date,
         nextDayStart: Date,
         hourlyRangeStart: Date,
@@ -1003,7 +1011,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             rawDelta = max(0, event.lastTokens ?? event.totalTokens)
         }
         previousTotal = event.totalTokens
-        guard event.timestamp >= countingStart else { return }
+        // Replayed parent records can share the child's first-turn timestamp.
+        // They restore cumulative counters and settings but never add usage.
+        guard isAfterActivityBoundary, event.timestamp >= countingStart else { return }
         let credits: Double?
         if usesChatGPTCredits,
            normalizedModelProvider(modelProvider) == "openai",
@@ -1011,7 +1021,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
            let input = event.inputTokens,
            let cachedInput = event.cachedInputTokens,
            let output = event.outputTokens,
-           Double(input) + Double(output) == Double(rawDelta) {
+           input >= 0, output >= 0, input <= rawDelta,
+           rawDelta - input == output {
             credits = CodexCreditRateCard.credits(
                 model: model, serviceTier: serviceTier,
                 inputTokens: input, cachedInputTokens: cachedInput, outputTokens: output
@@ -1116,7 +1127,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         dayStart: Date,
         knownLowerBound: UInt64? = nil,
         baselineSearchUpperBound: UInt64? = nil,
-        consumeRecord: (DailyUsageRecord) -> Void
+        consumeRecord: (DailyUsageRecord, UInt64) -> Void
     ) throws {
         let lowerBound: UInt64
         if let knownLowerBound {
@@ -1195,9 +1206,26 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         let endsWithNewline = try handle.read(upToCount: 1)?.first == 0x0A
         var position = fileSize
         var suffix = Data()
+        var lineEndOffset = fileSize
         // JSONL records are committed by their trailing newline. Ignore an
         // otherwise-valid final JSON object until that delimiter is appended.
-        var skippingOversizedLine = !endsWithNewline
+        var skippingUnterminatedLine = !endsWithNewline
+        var skippingOversizedLine = false
+
+        func visitCompleteLine(_ prefix: Data, at lineStart: UInt64) throws -> Bool {
+            defer { lineEndOffset = lineStart > 0 ? lineStart - 1 : 0 }
+            guard !skippingUnterminatedLine else { return true }
+            if skippingOversizedLine || prefix.count + suffix.count > maximumRelevantLineSize {
+                guard let line = try readOversizedUsageLine(
+                    url: url, from: lineStart, to: lineEndOffset
+                ) else { return true }
+                return consumeLine(line, lineStart)
+            }
+            var line = Data(capacity: prefix.count + suffix.count)
+            line.append(prefix)
+            line.append(suffix)
+            return line.isEmpty || consumeLine(line, lineStart)
+        }
 
         while position > 0 {
             let readResult = try autoreleasepool { () throws -> Int in
@@ -1212,7 +1240,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     omittingEmptySubsequences: false
                 )
                 guard parts.count > 1 else {
-                    if !skippingOversizedLine {
+                    if !skippingOversizedLine && !skippingUnterminatedLine {
                         if chunk.count + suffix.count <= maximumRelevantLineSize {
                             var combined = Data(
                                 capacity: chunk.count + suffix.count
@@ -1228,19 +1256,15 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                     return 1
                 }
 
-                if skippingOversizedLine {
-                    skippingOversizedLine = false
-                } else if let last = parts.last,
-                          last.count + suffix.count <= maximumRelevantLineSize {
-                    var line = Data(capacity: last.count + suffix.count)
-                    line.append(contentsOf: last)
-                    line.append(suffix)
+                if let last = parts.last {
                     let lineStart = position + UInt64(last.startIndex)
-                    if !line.isEmpty, !consumeLine(line, lineStart) {
+                    if try !visitCompleteLine(Data(last), at: lineStart) {
                         return -1
                     }
                 }
                 suffix.removeAll(keepingCapacity: true)
+                skippingOversizedLine = false
+                skippingUnterminatedLine = false
 
                 if parts.count > 2 {
                     for index in stride(
@@ -1249,12 +1273,8 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                         by: -1
                     ) {
                         let part = parts[index]
-                        guard part.count <= maximumRelevantLineSize else {
-                            continue
-                        }
-                        let line = Data(part)
                         let lineStart = position + UInt64(part.startIndex)
-                        if !line.isEmpty, !consumeLine(line, lineStart) {
+                        if try !visitCompleteLine(Data(part), at: lineStart) {
                             return -1
                         }
                     }
@@ -1272,8 +1292,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             if readResult < 0 { return }
         }
 
-        if !skippingOversizedLine, !suffix.isEmpty {
-            _ = consumeLine(suffix, 0)
+        if skippingOversizedLine || !suffix.isEmpty {
+            // `suffix` already contains the initial fragment at byte zero.
+            _ = try visitCompleteLine(Data(), at: 0)
         }
     }
 
@@ -1281,47 +1302,26 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         url: URL,
         from lowerBound: UInt64,
         to upperBound: UInt64,
-        consumeRecord: (DailyUsageRecord) -> Void
+        consumeRecord: (DailyUsageRecord, UInt64) -> Void
     ) throws {
-        guard upperBound > lowerBound else { return }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: lowerBound)
-
-        var offset = lowerBound
-        var line = Data()
-        var skippingOversizedLine = false
-        while offset < upperBound {
-            let readResult = try autoreleasepool { () throws -> Bool in
-                let readCount = min(chunkSize, Int(upperBound - offset))
-                let chunk = try handle.read(upToCount: readCount) ?? Data()
-                guard !chunk.isEmpty else { return false }
-                offset += UInt64(chunk.count)
-
-                for byte in chunk {
-                    if byte == 0x0A {
-                        if !skippingOversizedLine,
-                           let record = parseUsageRecord(line) {
-                            consumeRecord(record)
-                        }
-                        line.removeAll(keepingCapacity: true)
-                        skippingOversizedLine = false
-                    } else if !skippingOversizedLine {
-                        if line.count < maximumRelevantLineSize {
-                            line.append(byte)
-                        } else {
-                            line.removeAll(keepingCapacity: true)
-                            skippingOversizedLine = true
-                        }
-                    }
-                }
-                return true
+        try CodexRolloutLineReader.scanCommittedLines(
+            url: url, from: lowerBound, to: upperBound,
+            oversizedKinds: [.turnContext, .threadSettings, .tokenCount]
+        ) { line, start, _ in
+            if let line, let record = parseUsageRecord(line) {
+                consumeRecord(record, start)
             }
-            guard readResult else { break }
+            return false
         }
+    }
 
-        // `line` intentionally remains unconsumed without a newline. The
-        // cached trailing offset makes the next poll re-read it from its start.
+    private static func readOversizedUsageLine(
+        url: URL, from start: UInt64, to end: UInt64
+    ) throws -> Data? {
+        try CodexRolloutLineReader.readOversizedLine(
+            url: url, from: start, to: end,
+            kinds: [.turnContext, .threadSettings, .tokenCount]
+        )
     }
 
     private static func parseTokenEvent(_ line: Data) -> DailyTokenEvent? {
@@ -1334,13 +1334,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
               payload.string("type") == "token_count",
               let info = payload.dictionary("info"),
               let totalUsage = info.dictionary("total_token_usage"),
-              let totalTokens = int64(totalUsage["total_tokens"]),
+              let totalTokens = totalUsage.int64("total_tokens"),
               totalTokens >= 0 else {
             return nil
         }
 
         let lastTokens = info.dictionary("last_token_usage")
-            .flatMap { int64($0["total_tokens"]) }
+            .flatMap { $0.int64("total_tokens") }
             .flatMap { $0 >= 0 ? $0 : nil }
         return DailyTokenEvent(
             timestamp: timestamp,
@@ -1373,13 +1373,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             let settings = payload.dictionary("thread_settings")
             model = settings?.string("model")
             modelProvider = settings?.string("model_provider_id")
-            serviceTier = settings?["service_tier"] is NSNull
-                ? "default" : settings?.string("service_tier")
+            serviceTier = settings.flatMap {
+                CodexThreadSettingsReader.recordedServiceTier(in: $0, isSettingsSnapshot: true)
+            }
         } else if object.string("type") == "turn_context" {
             model = payload.string("model")
             modelProvider = nil
-            serviceTier = payload["service_tier"] is NSNull
-                ? "default" : payload.string("service_tier")
+            serviceTier = CodexThreadSettingsReader.recordedServiceTier(in: payload)
         } else {
             model = nil
             modelProvider = nil
@@ -1403,18 +1403,13 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             ?? timestampFormatter.date(from: value)
     }
 
-    private static func int64(_ value: Any?) -> Int64? {
-        if let number = value as? NSNumber { return number.int64Value }
-        if let string = value as? String { return Int64(string) }
-        return nil
-    }
-
     private struct LocalUsageSession {
         var startedAt: Date?
         var activityStartedAt: Date?
         var activityBoundaryOffset: UInt64?
         var modelProvider: String?
         var isIncluded: Bool
+        var isWaitingForSessionMeta: Bool
         var isWaitingForActivityBoundary: Bool
         var activityBoundaryKind: ActivityBoundaryKind?
         var activityBoundarySearchOffset: UInt64?
@@ -1426,17 +1421,11 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         var nextSearchOffset: UInt64
     }
 
-    private enum SubagentBoundaryCandidateLine {
-        case committed(Data)
-        case pending
-        case skip
-    }
-
     private static func localUsageSession(
         url: URL,
         fileSize: UInt64
     ) throws -> LocalUsageSession {
-        let line = try readSessionMetaLine(url: url)
+        let line = try readSessionMetaLine(url: url, fileSize: fileSize)
         guard !line.isEmpty else {
             return LocalUsageSession(
                 startedAt: nil,
@@ -1444,6 +1433,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 activityBoundaryOffset: nil,
                 modelProvider: nil,
                 isIncluded: false,
+                isWaitingForSessionMeta: true,
                 isWaitingForActivityBoundary: false,
                 activityBoundaryKind: nil,
                 activityBoundarySearchOffset: nil
@@ -1451,12 +1441,15 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         }
         guard let object = sessionMetaObject(line),
               let payload = object.dictionary("payload") else {
+            // Do not infer source or provider from an incomplete or malformed
+            // header. Re-read it after an append, regardless of its size.
             return LocalUsageSession(
                 startedAt: nil,
                 activityStartedAt: nil,
                 activityBoundaryOffset: nil,
                 modelProvider: nil,
-                isIncluded: containsLocalUsageSourceMarker(line),
+                isIncluded: false,
+                isWaitingForSessionMeta: true,
                 isWaitingForActivityBoundary: false,
                 activityBoundaryKind: nil,
                 activityBoundarySearchOffset: nil
@@ -1490,6 +1483,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
                 : boundarySearch?.activityStartOffset,
             modelProvider: payload.string("model_provider"),
             isIncluded: isLocalUsageSession(payload),
+            isWaitingForSessionMeta: false,
             isWaitingForActivityBoundary: boundaryKind != nil
                 && activityStartedAt == nil,
             activityBoundaryKind: boundaryKind,
@@ -1503,26 +1497,22 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         let line = try readSessionMetaLine(url: url)
         guard let object = sessionMetaObject(line),
               let payload = object.dictionary("payload") else {
-            return containsLocalUsageSourceMarker(line)
+            return false
         }
         return isLocalUsageSession(payload)
     }
 
-    private static func readSessionMetaLine(url: URL) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        var line = Data()
-        while line.count <= maximumSessionMetaSize {
-            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
-            guard !chunk.isEmpty else { break }
-            if let newline = chunk.firstIndex(of: 0x0A) {
-                line.append(chunk[..<newline])
-                break
-            }
-            line.append(chunk)
+    private static func readSessionMetaLine(
+        url: URL, fileSize: UInt64 = .max
+    ) throws -> Data {
+        var header = Data()
+        try CodexRolloutLineReader.scanCommittedLines(
+            url: url, to: fileSize, oversizedKinds: [.sessionMeta]
+        ) { line, _, _ in
+            header = line ?? Data()
+            return true
         }
-        return line
+        return header
     }
 
     private static func sessionMetaObject(_ line: Data) -> JSONObject? {
@@ -1544,13 +1534,6 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private static func isSubagentUsageSession(_ payload: JSONObject) -> Bool {
         payload.string("thread_source")?.lowercased() == "subagent"
             || payload.dictionary("source")?.dictionary("subagent") != nil
-    }
-
-    private static func containsLocalUsageSourceMarker(_ line: Data) -> Bool {
-        line.range(of: Data("\"source\":\"cli\"".utf8)) != nil
-            || line.range(of: Data("\"source\":\"vscode\"".utf8)) != nil
-            || line.range(of: Data("\"thread_source\":\"subagent\"".utf8)) != nil
-            || line.range(of: Data("\"source\":{\"subagent\"".utf8)) != nil
     }
 
     /// A spawned subagent rollout begins with a timestamp-rewritten replay of
@@ -1585,90 +1568,23 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         fileSize: UInt64,
         startingAt requestedStart: UInt64
     ) throws -> ActivityBoundarySearchResult {
-        guard fileSize > 0 else {
-            return ActivityBoundarySearchResult(
-                activityStartedAt: nil,
-                activityStartOffset: nil,
-                nextSearchOffset: 0
+        var boundary: ActivityBoundarySearchResult?
+        let resumeOffset = try CodexRolloutLineReader.scanCommittedLines(
+            url: url, from: min(requestedStart, fileSize), to: fileSize,
+            oversizedKinds: [.interAgentCommunication]
+        ) { line, _, nextOffset in
+            guard let line, let timestamp = parseSubagentActivityBoundary(line) else { return false }
+            boundary = ActivityBoundarySearchResult(
+                activityStartedAt: timestamp,
+                activityStartOffset: nextOffset,
+                nextSearchOffset: nextOffset
             )
+            return true
         }
-
-        let overlapCount = max(0, subagentBoundaryMarker.count - 1)
-        let startingAt = min(requestedStart, fileSize)
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: startingAt)
-
-        var readOffset = startingAt
-        var carry = Data()
-        var candidateFloor = startingAt
-        while readOffset < fileSize {
-            let readCount = min(
-                boundarySearchChunkSize,
-                Int(fileSize - readOffset)
-            )
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-
-            var haystack = Data(capacity: carry.count + chunk.count)
-            haystack.append(carry)
-            haystack.append(chunk)
-            let haystackOffset = readOffset - UInt64(carry.count)
-            var searchStart = haystack.startIndex
-
-            while searchStart < haystack.endIndex,
-                  let range = haystack.range(
-                    of: subagentBoundaryMarker,
-                    options: [],
-                    in: searchStart..<haystack.endIndex
-                  ) {
-                let markerOffset = haystackOffset + UInt64(range.lowerBound)
-                if markerOffset >= candidateFloor {
-                    switch try subagentBoundaryCandidateLine(
-                        url: url,
-                        fileSize: fileSize,
-                        markerOffset: markerOffset
-                    ) {
-                    case .committed(let line):
-                        if let boundary = parseSubagentActivityBoundary(line) {
-                            return ActivityBoundarySearchResult(
-                                activityStartedAt: boundary,
-                                activityStartOffset: markerOffset,
-                                nextSearchOffset: markerOffset
-                            )
-                        }
-                    case .pending:
-                        return ActivityBoundarySearchResult(
-                            activityStartedAt: nil,
-                            activityStartOffset: nil,
-                            nextSearchOffset: markerOffset
-                        )
-                    case .skip:
-                        break
-                    }
-                    candidateFloor = markerOffset + 1
-                }
-                searchStart = range.upperBound
-            }
-
-            readOffset += UInt64(chunk.count)
-            carry = Data(haystack.suffix(overlapCount))
-            candidateFloor = max(
-                candidateFloor,
-                readOffset > UInt64(overlapCount)
-                    ? readOffset - UInt64(overlapCount)
-                    : startingAt
-            )
-        }
-
-        let overlap = UInt64(overlapCount)
-        return ActivityBoundarySearchResult(
+        return boundary ?? ActivityBoundarySearchResult(
             activityStartedAt: nil,
             activityStartOffset: nil,
-            nextSearchOffset: max(
-                startingAt,
-                fileSize > overlap ? fileSize - overlap : 0
-            )
+            nextSearchOffset: resumeOffset
         )
     }
 
@@ -1681,118 +1597,40 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         fileSize: UInt64,
         sessionID: String
     ) throws -> ActivityBoundarySearchResult {
-        guard fileSize > 0 else {
-            return ActivityBoundarySearchResult(
-                activityStartedAt: nil,
-                activityStartOffset: nil,
-                nextSearchOffset: 0
-            )
-        }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        var offset: UInt64 = 0
-        var line = Data()
-        var skippingOversizedLine = false
         var hasSeenInitialSessionMeta = false
-        while offset < fileSize {
-            let readCount = min(chunkSize, Int(fileSize - offset))
-            let chunk = try handle.read(upToCount: readCount) ?? Data()
-            guard !chunk.isEmpty else { break }
-            offset += UInt64(chunk.count)
-
-            let chunkStart = offset - UInt64(chunk.count)
-            for (index, byte) in chunk.enumerated() {
-                if byte == 0x0A {
-                    if !skippingOversizedLine,
-                       let object = sessionMetaObject(line),
-                       let payload = object.dictionary("payload"),
-                       (payload.string("id")
-                            ?? payload.string("session_id")) == sessionID {
-                        if hasSeenInitialSessionMeta,
-                           let timestamp = object.string("timestamp")
-                            .flatMap(parseTimestamp) {
-                            return ActivityBoundarySearchResult(
-                                activityStartedAt: timestamp,
-                                activityStartOffset: chunkStart
-                                    + UInt64(index)
-                                    + 1,
-                                nextSearchOffset: offset
-                            )
-                        }
-                        hasSeenInitialSessionMeta = true
-                    }
-                    line.removeAll(keepingCapacity: true)
-                    skippingOversizedLine = false
-                } else if !skippingOversizedLine {
-                    if line.count < maximumSessionMetaSize {
-                        line.append(byte)
-                    } else {
-                        line.removeAll(keepingCapacity: true)
-                        skippingOversizedLine = true
-                    }
-                }
+        var boundary: ActivityBoundarySearchResult?
+        try CodexRolloutLineReader.scanCommittedLines(
+            url: url, to: fileSize, oversizedKinds: [.sessionMeta]
+        ) { line, _, nextOffset in
+            guard let line, let object = sessionMetaObject(line),
+                  let payload = object.dictionary("payload"),
+                  (payload.string("id") ?? payload.string("session_id")) == sessionID else { return false }
+            if hasSeenInitialSessionMeta,
+               let timestamp = object.string("timestamp").flatMap(parseTimestamp) {
+                boundary = ActivityBoundarySearchResult(
+                    activityStartedAt: timestamp,
+                    activityStartOffset: nextOffset,
+                    nextSearchOffset: nextOffset
+                )
+                return true
             }
+            hasSeenInitialSessionMeta = true
+            return false
         }
-
-        // Rescan from the beginning after an append so the initial matching
-        // metadata row is still available to distinguish from the boundary.
-        return ActivityBoundarySearchResult(
+        // The initial matching row is needed again to recognize the second one
+        // if its final newline has not been written yet.
+        return boundary ?? ActivityBoundarySearchResult(
             activityStartedAt: nil,
             activityStartOffset: nil,
             nextSearchOffset: 0
         )
     }
 
-    private static func subagentBoundaryCandidateLine(
-        url: URL,
-        fileSize: UInt64,
-        markerOffset: UInt64
-    ) throws -> SubagentBoundaryCandidateLine {
-        let maximumLineSize = UInt64(maximumRelevantLineSize)
-        let windowStart = markerOffset > maximumLineSize
-            ? markerOffset - maximumLineSize
-            : 0
-        let requestedEnd = markerOffset
-            + UInt64(subagentBoundaryMarker.count)
-            + maximumLineSize
-            + 1
-        let windowEnd = min(fileSize, requestedEnd)
-        guard windowEnd > windowStart else { return .skip }
-
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: windowStart)
-        let data = try handle.read(upToCount: Int(windowEnd - windowStart)) ?? Data()
-        let relativeMarkerOffset = Int(markerOffset - windowStart)
-        guard relativeMarkerOffset <= data.count else { return .pending }
-
-        let lineStart: Int
-        if let newline = data[..<relativeMarkerOffset].lastIndex(of: 0x0A) {
-            lineStart = newline + 1
-        } else if windowStart == 0 {
-            lineStart = 0
-        } else {
-            return .skip
-        }
-
-        let suffixStart = min(data.count, relativeMarkerOffset)
-        guard let lineEnd = data[suffixStart...].firstIndex(of: 0x0A) else {
-            return windowStart + UInt64(data.count) >= fileSize
-                ? .pending
-                : .skip
-        }
-        guard lineEnd >= lineStart,
-              lineEnd - lineStart <= maximumRelevantLineSize else {
-            return .skip
-        }
-        return .committed(Data(data[lineStart..<lineEnd]))
-    }
-
     private static func parseSubagentActivityBoundary(_ line: Data) -> Date? {
         guard line.range(of: subagentBoundaryMarker) != nil,
               let object = try? JSONSerialization.jsonObject(with: line) as? JSONObject,
               object.string("type") == "inter_agent_communication_metadata",
+              object.dictionary("payload")?["trigger_turn"] as? Bool == true,
               let timestamp = object.string("timestamp") else {
             return nil
         }
