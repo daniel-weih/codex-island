@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Optional UI assets must never use SwiftPM's trapping Bundle.module accessor.
+/// App resources must never use SwiftPM's trapping Bundle.module accessor.
 /// Resolve only relative to the running app/executable, never a build-machine path.
 struct AppResources {
     static let bundleName = "CodexIsland_CodexIsland.bundle"
@@ -29,6 +29,15 @@ struct AppResources {
             guard let url = bundle.url(forResource: name, withExtension: "png"),
                   let image = NSImage(contentsOf: url), image.isValid else { continue }
             return image
+        }
+        return nil
+    }
+
+    func data(named name: String, withExtension extensionName: String) -> Data? {
+        for bundle in bundles {
+            guard let url = bundle.url(forResource: name, withExtension: extensionName),
+                  let data = try? Data(contentsOf: url) else { continue }
+            return data
         }
         return nil
     }

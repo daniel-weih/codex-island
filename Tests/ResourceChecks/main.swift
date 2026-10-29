@@ -68,6 +68,12 @@ struct ResourceChecks {
             ("executable-sibling", "Contents/MacOS", false)
         ] {
             let resources = try fixture(name, location: location, structuredBundle: structured)
+            let card = CodexCreditConfiguration.load(resources: resources)
+            require(card?.rate(for: "gpt-6.1-terra")?.cachedInput == 1.25,
+                    "\(name): loads the bundled Terra rate without build-machine paths")
+            require(card?.fastPolicy(for: "gpt-6.1-terra")?.includedSubscription == 2.5
+                    && card?.fastPolicy(for: "gpt-6.1-terra")?.purchasedCredits == 2,
+                    "\(name): subscription and purchased-credit multipliers remain separate")
             for theme in IslandColorTheme.allCases {
                 if let asset = theme.watermarkResourceName {
                     require(resources.image(named: asset) != nil, "\(name): decodes \(asset)")
@@ -84,6 +90,72 @@ struct ResourceChecks {
         }
 
         let absent = try fixture("no-bundle", location: nil)
+        require(CodexCreditConfiguration.load(resources: absent) == nil,
+                "missing configuration leaves usage unpriced without trapping")
+        for (name, corrupt, missing) in [
+            ("corrupt-card", ["CodexCreditRates.json"], []),
+            ("missing-card", [], ["CodexCreditRates.json"])
+        ] {
+            let resources = try fixture(name, corrupt: corrupt, missing: missing)
+            require(CodexCreditConfiguration.load(resources: resources) == nil,
+                    "\(name): invalid or missing rate data never invents zero consumption")
+            require(resources.image(named: "AlibabaLogo") != nil,
+                    "\(name): invalid rate data does not prevent UI resources loading")
+        }
+
+        let original = try Data(contentsOf: source.appendingPathComponent("CodexCreditRates.json"))
+        let json = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+        func rejects(_ label: String, _ mutate: (inout [String: Any]) -> Void) throws {
+            var candidate = json
+            mutate(&candidate)
+            let data = try JSONSerialization.data(withJSONObject: candidate)
+            require((try? CodexCreditConfiguration.decode(data)) == nil, label)
+        }
+        try rejects("unsupported schema rejected") { $0["schemaVersion"] = 2 }
+        try rejects("wrong currency or units rejected") { $0["unit"] = "usd_per_million_tokens" }
+        try rejects("missing model prices rejected") { $0.removeValue(forKey: "models") }
+        try rejects("invalid verification date rejected") { $0["revision"] = "2026-02-30" }
+        try rejects("missing sources rejected") { $0["sources"] = [] }
+        try rejects("duplicate model prices rejected") { card in
+            var models = card["models"] as! [[String: Any]]
+            models.append(models[0])
+            card["models"] = models
+        }
+        for invalidRate in [-1.0, 0.0, 999_999.0] {
+            try rejects("invalid cached-input price rejected: \(invalidRate)") { card in
+                var models = card["models"] as! [[String: Any]]
+                var rate = models[0]["rate"] as! [String: Any]
+                rate["cachedInput"] = invalidRate
+                models[0]["rate"] = rate
+                card["models"] = models
+            }
+        }
+        try rejects("invalid speed multiplier rejected") { card in
+            var policies = card["fastPolicies"] as! [[String: Any]]
+            policies[0]["includedSubscription"] = 0
+            card["fastPolicies"] = policies
+        }
+        try rejects("duplicate speed policies rejected") { card in
+            var policies = card["fastPolicies"] as! [[String: Any]]
+            policies.append(policies[0])
+            card["fastPolicies"] = policies
+        }
+        // Prove a newly configured model works without changing a Swift table.
+        var extended = json
+        var models = extended["models"] as! [[String: Any]]
+        models.append(["id": "fixture-model", "verifiedOn": "2026-10-27",
+                       "rate": ["input": 20, "cachedInput": 2, "output": 100]])
+        extended["models"] = models
+        var policies = extended["fastPolicies"] as! [[String: Any]]
+        policies.append(["family": "fixture-model", "verifiedOn": "2026-10-27",
+                         "includedSubscription": 3, "purchasedCredits": 2])
+        extended["fastPolicies"] = policies
+        let extendedCard = try CodexCreditConfiguration.decode(JSONSerialization.data(withJSONObject: extended))
+        require(extendedCard.rate(for: " openai/FIXTURE-MODEL-2026-10-27 ")?.output == 100
+                && extendedCard.fastPolicy(for: "fixture-model")?.includedSubscription == 3,
+                "new models and multipliers are loaded solely from configuration")
+        require(extendedCard.rate(for: "fixture-model-mini") == nil,
+                "undocumented variants do not inherit a family's configured price")
         require(absent.image(named: "AlibabaLogo") == nil, "missing bundle omits the watermark")
         require(TaskSoundPlayer.loadCompletionSound(using: absent) == nil,
                 "missing bundle safely selects the system sound fallback")

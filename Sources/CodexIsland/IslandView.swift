@@ -2982,7 +2982,8 @@ private enum ThreadConfigurationDensity {
 private struct ThreadConfigurationView: View {
     private static let contextWidth: CGFloat = 16
     private static let fastWidth: CGFloat = 16
-    private static let modelWidth: CGFloat = 58
+    // Fits 6.1-Terra at the normal body size while keeping all rows aligned.
+    private static let modelWidth: CGFloat = 70
     private static let spacing: CGFloat = 3
     let thread: ThreadSummary
     let density: ThreadConfigurationDensity
@@ -3031,7 +3032,7 @@ private struct ThreadConfigurationView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: Self.modelWidth, alignment: .leading)
-                .help(displayModelName(model))
+                .help(model)
         } else {
             Color.clear.frame(width: Self.modelWidth, height: 1)
         }

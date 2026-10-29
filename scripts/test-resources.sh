@@ -10,6 +10,7 @@ swiftc \
     -module-cache-path "$ROOT_DIR/.build/test-module-cache" \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/AppResources.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexCreditConfiguration.swift" \
     "$ROOT_DIR/Sources/CodexIsland/TaskSoundPlayer.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandColorTheme.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \

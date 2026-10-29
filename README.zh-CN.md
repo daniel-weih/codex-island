@@ -55,12 +55,12 @@ Codex Island 是一个 macOS 顶部悬浮状态岛。默认保持收起，鼠标
 
 会话悬浮详情以“累计消耗”展示，当前模式的数值在前，另一种用量放在括号中。词元与额度点均跟随所选主题色，额度点余额、图表、图例和模式切换也使用相同配色。详细公式、数据边界与费率来源见[统计与估算说明](docs/token-estimate.md)。
 
-官方来源（核验于 2026-09-30）：
+官方来源（GPT-6 / GPT-6.1 核验于 2026-10-27；旧模型保留历史参考费率）：
 
-- [模型 Credits 费率表](https://learn.chatgpt.com/docs/pricing#token-rates)：按每百万普通输入、缓存输入和输出 Token 分别列出费率。GPT-6.1 Sol 为 **50 / 2.5 / 250 credits**，GPT-6 Sol 为 **50 / 5 / 250**；新模型的缓存输入费率减半。
-- [Fast 模式及额度倍率](https://learn.chatgpt.com/docs/agent-configuration/speed)：应用按订阅内额度估算，GPT-6.1 Sol、GPT-6（Astra、Sol、Luna）、GPT-5.6 和 GPT-5.5 在提供 Fast 时按标准消耗的 **2.5×** 计算。购买的 credits 和 Enterprise 按量付费使用 **2×**；日志无法区分单次调用使用哪种额度，因此应用不单独估算这两类扣费。GPT-5.4 保留历史 **2×** 参考倍率；API Key 计费另有规则。
+- [模型 Credits 费率表](https://learn.chatgpt.com/docs/pricing#token-rates)：按每百万普通输入、缓存输入和输出 Token 分别列出费率。GPT-6.1 Terra 为 **25 / 1.25 / 125 credits**，三项均为 GPT-6.1 Sol（**50 / 2.5 / 250**）的一半；GPT-6 Sol 为 **50 / 5 / 250**。
+- [Fast 模式及额度倍率](https://learn.chatgpt.com/docs/agent-configuration/speed)：应用按订阅内额度估算，GPT-6.1 Sol / Terra、GPT-6（Astra、Sol、Luna）、GPT-5.6 和 GPT-5.5 在提供 Fast 时按标准消耗的 **2.5×** 计算。购买的 credits 和 Enterprise 按量付费使用 **2×**；日志无法区分单次调用使用哪种额度，因此应用不单独估算这两类扣费。GPT-5.4 保留历史 **2×** 参考倍率；API Key 计费另有规则。
 
-同一会话切换模型或 Fast 模式时，按每次调用记录的设置分别计算后求和，不会用会话最后的模型重算全部历史。计算公式为 `额度点 = Σ[(普通输入 × 输入费率 + 缓存输入 × 缓存费率 + 输出 × 输出费率) / 1,000,000 × 当次倍率]`。费率采用应用内维护的参考表；官网更新不会自动改写本地费率。
+同一会话切换模型或 Fast 模式时，按每次调用记录的设置分别计算后求和，不会用会话最后的模型重算全部历史。计算公式为 `额度点 = Σ[(普通输入 × 输入费率 + 缓存输入 × 缓存费率 + 输出 × 输出费率) / 1,000,000 × 当次倍率]`。费率与 Fast 倍率集中维护在随应用打包的 [`CodexCreditRates.json`](Sources/CodexIsland/Resources/CodexCreditRates.json)；更新价格只需修改配置并重新构建、重启应用，计算规则保留在 Swift 中。配置缺失或无效时额度点显示无法估算。官网更新不会自动改写本地费率。
 
 ## 安装与运行
 

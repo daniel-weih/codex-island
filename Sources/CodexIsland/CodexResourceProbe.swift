@@ -6,6 +6,9 @@ enum CodexResourceProbe {
     static func run() -> Int32 {
         var missing: [String] = []
         let resources = AppResources.shared
+        if CodexCreditConfiguration.load(resources: resources) == nil {
+            missing.append("CodexCreditRates.json")
+        }
         for theme in IslandColorTheme.allCases {
             if let name = theme.watermarkResourceName, resources.image(named: name) == nil {
                 missing.append("\(name).png")

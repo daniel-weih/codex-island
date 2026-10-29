@@ -15,13 +15,19 @@ MODULE_CACHE="$ROOT_DIR/.build/test-module-cache"
 "$ROOT_DIR/scripts/test-installer.sh"
 
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/CodexIsland_CodexIsland.bundle"
+cp "$ROOT_DIR/Sources/CodexIsland/Resources/CodexCreditRates.json" "$OUTPUT_DIR/CodexIsland_CodexIsland.bundle/"
 mkdir -p "$SCREENSHOT_OUTPUT_DIR"
 mkdir -p "$RESET_OUTPUT_DIR"
+mkdir -p "$RESET_OUTPUT_DIR/CodexIsland_CodexIsland.bundle"
+cp "$ROOT_DIR/Sources/CodexIsland/Resources/CodexCreditRates.json" "$RESET_OUTPUT_DIR/CodexIsland_CodexIsland.bundle/"
 swiftc \
     -module-cache-path "$MODULE_CACHE" \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexCreditRateCard.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/AppResources.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexCreditConfiguration.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandPopoverContent.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandDisplaySelection.swift" \
@@ -55,6 +61,8 @@ swiftc \
     -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexModels.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexCreditRateCard.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/AppResources.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexCreditConfiguration.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexUsageTimeline.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexExecutableLocator.swift" \

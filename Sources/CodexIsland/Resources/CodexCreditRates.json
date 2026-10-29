@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "revision": "2026-10-27",
+  "unit": "credits_per_million_tokens",
+  "sources": [
+    "https://learn.chatgpt.com/docs/pricing#token-rates",
+    "https://learn.chatgpt.com/docs/agent-configuration/speed",
+    "https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing"
+  ],
+  "models": [
+    {
+      "id": "gpt-6-astra",
+      "verifiedOn": "2026-10-27",
+      "rate": {
+        "input": 250.0,
+        "cachedInput": 25.0,
+        "output": 1250.0
+      }
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "verifiedOn": "2026-10-27",
+      "rate": {
+        "input": 50.0,
+        "cachedInput": 2.5,
+        "output": 250.0
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "verifiedOn": "2026-10-27",
+      "rate": {
+        "input": 25.0,
+        "cachedInput": 1.25,
+        "output": 125.0
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "verifiedOn": "2026-10-27",
+      "rate": {
+        "input": 50.0,
+        "cachedInput": 5.0,
+        "output": 250.0
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "verifiedOn": "2026-10-27",
+      "rate": {
+        "input": 2.5,
+        "cachedInput": 0.25,
+        "output": 12.5
+      }
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 100.0,
+        "cachedInput": 10.0,
+        "output": 500.0
+      }
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 50.0,
+        "cachedInput": 5.0,
+        "output": 300.0
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 5.0,
+        "cachedInput": 0.5,
+        "output": 30.0
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 125.0,
+        "cachedInput": 12.5,
+        "output": 750.0
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 62.5,
+        "cachedInput": 6.25,
+        "output": 375.0
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 18.75,
+        "cachedInput": 1.875,
+        "output": 113.0
+      }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 43.75,
+        "cachedInput": 4.375,
+        "output": 350.0
+      }
+    },
+    {
+      "id": "gpt-5.2",
+      "verifiedOn": "2026-09-07",
+      "rate": {
+        "input": 43.75,
+        "cachedInput": 4.375,
+        "output": 350.0
+      }
+    }
+  ],
+  "fastPolicies": [
+    {
+      "family": "gpt-6-astra",
+      "verifiedOn": "2026-10-27",
+      "includedSubscription": 2.5,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-6.1-sol",
+      "verifiedOn": "2026-10-27",
+      "includedSubscription": 2.5,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-6.1-terra",
+      "verifiedOn": "2026-10-27",
+      "includedSubscription": 2.5,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-6-sol",
+      "verifiedOn": "2026-10-27",
+      "includedSubscription": 2.5,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-6-luna",
+      "verifiedOn": "2026-10-27",
+      "includedSubscription": 2.5,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-5.6",
+      "verifiedOn": "2026-09-30",
+      "includedSubscription": 2.5
+    },
+    {
+      "family": "gpt-5.5",
+      "verifiedOn": "2026-09-30",
+      "includedSubscription": 2.5
+    },
+    {
+      "family": "gpt-5.4",
+      "verifiedOn": "2026-09-30",
+      "includedSubscription": 2.0
+    }
+  ]
+}

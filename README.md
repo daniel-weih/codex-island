@@ -55,12 +55,12 @@ The Tokens / Credits switch controls the remaining-usage display, the 30-day / 4
 
 Session hover cards show “TOTAL USAGE,” with the selected measure first and the other measure in parentheses. Tokens and credits both follow the selected theme, including credit balances, charts, legends, and the mode switch. See [calculation details and sources](docs/token-estimate.md).
 
-Official sources (verified September 30, 2026):
+Official sources (GPT-6 / GPT-6.1 verified October 27, 2026; older models retain historical rates):
 
-- [Model credit rates](https://learn.chatgpt.com/docs/pricing#token-rates): separate rates per million uncached input, cached input, and output tokens. GPT-6.1 Sol uses **50 / 2.5 / 250 credits**, compared with GPT-6 Sol's **50 / 5 / 250**; its cached-input rate is half as much.
-- [Fast mode and allowance multipliers](https://learn.chatgpt.com/docs/agent-configuration/speed): the app estimates included subscription consumption at **2.5×** Standard for GPT-6.1 Sol, GPT-6 (Astra, Sol, and Luna), GPT-5.6, and GPT-5.5 where Fast is available. Purchased credits and Enterprise pay-as-you-go use **2×** for Fast; logs do not identify which allowance funded a call, so the app does not estimate those charges separately. The historical GPT-5.4 **2×** reference is retained. API-key billing follows separate rules.
+- [Model credit rates](https://learn.chatgpt.com/docs/pricing#token-rates): separate rates per million uncached input, cached input, and output tokens. GPT-6.1 Terra uses **25 / 1.25 / 125 credits**, half of GPT-6.1 Sol's **50 / 2.5 / 250** for each token category. GPT-6 Sol uses **50 / 5 / 250**.
+- [Fast mode and allowance multipliers](https://learn.chatgpt.com/docs/agent-configuration/speed): the app estimates included subscription consumption at **2.5×** Standard for GPT-6.1 Sol and Terra, GPT-6 (Astra, Sol, and Luna), GPT-5.6, and GPT-5.5 where Fast is available. Purchased credits and Enterprise pay-as-you-go use **2×** for Fast; logs do not identify which allowance funded a call, so the app does not estimate those charges separately. The historical GPT-5.4 **2×** reference is retained. API-key billing follows separate rules.
 
-When a session switches models or Fast mode, the app prices each call using its recorded settings and sums the results; the final model does not reprice the entire session. The formula is `credits = Σ[(uncached input × input rate + cached input × cache rate + output × output rate) / 1,000,000 × call multiplier]`. Rates come from the app’s maintained reference table; changes to the official website do not automatically update local rates.
+When a session switches models or Fast mode, the app prices each call using its recorded settings and sums the results; the final model does not reprice the entire session. The formula is `credits = Σ[(uncached input × input rate + cached input × cache rate + output × output rate) / 1,000,000 × call multiplier]`. Rates and Fast multipliers are maintained in [`CodexCreditRates.json`](Sources/CodexIsland/Resources/CodexCreditRates.json), bundled with the app. Pricing updates require editing this configuration and rebuilding/restarting the app; calculation logic remains in Swift. Invalid or missing configuration leaves credits unavailable. Website changes do not automatically update local rates.
 
 ## Install and Run
 

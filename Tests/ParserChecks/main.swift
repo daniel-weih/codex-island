@@ -1683,6 +1683,7 @@ struct ParserChecks {
                "undocumented variants stay unpriced")
         for (model, rate) in [
             ("gpt-6.1-sol", CodexCreditRateCard.Rate(input: 50, cachedInput: 2.5, output: 250)),
+            ("gpt-6.1-terra", CodexCreditRateCard.Rate(input: 25, cachedInput: 1.25, output: 125)),
             ("gpt-6-sol", CodexCreditRateCard.Rate(input: 50, cachedInput: 5, output: 250)),
             ("gpt-6-luna", CodexCreditRateCard.Rate(input: 2.5, cachedInput: 0.25, output: 12.5))
         ] {
@@ -1695,14 +1696,24 @@ struct ParserChecks {
         }
         for tier in ["default", "standard", "fast", "priority"] {
             expect(CodexCreditRateCard.credits(
+                model: "gpt-6.1-terra", serviceTier: tier,
+                inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
+            ).map { abs($0 - (tier == "fast" || tier == "priority" ? 3.0625 : 1.225)) < 0.000001 } == true,
+                   "GPT-6.1 Terra charges half the Sol rate and applies the subscription Fast multiplier for \(tier)")
+            expect(CodexCreditRateCard.credits(
                 model: "gpt-6.1-sol", serviceTier: tier,
                 inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
             ).map { abs($0 - (tier == "fast" || tier == "priority" ? 6.125 : 2.45)) < 0.000001 } == true,
                    "GPT-6.1 Sol prices cached input separately and applies the subscription Fast multiplier for \(tier)")
         }
         expect(CodexCreditRateCard.rate(for: "gpt-6.1") == nil
-               && CodexCreditRateCard.rate(for: "gpt-6.1-sol-mini") == nil,
-               "GPT-6.1 Sol support does not guess prices for other GPT-6.1 models")
+               && CodexCreditRateCard.rate(for: "gpt-6.1-sol-mini") == nil
+               && CodexCreditRateCard.rate(for: "gpt-6.1-terra-mini") == nil,
+               "GPT-6.1 support does not guess prices for undocumented models")
+        expect(CodexCreditRateCard.credits(
+            model: "gpt-6.1-terra", serviceTier: "ultrafast",
+            inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
+        ) == nil, "Terra does not support Ultrafast pricing")
         expect(CodexCreditRateCard.credits(
             model: "gpt-6.1-sol", serviceTier: "ultrafast",
             inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
@@ -1844,7 +1855,8 @@ struct ParserChecks {
             let calls = [
                 ("gpt-6-sol", "default"), ("gpt-6-sol", "priority"),
                 ("openai/gpt-6-luna-2026-09-23", "fast"), ("gpt-6-luna", "standard"),
-                ("gpt-6.1-sol", "default"), ("openai/gpt-6.1-sol-2026-09-30", "fast")
+                ("gpt-6.1-sol", "default"), ("openai/gpt-6.1-sol-2026-09-30", "fast"),
+                ("gpt-6.1-terra", "standard"), ("openai/gpt-6.1-terra-2026-10-27", "priority")
             ]
             for (index, call) in calls.enumerated() {
                 let date = start.addingTimeInterval(Double(index * 60))
@@ -1859,16 +1871,17 @@ struct ParserChecks {
             // Each call has 100K uncached input, 800K cache, and 100K output:
             // Sol costs 34 / 85 credits; Luna costs 1.7 / 4.25 (Standard / Fast).
             // GPT-6.1 Sol costs 32 / 80 because cached input is half the Sol rate.
-            expect(abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 236.95) < 0.000001
-                   && abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits } - 135.4) < 0.000001,
-                   "Sol, Luna, and GPT-6.1 Sol chart credits price each call using its own model and Fast setting")
-            expect(abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.wastedCredits } - 101.55) < 0.000001,
-                   "mixed model chart overhead includes the GPT-6.1 Sol Fast surcharge")
+            // GPT-6.1 Terra costs 16 / 40, half the GPT-6.1 Sol rates.
+            expect(abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.credits } - 292.95) < 0.000001
+                   && abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits } - 167.4) < 0.000001,
+                   "Sol, Luna, and GPT-6.1 Sol/Terra chart credits price each call using its own model and Fast setting")
+            expect(abs(gpt6Usage.chartCreditTotals.values.reduce(0) { $0 + $1.wastedCredits } - 125.55) < 0.000001,
+                   "mixed model chart overhead includes the GPT-6.1 Sol/Terra Fast surcharge")
             expect(gpt6Usage.chartCreditTotals.values.allSatisfy { $0.unpricedCalls == 0 },
-                   "Sol, Luna, and GPT-6.1 Sol calls leave no gaps in chart credit coverage")
-            expect(gpt6Usage.hourlyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 6_000_000
-                   && gpt6Usage.dailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 6_000_000,
-                   "Fast usage leaves actual hourly and daily tokens unchanged across the Sol generations")
+                   "Sol, Luna, and GPT-6.1 Sol/Terra calls leave no gaps in chart credit coverage")
+            expect(gpt6Usage.hourlyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 8_000_000
+                   && gpt6Usage.dailyBuckets.reduce(Int64(0)) { $0 + $1.tokens } == 8_000_000,
+                   "Fast usage leaves actual hourly and daily tokens unchanged across models")
 
         } catch {
             expect(false, "priced rollout credits: \(error.localizedDescription)")
@@ -2003,7 +2016,7 @@ struct ParserChecks {
             CodexFastModeUsagePolicy.multiplier(for: " openai/GPT-6-ASTRA ") == 2.5,
             "GPT-6 Astra matching handles provider prefixes, whitespace, and case"
         )
-        for model in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
+        for model in ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"] {
             expect(CodexFastModeUsagePolicy.multiplier(for: model) == 2.5,
                    "\(model) Fast usage counts as 2.5x Standard-mode quota")
             expect(CodexFastModeUsagePolicy.multiplier(for: " openai/\(model.uppercased())-2026-09-30 ") == 2.5,
@@ -3075,6 +3088,15 @@ struct ParserChecks {
             let quintupled = count(input: 500_000, cache: 400_000, output: 25_000)
             try append(settings("gpt-6.1-sol", tier: NSNull()) + token(quintupled, last: officialCounts), to: gpt6URL)
             expectCredits(try estimate(gpt6URL), 15.66375, "disabling GPT-6.1 Sol Fast preserves the previous Fast cost and prices the new call at Standard")
+            let sextupled = count(input: 600_000, cache: 480_000, output: 30_000)
+            try append(settings("openai/gpt-6.1-terra-2026-10-27", tier: "priority") + token(sextupled, last: officialCounts), to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 18.72625, "switching to Terra Fast preserves earlier model costs")
+            let septupled = count(input: 700_000, cache: 560_000, output: 35_000)
+            let terraStandard = try settings("gpt-6.1-terra", tier: NSNull()) + token(septupled, last: officialCounts)
+            try append(terraStandard, to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 19.95125, "disabling Terra Fast prices only the new call at Standard")
+            try append(terraStandard, to: gpt6URL)
+            expectCredits(try estimate(gpt6URL), 19.95125, "duplicate Terra usage notifications do not increase credits")
 
             let jumpURL = directory.appendingPathComponent("jump.jsonl")
             try write(settings("gpt-5.5") + token(afterAstra, last: astraCall), to: jumpURL)

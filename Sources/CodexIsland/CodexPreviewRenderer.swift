@@ -1071,6 +1071,37 @@ enum CodexPreviewRenderer {
             }
         }
 
+        // Keep longer model labels visible beside Fast, reasoning, and usage columns.
+        var modelSnapshot = snapshot
+        for (index, model) in ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"].enumerated() {
+            modelSnapshot.recentThreads[index].model = model
+            if let usage = modelSnapshot.recentThreads[index].tokenUsage {
+                let estimate = CodexCreditRateCard.credits(
+                    model: model, serviceTier: modelSnapshot.recentThreads[index].serviceTier,
+                    inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens,
+                    outputTokens: usage.outputTokens
+                ).map { CodexThreadCreditEstimate(credits: $0) }
+                modelSnapshot.recentThreads[index].tokenUsage?.creditEstimate = estimate
+            }
+        }
+        for language in [IslandLanguagePreference.chinese, .english] {
+            for credits in [false, true] {
+                let mode = credits ? "credits" : "tokens"
+                let url = directory.appendingPathComponent("matrix-models-terra-\(language.rawValue)-\(mode)-2x.png")
+                try render(
+                    snapshot: modelSnapshot,
+                    displayGeometry: geometry,
+                    expanded: true,
+                    previewLanguagePreference: language,
+                    previewShowsCredits: credits,
+                    size: expandedSize,
+                    scale: 2,
+                    to: url
+                )
+                outputURLs.append(url)
+            }
+        }
+
         return outputURLs
     }
 

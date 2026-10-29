@@ -3,33 +3,9 @@ import Foundation
 typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
-    // Included-subscription usage multipliers, verified 2026-09-30.
-    // Purchased credits use a separate billing multiplier (2x for Fast).
-    // https://learn.chatgpt.com/docs/agent-configuration/speed
-    private static let modelFamilyMultipliers: [(family: String, multiplier: Double)] = [
-        ("gpt-6-astra", 2.5),
-        ("gpt-6.1-sol", 2.5),
-        ("gpt-6-sol", 2.5),
-        ("gpt-6-luna", 2.5),
-        ("gpt-5.6", 2.5),
-        ("gpt-5.5", 2.5),
-        ("gpt-5.4", 2.0)
-    ]
-
-    /// Returns the official included-subscription Fast-to-Standard multiplier.
-    /// Models outside the documented Fast support list are left unpriced
-    /// instead of guessing a multiplier.
+    /// Included-subscription Fast multiplier from the bundled configuration.
     static func multiplier(for model: String?) -> Double? {
-        guard let model else { return nil }
-        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let slug = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
-        let normalized = slug.lowercased()
-
-        for entry in modelFamilyMultipliers where
-            normalized == entry.family || normalized.hasPrefix("\(entry.family)-") {
-            return entry.multiplier
-        }
-        return nil
+        CodexCreditConfiguration.bundled?.fastPolicy(for: model)?.includedSubscription
     }
 }
 

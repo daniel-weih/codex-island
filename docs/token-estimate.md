@@ -4,17 +4,26 @@
 
 ## 官方费率
 
-GPT-6 / GPT-6.1 费率与 Fast 倍率最近核验于 **2026-09-30**；保留旧模型的历史参考费率：
+GPT-6 / GPT-6.1 费率与 Fast 倍率最近核验于 **2026-10-27**；保留旧模型的历史参考费率：
 
 - [各模型 Token / Credits 费率](https://learn.chatgpt.com/docs/pricing#token-rates)
 - [ChatGPT Work / Codex credit rate card](https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing)
 - [Fast 模式倍率](https://learn.chatgpt.com/docs/agent-configuration/speed)
 
-应用按订阅内额度估算。GPT-6.1 Sol 和 GPT-6 Astra、Sol、Luna 在提供 Fast 时均按标准消耗的 **2.5×** 计算。购买的 credits 和 Enterprise 按量付费采用 **2×** Fast 倍率；本机日志无法区分单次调用使用哪种额度，因此应用不单独估算这两类扣费。API Key 计费另有规则。
+应用按订阅内额度估算。GPT-6.1 Sol / Terra 和 GPT-6 Astra、Sol、Luna 在提供 Fast 时均按标准消耗的 **2.5×** 计算。购买的 credits 和 Enterprise 按量付费采用 **2×** Fast 倍率；本机日志无法区分单次调用使用哪种额度，因此应用不单独估算这两类扣费。API Key 计费另有规则。
 
-每百万普通输入、缓存输入、输出 Token 的标准 credits 分别为：GPT-6.1 Sol `50 / 2.5 / 250`，GPT-6 Astra `250 / 25 / 1,250`，GPT-6 Sol `50 / 5 / 250`，GPT-6 Luna `2.5 / 0.25 / 12.5`。GPT-6.1 Sol 的缓存输入费率是 GPT-6 Sol 的一半，其余两项相同。相同的 Fast 倍率不代表相同的基础费率。
+每百万普通输入、缓存输入、输出 Token 的标准 credits 分别为：GPT-6.1 Terra `25 / 1.25 / 125`，GPT-6.1 Sol `50 / 2.5 / 250`，GPT-6 Astra `250 / 25 / 1,250`，GPT-6 Sol `50 / 5 / 250`，GPT-6 Luna `2.5 / 0.25 / 12.5`。GPT-6.1 Terra 的三项费率均为 GPT-6.1 Sol 的一半。GPT-6.1 Sol 的缓存输入费率是 GPT-6 Sol 的一半，其余两项相同。相同的 Fast 倍率不代表相同的基础费率。
 
-参考费率集中维护在 `CodexCreditRateCard`，未列出的模型、无法确认的模型别名及无明细的历史记录不猜价格。例如 GPT-5.5 的 20,000 普通输入、80,000 缓存输入和 5,000 输出，参考成本为 7.25 credits。
+费率与 Fast 倍率集中维护在 [`Sources/CodexIsland/Resources/CodexCreditRates.json`](../Sources/CodexIsland/Resources/CodexCreditRates.json)，随应用一起打包。新增模型或调整已支持档位的费率，只需修改该 JSON；计算、去重、调用归属和汇总仍由 Swift 代码负责。更新后需要重新构建并重启应用，内存缓存会重新读取历史日志。当前不读取外部覆盖文件，也不自动下载官网价格。未支持的速度档位（包括 Ultrafast）不计价。
+
+配置格式：
+
+- `schemaVersion` 为 `1`，`unit` 固定为 `credits_per_million_tokens`；`revision` 为本次配置修订日期，`sources` 记录核验来源。
+- `models` 按精确模型 ID 列出 `rate.input`、`rate.cachedInput`、`rate.output`，并用每条记录的 `verifiedOn` 区分当前核验与历史费率。日期后缀可匹配基础模型，未知变体不猜价格。
+- `fastPolicies` 按 `family` 维护 `includedSubscription` 和可选的 `purchasedCredits`。家族重叠时优先最具体的条目；应用当前只使用订阅倍率计算，购买 Credits 倍率仅作已核验参考，缺失表示未核验。
+- 加载时检查版本、单位、来源、日期、重复模型、费率及倍率。配置缺失或无效时，额度点显示无法估算，不把未知消耗当作零；Token 统计照常运行。打包资源检查会拒绝缺失或无效的配置。
+
+未列出的模型、无法确认的模型别名及无明细的历史记录不猜价格。例如 GPT-5.5 的 20,000 普通输入、80,000 缓存输入和 5,000 输出，参考成本为 7.25 credits。
 
 ## 会话累计 credits
 
