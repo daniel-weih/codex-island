@@ -30,6 +30,7 @@ struct RuntimeChecks {
             // Local rollout discovery stays inside the disposable fixture too.
             setenv("CODEX_HOME", directory.path, 1)
             defer { try? FileManager.default.removeItem(at: directory) }
+            try await checkServerRequestRejection(directory)
             try await checkOutputEOF(directory)
             try await checkStoppedRefresh(directory)
             try await checkStoppedActivity(directory)
@@ -67,6 +68,20 @@ struct RuntimeChecks {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         expect(condition(), description)
+    }
+
+    private static func checkServerRequestRejection(_ directory: URL) async throws {
+        try configure(directory)
+        let client = CodexAppServerClient()
+        defer { client.stop() }
+        try await client.start()
+        // The fixture sends an approval request with the pending RPC's numeric
+        // ID and a tool request with a string ID before replying to this RPC.
+        let result = try await client.request(method: "fixture/server-requests", timeout: 2)
+        expect(result.bool("rejectedBoth") == true,
+               "server approvals and tool requests must be rejected without consuming the pending RPC")
+        let ping = try await client.request(method: "fixture/ping", timeout: 2)
+        expect(ping.bool("ok") == true, "rejecting server requests must preserve the connection")
     }
 
     private static func checkOutputEOF(_ directory: URL) async throws {

@@ -1,14 +1,14 @@
 import Foundation
 
-/// Estimates included-subscription consumption using the bundled, validated rate card.
+/// Estimates included-subscription consumption using the current, validated rate card.
 /// Purchased-credit multipliers are reference metadata, not inferred from rollout logs.
 enum CodexCreditRateCard {
     typealias Rate = CodexCreditConfiguration.Rate
 
-    static var revision: String? { CodexCreditConfiguration.bundled?.revision }
+    static var revision: String? { CodexCreditConfiguration.current?.revision }
 
     static func rate(for model: String?) -> Rate? {
-        CodexCreditConfiguration.bundled?.rate(for: model)
+        CodexCreditConfiguration.current?.rate(for: model)
     }
 
     static func credits(

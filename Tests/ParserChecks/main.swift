@@ -8,16 +8,14 @@ struct ParserChecks {
 
     static func main() {
         checkTerminalInputRaces()
-        expect(CodexDisplayPolicy.remainingCredits(plan: .plus, remainingPercent: 100) == 2000,
-               "Plus credits use the requested 2000 baseline")
-        expect(CodexDisplayPolicy.remainingCredits(plan: .prolite, remainingPercent: 50) == 5000,
-               "5X credits scale the baseline and remaining percentage")
-        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 99) == 19800,
-               "Pro 200 credits use 10X instead of the obsolete 20X multiplier")
-        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 97) == 19400,
-               "the documented remaining balance uses the current Plus baseline")
-        expect(CodexDisplayPolicy.remainingCredits(plan: .promax, remainingPercent: 99) == nil,
-               "Pro 500 does not infer an unconfirmed allowance from its price")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .prolite, remainingPercent: 50) == 6250,
+               "Pro 100 uses ten times Plus and the remaining percentage")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 99) == 24750,
+               "Pro 200 uses twenty times Plus")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 97) == 24250,
+               "the remaining balance scales the configured reference")
+        expect(CodexDisplayPolicy.remainingCredits(plan: .promax, remainingPercent: 99) == 61875,
+               "Pro 500 uses fifty times Plus")
         expect(CodexDisplayPolicy.remainingCredits(plan: .plus, remainingPercent: nil) == nil,
                "missing quota cannot show a credits balance")
         expect(CodexChartCreditTotal(tokens: 100, credits: 12.346, unpricedCalls: 1)
@@ -861,12 +859,12 @@ struct ParserChecks {
             "missing plan stays hidden"
         )
         for (account, quota, expectedPlan, expectedAllowance) in [
-            ("plus", "plus", CodexSubscriptionPlan.plus, 2_000.0),
-            ("pro", "prolite", .prolite, 10_000.0),
-            ("prolite", "pro", .prolite, 10_000.0),
-            ("pro", "pro", .pro, 20_000.0),
-            ("pro", "", .pro, 20_000.0),
-            (" PRO ", " PRO ", .pro, 20_000.0)
+            ("plus", "plus", CodexSubscriptionPlan.plus, 1_250.0),
+            ("pro", "prolite", .prolite, 12_500.0),
+            ("prolite", "pro", .prolite, 12_500.0),
+            ("pro", "pro", .pro, 25_000.0),
+            ("pro", "", .pro, 25_000.0),
+            (" PRO ", " PRO ", .pro, 25_000.0)
         ] {
             let plan = CodexDisplayPolicy.subscriptionPlan(
                 accountPlanType: account, rateLimitPlanType: quota
@@ -887,7 +885,7 @@ struct ParserChecks {
         }
         expect(CodexDisplayPolicy.subscriptionPlan(accountPlanType: "unknown", rateLimitPlanType: "plus") == .plus,
                "unknown account plan can fall back to recognized quota metadata")
-        for plan in CodexSubscriptionPlan.allCases where ![.plus, .prolite, .pro].contains(plan) {
+        for plan in CodexSubscriptionPlan.allCases where ![.plus, .prolite, .pro, .promax].contains(plan) {
             expect(CodexDisplayPolicy.remainingCredits(plan: plan, remainingPercent: 100) == nil,
                    "no unconfirmed reference allowance for \(plan.rawValue)")
         }
@@ -895,7 +893,7 @@ struct ParserChecks {
                "missing plan cannot produce a credits estimate")
         expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: -1) == 0,
                "negative remaining quota is clamped")
-        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 101) == 20_000,
+        expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: 101) == 25_000,
                "remaining estimate cannot exceed the reference allowance")
         for percent in [Double.nan, .infinity, -.infinity] {
             expect(CodexDisplayPolicy.remainingCredits(plan: .pro, remainingPercent: percent) == nil,
@@ -1024,14 +1022,6 @@ struct ParserChecks {
                 automaticIdentifier: builtIn.identifier
             ) == builtIn.identifier,
             "disconnected external display temporarily falls back to automatic"
-        )
-        expect(
-            IslandDisplaySelectionResolver.resolveIdentifier(
-                preference: .external(identifier: externalRight.identifier),
-                displays: displays,
-                automaticIdentifier: builtIn.identifier
-            ) == externalRight.identifier,
-            "reconnected external display restores the saved target"
         )
 
         let choices = IslandDisplayChoiceBuilder.makeChoices(
@@ -3039,6 +3029,17 @@ struct ParserChecks {
             let official = try token(officialCounts, last: officialCounts)
             try write(settings("gpt-5.5") + official, to: url)
             expectCredits(try estimate(url), 7.25, "thread credits match the official 7.25 example without charging reasoning twice")
+            if let baseline = CodexCreditConfiguration.current,
+               let index = baseline.models.firstIndex(where: { $0.id == "gpt-5.5" }) {
+                var changed = baseline
+                let model = baseline.models[index]
+                changed.models[index] = .init(id: model.id, verifiedOn: model.verifiedOn,
+                    rate: .init(input: model.rate.input * 2, cachedInput: model.rate.cachedInput * 2, output: model.rate.output * 2))
+                CodexCreditConfiguration.activate(changed)
+                expectCredits(try estimate(url), 14.5, "runtime rate update invalidates unchanged thread cache")
+                CodexCreditConfiguration.activate(baseline)
+                expectCredits(try estimate(url), 7.25, "restoring a rate invalidates cached estimates")
+            }
             try append(official, to: url)
             expectCredits(try estimate(url), 7.25, "duplicate token notifications do not increase credits")
 

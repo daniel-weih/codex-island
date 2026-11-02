@@ -17,11 +17,22 @@ def record(value):
 
 record("launch")
 thread_lists = 0
+server_request_check = None
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method", "")
     record(method)
     if "id" not in message:
+        continue
+    if not method:
+        if server_request_check is not None:
+            server_request_check["replies"][message["id"]] = message.get("error", {}).get("code")
+            replies = server_request_check["replies"]
+            request_id = server_request_check["id"]
+            if request_id in replies and "fixture-tool" in replies:
+                rejected = replies[request_id] == replies["fixture-tool"] == -32601
+                print(json.dumps({"id": request_id, "result": {"rejectedBoth": rejected}}), flush=True)
+                server_request_check = None
         continue
     with open(os.path.join(directory, "config.json")) as config_file:
         config = json.load(config_file)
@@ -39,6 +50,14 @@ for line in sys.stdin:
         result = {"data": []}
     elif method == "fixture/ping":
         result = {"ok": True}
+    elif method == "fixture/server-requests":
+        server_request_check = {"id": message["id"], "replies": {}}
+        for request_id, server_method in [
+            (message["id"], "item/commandExecution/requestApproval"),
+            ("fixture-tool", "item/tool/call"),
+        ]:
+            print(json.dumps({"id": request_id, "method": server_method, "params": {}}), flush=True)
+        continue
     elif method == "fixture/pause-for-shutdown":
         if config.get("shutdownFork"):
             # npm/shell launchers can exit before their actual server. The

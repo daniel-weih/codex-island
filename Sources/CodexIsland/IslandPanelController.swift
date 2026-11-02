@@ -6,6 +6,8 @@ import SwiftUI
 final class IslandPanel: NSPanel {
     var allowsKeyboardInput = false
     var onEscape: (() -> Void)?
+    var hasActivePopover = false
+    var onPopoverDismissed: (() -> Void)?
     override var canBecomeKey: Bool { allowsKeyboardInput }
     override var canBecomeMain: Bool { false }
 
@@ -48,7 +50,7 @@ final class IslandPanelController: NSObject {
     private var trackingMenus = Set<ObjectIdentifier>()
     private var displayTransitionGeneration = 0
 
-    init(viewModel: CodexStatusViewModel, subscription: ResetSubscriptionService, navigation: IslandNavigation) {
+    init(viewModel: CodexStatusViewModel, configurationService: CodexConfigurationService, navigation: IslandNavigation) {
         self.viewModel = viewModel
         self.navigation = navigation
         displaySelection = IslandDisplaySelectionModel()
@@ -66,7 +68,7 @@ final class IslandPanelController: NSObject {
                 viewModel: viewModel,
                 displayGeometry: displayGeometry,
                 displaySelection: displaySelection,
-                resetSubscription: subscription,
+                configurationService: configurationService,
                 navigation: navigation,
                 onCopyScreenshot: { [weak self] in
                     guard let contentView = self?.panel.contentView else {
@@ -82,6 +84,9 @@ final class IslandPanelController: NSObject {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView = hostingView
         panel.onEscape = { [weak navigation] in navigation?.back() }
+        panel.onPopoverDismissed = { [weak self] in
+            self?.evaluatePointerPosition(forceHoverUpdate: true)
+        }
         navigation.$page.removeDuplicates().sink { [weak self] _ in
             // Published emits before the new value is installed. Update input
             // handling after SwiftUI finishes the page change.
@@ -270,6 +275,7 @@ final class IslandPanelController: NSObject {
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self, self.trackingMenus.isEmpty,
+                      !self.panel.hasActivePopover,
                       NSEvent.pressedMouseButtons == 0,
                       !self.isPointerInsideInteractionRegion else { return }
                 self.setExpanded(false, animated: true)
@@ -281,7 +287,7 @@ final class IslandPanelController: NSObject {
 
     private func evaluatePointerPosition(forceHoverUpdate: Bool = false) {
         let mouse = NSEvent.mouseLocation
-        if !(viewModel.isExpanded && navigation.page.isSubscriptionPage),
+        if !(viewModel.isExpanded && navigation.page.isConfigurationPage),
            let screen = screen(containing: mouse) {
             let targetChanged = targetScreen !== screen
             targetScreen = screen
@@ -348,7 +354,7 @@ final class IslandPanelController: NSObject {
                 )
                 panel.animator().setFrame(frame, display: true)
             } completionHandler: { [weak self] in
-                // Collapsing a subscription page can move the compact island
+                // Collapsing the configuration page can move the compact island
                 // to another display. A pointer already resting on its new
                 // position must not need another mouse move to reopen it.
                 Task { @MainActor in
@@ -362,7 +368,7 @@ final class IslandPanelController: NSObject {
     }
 
     private func preferredScreen() -> NSScreen? {
-        if viewModel.isExpanded && navigation.page.isSubscriptionPage,
+        if viewModel.isExpanded && navigation.page.isConfigurationPage,
            let current = panel.screen,
            NSScreen.screens.contains(where: { $0 === current }) {
             return current
@@ -444,7 +450,7 @@ final class IslandPanelController: NSObject {
     }
 
     private func updateKeyboardInteraction() {
-        let allowsInput = viewModel.isExpanded && navigation.page.isSubscriptionPage
+        let allowsInput = viewModel.isExpanded && navigation.page.isConfigurationPage
         panel.allowsKeyboardInput = allowsInput
         panel.becomesKeyOnlyIfNeeded = !allowsInput
         if allowsInput {

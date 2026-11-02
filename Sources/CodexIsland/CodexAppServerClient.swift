@@ -33,8 +33,6 @@ enum CodexAppServerError: LocalizedError {
 final class CodexAppServerClient: @unchecked Sendable {
     typealias NotificationHandler = (String, JSONObject) -> Void
     typealias ConnectionHandler = (Bool, String?) -> Void
-    /// Runs on the transport queue. Returning nil rejects an unsupported request.
-    typealias ServerRequestHandler = (String, JSONObject) -> JSONObject?
 
     private final class RequestCancellation: @unchecked Sendable {
         let id = UUID()
@@ -58,7 +56,6 @@ final class CodexAppServerClient: @unchecked Sendable {
 
     var onNotification: NotificationHandler?
     var onConnectionChanged: ConnectionHandler?
-    var onServerRequest: ServerRequestHandler?
 
     private let queue = DispatchQueue(label: "com.codexisland.app.app-server")
     private var process: Process?
@@ -73,8 +70,6 @@ final class CodexAppServerClient: @unchecked Sendable {
     private var ready = false
     private var intentionallyStopping = false
     private let clientName: String
-    private let launchArguments: [String]
-    private let workingDirectory: URL?
 
     /// Called by the application's exit handler, including probe exits. The
     /// normal asynchronous stop path cannot rely on its delayed SIGKILL after
@@ -83,10 +78,8 @@ final class CodexAppServerClient: @unchecked Sendable {
         AppServerProcesses.shared.shutdown()
     }
 
-    init(clientName: String = "codex_island", launchArguments: [String] = [], workingDirectory: URL? = nil) {
+    init(clientName: String = "codex_island") {
         self.clientName = clientName
-        self.launchArguments = launchArguments
-        self.workingDirectory = workingDirectory
     }
 
     func start() async throws {
@@ -212,9 +205,9 @@ final class CodexAppServerClient: @unchecked Sendable {
         }
 
         process.executableURL = launch.executableURL
-        process.arguments = ["app-server"] + launchArguments
+        process.arguments = ["app-server"]
         process.environment = launch.environment
-        process.currentDirectoryURL = workingDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = input
         process.standardOutput = output
         process.standardError = standardError
@@ -394,16 +387,11 @@ final class CodexAppServerClient: @unchecked Sendable {
     private func handleMessageLocked(_ message: JSONObject) {
         // Server request IDs occupy a separate namespace from our pending requests.
         // Handle them first so an approval can never be mistaken for an RPC response.
-        if let method = message.string("method"), let id = message["id"] {
-            let params = message.dictionary("params") ?? [:]
-            if let result = onServerRequest?(method, params) {
-                try? writeLocked(["id": id, "result": result])
-            } else {
-                try? writeLocked(["id": id, "error": [
-                    "code": -32601,
-                    "message": "This client does not allow interactive requests or tool execution."
-                ]])
-            }
+        if message.string("method") != nil, let id = message["id"] {
+            try? writeLocked(["id": id, "error": [
+                "code": -32601,
+                "message": "This client does not allow interactive requests or tool execution."
+            ]])
             return
         }
         if let id = message.int("id"), let request = pending.removeValue(forKey: id) {

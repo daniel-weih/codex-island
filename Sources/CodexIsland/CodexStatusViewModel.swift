@@ -25,12 +25,6 @@ final class CodexStatusViewModel: ObservableObject {
     private var tokenConsumptionDayStart: Date?
     private var hasStarted = false
     private var isStopped = false
-    var resetSubscriptionUsage: [ResetUsageRecord] = [] {
-        didSet { resetUsageRevision &+= 1 }
-    }
-    private var resetUsageRevision: UInt64 = 0
-    private var resetUsageCache = ResetSubscriptionUsage.AggregationCache()
-
     private static let usageRefreshInterval: TimeInterval = 5 * 60
     private static let profileRefreshInterval: TimeInterval = 15 * 60
     private static let failedRefreshRetryInterval: TimeInterval = 60
@@ -479,11 +473,11 @@ final class CodexStatusViewModel: ObservableObject {
                 nextDailyThreadDiscoveryAt = now.addingTimeInterval(
                     Self.failedRefreshRetryInterval
                 )
-                guard hasDiscoveredLocalActivity || !resetSubscriptionUsage.isEmpty else { return }
+                guard hasDiscoveredLocalActivity else { return }
             }
         }
 
-        guard hasDiscoveredLocalActivity || !resetSubscriptionUsage.isEmpty else { return }
+        guard hasDiscoveredLocalActivity else { return }
         let discoveredPaths = localActivityRolloutPaths
         let recentPaths = snapshot.recentThreads.compactMap(\.rolloutPath)
         let tokenPaths = Array(Set(discoveredPaths + recentPaths))
@@ -519,43 +513,18 @@ final class CodexStatusViewModel: ObservableObject {
             return (usage, hasRunningSession)
         }.value
         guard !Task.isCancelled, generation == accountGeneration else { return }
-        // Ephemeral subscription turns have no rollout. A fresh installation or
-        // unreadable local logs must still show their independently recorded usage.
-        if localActivity.0 != nil || !resetSubscriptionUsage.isEmpty {
-            // Usage can arrive while the local scan is suspended. Capture its
-            // cutoff with the records so it cannot be cached as future usage.
-            let aggregationNow = clock()
-            let revision = resetUsageRevision
-            let subscriptionAggregation: ResetSubscriptionUsage.Aggregation
-            if let cached = resetUsageCache.value(revision: revision, now: aggregationNow) {
-                subscriptionAggregation = cached
-            } else {
-                let records = resetSubscriptionUsage
-                let result = await Task.detached(priority: .utility) {
-                    ResetSubscriptionUsage.aggregate(records: records, now: aggregationNow)
-                }.value
-                guard !Task.isCancelled, generation == accountGeneration,
-                      revision == resetUsageRevision else { return }
-                resetUsageCache.store(result, revision: revision, now: aggregationNow)
-                subscriptionAggregation = result
-            }
-            let usage = localActivity.0
-            let combined = ResetSubscriptionUsage.merge(
-                aggregation: subscriptionAggregation, today: usage?.todayTokens ?? 0,
-                hourly: usage?.hourlyBuckets ?? [], daily: usage?.dailyBuckets ?? [],
-                credits: usage?.chartCreditTotals ?? [:]
-            )
-            let total = combined.today
+        if let usage = localActivity.0 {
+            let total = usage.todayTokens
             if total != snapshot.todayThreadTokens {
                 snapshot.todayThreadTokens = total
             }
-            if combined.hourly != snapshot.hourlyThreadTokens {
-                snapshot.hourlyThreadTokens = combined.hourly
+            if usage.hourlyBuckets != snapshot.hourlyThreadTokens {
+                snapshot.hourlyThreadTokens = usage.hourlyBuckets
             }
-            if combined.daily != snapshot.dailyThreadTokens {
-                snapshot.dailyThreadTokens = combined.daily
+            if usage.dailyBuckets != snapshot.dailyThreadTokens {
+                snapshot.dailyThreadTokens = usage.dailyBuckets
             }
-            snapshot.chartCreditTotals = combined.credits
+            snapshot.chartCreditTotals = usage.chartCreditTotals
             if CodexDisplayPolicy.shouldAnimateTokenConsumption(
                 previous: tokenConsumptionHighWater,
                 current: total

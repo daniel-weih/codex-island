@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One field appearance for the app's selectors, including open/hover/focus.
+/// Display picker appearance, including open and hover states.
 struct IslandPickerSurface: ViewModifier {
     let theme: IslandColorTheme
     let isActive: Bool
@@ -25,7 +25,6 @@ struct IslandPickerLabel: View {
     let theme: IslandColorTheme
     let isPresented: Bool
     var isHovered = false
-    var height: CGFloat = 28
     private var isActive: Bool { isHovered || isPresented }
 
     var body: some View {
@@ -43,13 +42,12 @@ struct IslandPickerLabel: View {
         }
         .foregroundStyle(theme.accent.opacity(isActive ? 0.90 : 0.72))
         .padding(.horizontal, 7)
-        .frame(height: height)
+        .frame(height: 28)
         .modifier(IslandPickerSurface(theme: theme, isActive: isActive))
     }
 }
 
-/// Shared by the display, model, and interval pickers so menus stay opaque and use
-/// the selected theme instead of the system menu's material and blue tint.
+/// Keeps the display picker menu opaque and consistent with the selected theme.
 struct IslandSelectionMenuStyle: ViewModifier {
     static let rowHeight: CGFloat = 24
     static let spacing: CGFloat = 1
@@ -76,7 +74,6 @@ struct IslandSelectionMenuLabel: View {
     let isSelected: Bool
     let theme: IslandColorTheme
     var isAvailable = true
-    var isHighlighted = false
 
     var body: some View {
         HStack(spacing: 5) {
@@ -93,10 +90,6 @@ struct IslandSelectionMenuLabel: View {
         }
         .padding(.horizontal, 8)
         .frame(height: IslandSelectionMenuStyle.rowHeight)
-        .background(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(theme.accent.opacity(isHighlighted ? 0.09 : 0))
-        )
         .contentShape(Rectangle())
     }
 }

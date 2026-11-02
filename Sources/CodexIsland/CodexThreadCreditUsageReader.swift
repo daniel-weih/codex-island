@@ -164,10 +164,13 @@ private final class ThreadCreditCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private var pricingGeneration: UInt64 = 0
 
     func estimate(url: URL, matching usage: ThreadTokenUsage) throws -> CodexThreadCreditEstimate? {
         lock.lock()
         defer { lock.unlock() }
+        let generation = CodexCreditConfiguration.generation
+        if generation != pricingGeneration { entries.removeAll(); pricingGeneration = generation }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         let modifiedAt = attributes[.modificationDate] as? Date ?? .distantPast

@@ -3,9 +3,9 @@ import Foundation
 typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
-    /// Included-subscription Fast multiplier from the bundled configuration.
+    /// Included-subscription Fast multiplier from the active configuration.
     static func multiplier(for model: String?) -> Double? {
-        CodexCreditConfiguration.bundled?.fastPolicy(for: model)?.includedSubscription
+        CodexCreditConfiguration.current?.fastPolicy(for: model)?.includedSubscription
     }
 }
 
@@ -346,18 +346,11 @@ enum CodexSubscriptionPlan: String, CaseIterable {
         }
     }
 
-    /// Fixed app estimates, not balances returned by the account API. Pro 200
-    /// uses 10× Plus; do not infer other tiers' allowances from their prices.
-    private static let plusReferenceCreditAllowance: Double = 2_000
-
+    /// Project estimates from configuration, not account API balances.
     var referenceCreditAllowance: Double? {
-        switch self {
-        case .plus: return Self.plusReferenceCreditAllowance
-        case .prolite: return Self.plusReferenceCreditAllowance * 5
-        case .pro: return Self.plusReferenceCreditAllowance * 10
-        default: return nil
-        }
+        CodexCreditConfiguration.current?.subscriptionCredits(for: rawValue)
     }
+
 }
 
 enum CodexConnectionState: Equatable {
@@ -365,10 +358,6 @@ enum CodexConnectionState: Equatable {
     case connected
     case disconnected(String?)
 
-    var isConnected: Bool {
-        if case .connected = self { return true }
-        return false
-    }
 }
 
 struct AccountSummary: Equatable {

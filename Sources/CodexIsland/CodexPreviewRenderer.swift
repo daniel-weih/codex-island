@@ -922,125 +922,48 @@ enum CodexPreviewRenderer {
             width: IslandLayout.compactWidth(forNotchWidth: geometry.notchWidth)
         )
 
-        for language in [IslandInterfaceLanguage.chinese, .english] {
-            for enabled in [true, false] {
-                let subscription = previewResetSubscription(language: language)
-                var configuration = subscription.settings
-                configuration.enabled = enabled
-                try subscription.updateSettings(configuration)
-                for (page, suffix) in [
-                    (IslandPage.dashboard, "dashboard"),
-                    (.islandSettings, "island-settings"),
-                    (.resetDetails, "details"),
-                    (.resetSettings, "settings")
-                ] {
-                    let disabledSuffix = enabled ? "" : "-disabled"
-                    let url = directory.appendingPathComponent("codex-island-subscription-\(suffix)-\(language.rawValue)\(disabledSuffix).png")
-                    try render(
-                        snapshot: language == .chinese ? snapshot : englishSnapshot,
-                        displayGeometry: geometry,
-                        expanded: true,
-                        previewLanguagePreference: language == .chinese ? .chinese : .english,
-                        resetSubscription: subscription,
-                        initialPage: page,
-                        size: expandedSize,
-                        to: url
-                    )
-                    outputURLs.append(url)
-                }
-            }
-            for theme in IslandColorTheme.allCases {
-                for unit in ResetIntervalUnit.allCases {
-                    let subscription = previewResetSubscription(language: language)
-                    var configuration = subscription.settings
-                    configuration.intervalUnit = unit
-                    try subscription.updateSettings(configuration)
-                    let url = directory.appendingPathComponent(
-                        "codex-island-interval-menu-\(language.rawValue)-\(theme.rawValue)-\(unit.rawValue).png"
-                    )
-                    try render(
-                        snapshot: language == .chinese ? snapshot : englishSnapshot,
-                        displayGeometry: geometry, expanded: true,
-                        previewIntervalPickerPresentation: true,
-                        previewLanguagePreference: language == .chinese ? .chinese : .english,
-                        previewColorTheme: theme,
-                        resetSubscription: subscription, initialPage: .resetSettings,
-                        size: expandedSize, to: url
-                    )
-                    outputURLs.append(url)
-                }
-                for effort in ["max", "ultra"] {
-                    for fast in [false, true] {
-                        let pickerSubscription = previewResetSubscription(language: language)
-                        var configuration = pickerSubscription.settings
-                        configuration.model = "gpt-6-astra"
-                        configuration.reasoningEffort = effort
-                        configuration.fast = fast
-                        try pickerSubscription.updateSettings(configuration)
-                        let suffix = effort + (fast ? "-fast" : "") + "-" + theme.rawValue
-                        let url = directory.appendingPathComponent("codex-island-subscription-settings-\(language.rawValue)-\(suffix).png")
-                        try render(
-                            snapshot: language == .chinese ? snapshot : englishSnapshot,
-                            displayGeometry: geometry, expanded: true,
-                            previewLanguagePreference: language == .chinese ? .chinese : .english,
-                            previewColorTheme: theme,
-                            resetSubscription: pickerSubscription, initialPage: .resetSettings,
-                            size: expandedSize, to: url
-                        )
-                        outputURLs.append(url)
-                    }
-                }
-            }
-
-            for state in [ResetPreviewState.ready, .catalogLoading, .catalogEmpty, .catalogLong] {
-                let subscription = previewResetSubscription(language: language, state: state)
-                let url = directory.appendingPathComponent("codex-island-model-menu-\(language.rawValue)-\(state.rawValue).png")
-                try render(
-                    snapshot: language == .chinese ? snapshot : englishSnapshot,
-                    displayGeometry: geometry, expanded: true,
-                    previewModelPickerPresentation: true,
-                    previewLanguagePreference: language == .chinese ? .chinese : .english,
-                    previewColorTheme: .meituan,
-                    resetSubscription: subscription, initialPage: .resetSettings,
-                    size: expandedSize, to: url
-                )
-                subscription.stop()
+        var configurationPreview = CodexCreditConfiguration.bundled
+        configurationPreview?.catalog = [
+            .init(id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra", reasoningEfforts: ["high", "max"], serviceTiers: []),
+            .init(id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", reasoningEfforts: ["high", "max"], serviceTiers: ["priority"])
+        ]
+        configurationPreview?.pricingUpdatedAt = Date()
+        configurationPreview?.catalogUpdatedAt = Date()
+        let configurationService = CodexConfigurationService(persistenceEnabled: false, initialConfiguration: configurationPreview)
+        for language in [IslandLanguagePreference.chinese, .english] {
+            for page in [IslandPage.islandSettings, .configurationSettings] {
+                let url = directory.appendingPathComponent("codex-island-configuration-\(page.rawValue)-\(language.rawValue).png")
+                try render(snapshot: snapshot, displayGeometry: geometry, expanded: true,
+                           previewLanguagePreference: language, configurationService: configurationService,
+                           initialPage: page, size: expandedSize, to: url)
                 outputURLs.append(url)
             }
-            for state in [ResetPreviewState.ready, .fetching, .analyzing, .failed] {
-                let subscription = previewResetSubscription(language: language, state: state)
-                for page in [IslandPage.resetSettings, .resetDetails] {
-                    let suffix = page == .resetSettings ? "settings" : "details"
-                    let url = directory.appendingPathComponent("codex-island-check-\(language.rawValue)-\(suffix)-\(state.rawValue).png")
-                    try render(
-                        snapshot: language == .chinese ? snapshot : englishSnapshot,
-                        displayGeometry: geometry, expanded: true,
-                        previewEffortHoverIndex: state == .ready && page == .resetSettings ? 2 : nil,
-                        previewLanguagePreference: language == .chinese ? .chinese : .english,
-                        previewColorTheme: .meituan,
-                        resetSubscription: subscription, initialPage: page,
-                        size: expandedSize, to: url
-                    )
-                    outputURLs.append(url)
-                }
-                subscription.stop()
-            }
+        }
 
-            // Model availability may change after settings were saved. Ensure
-            // the inline error still leaves every setting and action visible.
-            let unavailableSubscription = previewResetSubscription(language: language)
-            var unavailableConfiguration = unavailableSubscription.settings
-            unavailableConfiguration.model = "gpt-6-unavailable"
-            try unavailableSubscription.updateSettings(unavailableConfiguration)
-            let errorURL = directory.appendingPathComponent("codex-island-subscription-settings-\(language.rawValue)-model-error.png")
-            try render(
-                snapshot: language == .chinese ? snapshot : englishSnapshot,
-                displayGeometry: geometry, expanded: true,
-                previewLanguagePreference: language == .chinese ? .chinese : .english,
-                resetSubscription: unavailableSubscription, initialPage: .resetSettings,
-                size: expandedSize, to: errorURL
-            )
-            outputURLs.append(errorURL)
+        for language in [IslandInterfaceLanguage.chinese, .english] {
+            let cardURL = directory.appendingPathComponent("codex-island-allowance-\(language.rawValue)-display.png")
+            let cardSize = CGSize(width: 440, height: 220)
+            try renderHostedView(CodexSubscriptionEstimatesCard(service: configurationService,
+                language: language, theme: .meituan)
+                .padding(14).frame(width: cardSize.width, height: cardSize.height)
+                .background(Color.black), size: cardSize, scale: 2, to: cardURL)
+            outputURLs.append(cardURL)
+            for draft in ["1250", "1500", "invalid"] {
+                let popoverURL = directory.appendingPathComponent("codex-island-allowance-\(language.rawValue)-popover-\(draft).png")
+                let size = CGSize(width: 320, height: 290)
+                try renderHostedView(CodexPlusCreditPopover(service: configurationService,
+                    language: language, theme: .meituan, initialDraft: draft, onCancel: {}, onSave: {})
+                    .frame(width: size.width, height: size.height).background(Color.black),
+                    size: size, scale: 2, to: popoverURL)
+                outputURLs.append(popoverURL)
+            }
+            let url = directory.appendingPathComponent("codex-island-configuration-details-\(language.rawValue).png")
+            let size = CGSize(width: 500, height: 620)
+            try renderHostedView(CodexConfigurationSettingsPage(service: configurationService,
+                language: language, theme: .meituan, onBack: {})
+                .frame(width: size.width, height: size.height).background(Color.black),
+                size: size, scale: 2, to: url)
+            outputURLs.append(url)
         }
 
         // Exercise every current subscription badge and the per-plan estimate
@@ -1103,75 +1026,6 @@ enum CodexPreviewRenderer {
         }
 
         return outputURLs
-    }
-
-    private enum ResetPreviewState: String {
-        case ready, fetching, analyzing, failed, catalogLoading, catalogEmpty, catalogLong
-    }
-
-    private static func previewResetSubscription(
-        language: IslandInterfaceLanguage, state: ResetPreviewState = .ready
-    ) -> ResetSubscriptionService {
-        let now = Date()
-        var settings = ResetSubscriptionSettings()
-        settings.enabled = true
-        let report = ResetSubscriptionReport(
-            fingerprint: "preview-reset-announcement",
-            title: language.text("下一次 Codex 额度重置", "Next Codex limit reset"),
-            summary: language.text(
-                "示例公告给出了预计重置时间。此处展示来源网站的信息，不代表当前账号已获得重置。",
-                "This example announcement gives an expected reset time. Source updates do not confirm that this account has received a reset."
-            ),
-            applicability: language.text("适用范围：以来源公告说明为准。", "Eligibility follows the source announcement."),
-            kind: .regular,
-            status: .scheduled,
-            evidenceLevel: .announcement,
-            evidence: language.text("示例依据：网站公布了下一次重置的计划时间。", "Example evidence: the source published the scheduled time of the next reset."),
-            sourceURL: URL(string: settings.urlString)!,
-            sourcePublishedAt: now.addingTimeInterval(-3600),
-            scheduledAt: now.addingTimeInterval(26 * 3600 + 18 * 60),
-            timeDescription: nil,
-            expiresAt: nil,
-            fetchedAt: now.addingTimeInterval(-120),
-            analyzedAt: now.addingTimeInterval(-115),
-            model: settings.model,
-            reasoningEffort: settings.reasoningEffort,
-            fast: false,
-            usage: nil
-        )
-        var models = [
-            ResetAnalysisModel(id: "gpt-6-sol", displayName: "GPT-6 Sol", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], serviceTiers: [ResetServiceTier(id: "priority", name: "Fast")], defaultServiceTier: "default"),
-            ResetAnalysisModel(id: "gpt-6-astra", displayName: "GPT-6 Astra", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], serviceTiers: [ResetServiceTier(id: "priority", name: "Fast")], defaultServiceTier: "default")
-        ]
-        if state == .catalogLong {
-            models += (1...6).map { index in
-                ResetAnalysisModel(id: "preview-model-\(index)", displayName: "Preview model \(index)",
-                                   reasoningEfforts: ["medium", "high"], serviceTiers: [], defaultServiceTier: nil)
-            }
-        }
-        let service = ResetSubscriptionService(
-            settings: settings, persistenceEnabled: false,
-            initialReport: report,
-            initialModels: [.catalogLoading, .catalogEmpty].contains(state) ? [] : models,
-            fetch: { url in
-                if state == .fetching { try await Task.sleep(nanoseconds: 60_000_000_000) }
-                if state == .failed { throw ResetSubscriptionError.source("Preview: source unavailable") }
-                return ResetSourceSnapshot(url: url, fetchedAt: Date(), text: "Preview update",
-                                           fingerprint: "preview-new-update", event: nil)
-            },
-            analyze: { _, _ in
-                try await Task.sleep(nanoseconds: 60_000_000_000)
-                throw CancellationError()
-            },
-            listModels: {
-                if state == .catalogLoading { try await Task.sleep(nanoseconds: 60_000_000_000) }
-                return state == .catalogEmpty ? [] : models
-            }
-        )
-        if [.catalogLoading, .catalogEmpty].contains(state) { service.loadModels() }
-        if [.fetching, .analyzing, .failed].contains(state) { service.checkNow() }
-        if state != .ready { RunLoop.main.run(until: Date().addingTimeInterval(0.08)) }
-        return service
     }
 
     private static func previewDailyUsageBuckets(now: Date = Date()) -> [DailyUsageBucket] {
@@ -1242,9 +1096,6 @@ enum CodexPreviewRenderer {
         initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
-        previewIntervalPickerPresentation: Bool? = nil,
-        previewModelPickerPresentation: Bool? = nil,
-        previewEffortHoverIndex: Int? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         initialTokenChartRange: TokenChartRange = .days30,
@@ -1252,7 +1103,7 @@ enum CodexPreviewRenderer {
         previewColorTheme: IslandColorTheme = .ocean,
         previewSettingsEnabled: Bool? = nil,
         previewShowsCredits: Bool? = nil,
-        resetSubscription: ResetSubscriptionService? = nil,
+        configurationService: CodexConfigurationService? = nil,
         initialPage: IslandPage? = nil,
         size: CGSize,
         scale: CGFloat = 2,
@@ -1315,7 +1166,7 @@ enum CodexPreviewRenderer {
             viewModel: viewModel,
             displayGeometry: displayGeometry,
             displaySelection: displaySelection,
-            resetSubscription: resetSubscription,
+            configurationService: configurationService,
             navigation: IslandNavigation(page: page),
             initialHoveredTokenThreadID: initialHoveredTokenThreadID,
             initialHoveredContextThreadID: initialHoveredContextThreadID,
@@ -1324,9 +1175,6 @@ enum CodexPreviewRenderer {
                 ? initialHoveredChartLegend : nil,
             initialIslandSettingsPresented: initialIslandSettingsPresented,
             previewDisplayPickerPresentation: previewDisplayPickerPresentation,
-            previewIntervalPickerPresentation: previewIntervalPickerPresentation,
-            previewModelPickerPresentation: previewModelPickerPresentation,
-            previewEffortHoverIndex: previewEffortHoverIndex,
             initialHoveredHeaderAction: initialHoveredHeaderAction,
             initialTokenConsumptionPhase: initialTokenConsumptionPhase,
             initialTokenChartRange: initialTokenChartRange,
@@ -1347,7 +1195,7 @@ enum CodexPreviewRenderer {
         // Static dashboard cards render completely with ImageRenderer. AppKit
         // cacheDisplay can omit glyphs when many hidden preview windows follow
         // one another, so reserve hosting for pages with native controls.
-        if page.isSubscriptionPage || (hasPreviewOverrides && page != .dashboard) {
+        if page.isConfigurationPage || (hasPreviewOverrides && page != .dashboard) {
             try renderHostedView(view, size: renderedSize, scale: scale, to: url)
             return
         }

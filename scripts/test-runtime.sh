@@ -24,8 +24,6 @@ swiftc -sdk "$RUNTIME_SDK" -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadActivityReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadCreditUsageReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexDailyTokenUsageReader.swift" \
-    "$ROOT_DIR/Sources/CodexIsland/ResetSubscriptionModels.swift" \
-    "$ROOT_DIR/Sources/CodexIsland/ResetSubscriptionUsage.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexProfileIdentityProvider.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexStatusViewModel.swift" \
     "$ROOT_DIR/Tests/RuntimeChecks/main.swift" \

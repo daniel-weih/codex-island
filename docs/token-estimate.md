@@ -14,14 +14,18 @@ GPT-6 / GPT-6.1 费率与 Fast 倍率最近核验于 **2026-10-27**；保留旧�
 
 每百万普通输入、缓存输入、输出 Token 的标准 credits 分别为：GPT-6.1 Terra `25 / 1.25 / 125`，GPT-6.1 Sol `50 / 2.5 / 250`，GPT-6 Astra `250 / 25 / 1,250`，GPT-6 Sol `50 / 5 / 250`，GPT-6 Luna `2.5 / 0.25 / 12.5`。GPT-6.1 Terra 的三项费率均为 GPT-6.1 Sol 的一半。GPT-6.1 Sol 的缓存输入费率是 GPT-6 Sol 的一半，其余两项相同。相同的 Fast 倍率不代表相同的基础费率。
 
-费率与 Fast 倍率集中维护在 [`Sources/CodexIsland/Resources/CodexCreditRates.json`](../Sources/CodexIsland/Resources/CodexCreditRates.json)，随应用一起打包。新增模型或调整已支持档位的费率，只需修改该 JSON；计算、去重、调用归属和汇总仍由 Swift 代码负责。更新后需要重新构建并重启应用，内存缓存会重新读取历史日志。当前不读取外部覆盖文件，也不自动下载官网价格。未支持的速度档位（包括 Ultrafast）不计价。
+[`Sources/CodexIsland/Resources/CodexCreditRates.json`](../Sources/CodexIsland/Resources/CodexCreditRates.json) 随应用打包，提供默认配置和历史模型参考费率。运行时优先读取 `~/Library/Application Support/CodexIsland/CodexConfiguration.json`，默认每 7 天读取官方费率和本地 Codex 模型目录，周期可配置。新增可用模型由 Codex 目录确认，官方价格页面只提供费率；只修改打包 JSON 不会替换已有的运行时配置，也不会把模型加入账号可用目录。计算、去重、调用归属和汇总仍由 Swift 代码负责。
+
+有效更新原子写入并刷新内存计算缓存，无需重新构建或重启；失败保留有效数据，一小时后重试。`subscriptionEstimates` 保存项目订阅估算基准，自动刷新不会覆盖手工基准。未支持的速度档位（包括 Ultrafast）不计价。
 
 配置格式：
 
 - `schemaVersion` 为 `1`，`unit` 固定为 `credits_per_million_tokens`；`revision` 为本次配置修订日期，`sources` 记录核验来源。
 - `models` 按精确模型 ID 列出 `rate.input`、`rate.cachedInput`、`rate.output`，并用每条记录的 `verifiedOn` 区分当前核验与历史费率。日期后缀可匹配基础模型，未知变体不猜价格。
 - `fastPolicies` 按 `family` 维护 `includedSubscription` 和可选的 `purchasedCredits`。家族重叠时优先最具体的条目；应用当前只使用订阅倍率计算，购买 Credits 倍率仅作已核验参考，缺失表示未核验。
-- 加载时检查版本、单位、来源、日期、重复模型、费率及倍率。配置缺失或无效时，额度点显示无法估算，不把未知消耗当作零；Token 统计照常运行。打包资源检查会拒绝缺失或无效的配置。
+- `catalog` 保存当前账号可用模型及其能力，`knownCodexModelIDs` 保留曾出现的模型 ID，供历史日志计价。模型目录与费率分别记录 `catalogUpdatedAt`、`pricingUpdatedAt`，`updateIntervalDays` 控制更新周期。
+- `subscriptionEstimates.plus` 保存 Plus 基准，`subscriptionMultipliers` 保存各 Pro 档位相对 Plus 的倍率；升级时将旧版独立 Pro 额度迁移为倍率并保留手工 Plus 基准。
+- 加载时检查版本、单位、来源、日期、重复模型、费率及倍率。本地配置缺失或无效时回退到内置配置；两者都不可用时才无法估算额度点，不把未知消耗当作零，Token 统计照常运行。自动更新失败时保留上次有效配置。打包资源检查会拒绝缺失或无效的内置配置。
 
 未列出的模型、无法确认的模型别名及无明细的历史记录不猜价格。例如 GPT-5.5 的 20,000 普通输入、80,000 缓存输入和 5,000 输出，参考成本为 7.25 credits。
 
@@ -29,7 +33,9 @@ GPT-6 / GPT-6.1 费率与 Fast 倍率最近核验于 **2026-10-27**；保留旧�
 
 会话 Token 明细弹层在累计 Token 数后显示 `(55.2 credits)`，颜色跟随用户选择的主题。直接使用官方公式：`((Input − Cache) × 普通输入费率 + Cache × 缓存费率 + Output × 输出费率) ÷ 1,000,000`，再乘该次调用的 Fast 倍率。Input 已含缓存、Output 已含推理，因此不会重复计价。
 
-按会话历史各次调用的模型和已记录的 Fast 设置分别求和，最后统一保留一位小数；未记录档位时按 Standard 估算并在提示中说明。不使用当前配置追溯计价。价格采用上方核验日期的官方费率，表示参考消耗，不代表实际扣费。
+按会话历史各次调用记录的模型和 Fast 设置分别计价求和，最后统一保留一位小数；未记录档位时按 Standard 估算并在提示中说明。不会用会话最终选择的模型或 Fast 设置覆盖之前的调用。
+
+单价和 Fast 倍率使用当前生效的费率配置。配置更新后，会话及图表的额度缓存失效，下次读取时按新费率重新估算历史日志；应用没有按调用日期保存费率版本，因此这些数值是参考消耗，不代表当时实际扣费。
 
 credits 与弹层中的累计 Token 使用同一范围：保留日志中属于该累计计数的历史，计数重置时同步重置。重复通知不重复计费；未知模型、第三方 provider、缺失明细或无法归属的累计跳增显示 `— credits`。每个会话首次读取历史后仅增量读取，缓存不保留对话内容。
 
@@ -42,9 +48,9 @@ credits 与弹层中的累计 Token 使用同一范围：保留日志中属于�
 
 ## 剩余 credits 切换
 
-额度右侧的 Tokens / Credits 切换会记住选择。剩余 credits 按项目指定的 Plus 2,000、Pro 100（5×）10,000、Pro 200（10×）20,000 乘以当前主额度剩余比例显示；这是项目的固定基准估算，并非账户接口返回的 credits 余额。参考基准更新于 2026-10-13，各已支持套餐统一以 Plus 为基准按倍率计算。
+额度右侧的 Tokens / Credits 切换会记住选择。`subscriptionEstimates.plus.credits` 是唯一的个人套餐额度基准，默认 1250；`subscriptionMultipliers` 保存 Pro 100 / 200 / 500 的 10 / 20 / 50 倍关系，默认对应 12500 / 25000 / 62500。剩余 credits 再乘以当前主额度剩余比例显示。这是项目指定的估算，并非账户接口返回的 credits 余额。点击设置页额度卡片中的 Plus 数值打开编辑浮层，实时预览 Pro 额度，支持点击「保存」或按回车，原子写入成功后立即更新所有估算；无效输入或写入失败会保留原值。也可退出应用后修改运行时 JSON 中的 `subscriptionEstimates.plus.credits`，再重新打开。自动刷新费率保留手工基准，包括刷新过程中保存的修改。
 
-套餐名称与估算基准分别维护。根据 Codex CLI 0.162.1 生成的 `PlanType` 枚举，`prolite`、`pro`、`promax` 分别展示为 Pro 100、Pro 200、Pro 500；Business、Enterprise、Edu 的变体使用可读名称，悬停可查看完整名称。旧版账户接口仅返回 `pro` 时，可由额度桶里的 `prolite` 或 `promax` 补充具体档位。Pro 500 及其他没有确认参考基准的套餐不从价格猜额度，显示 `—` 额度点，剩余百分比照常展示。
+套餐名称与估算基准分别维护。根据 Codex CLI 0.162.1 生成的 `PlanType` 枚举，`prolite`、`pro`、`promax` 分别展示为 Pro 100、Pro 200、Pro 500；Business、Enterprise、Edu 的变体使用可读名称，悬停可查看完整名称。旧版账户接口仅返回 `pro` 时，可由额度桶里的 `prolite` 或 `promax` 补充具体档位。Pro 500 使用配置中指定的 50 倍关系。其他未配置套餐显示 `—` 额度点，剩余百分比照常展示。
 
 估算值前显示白色 `≈ `，credits 数值按整数显示，配色与模式切换、图表、图例及会话明细一起跟随所选主题。词元模式仅显示剩余百分比，不估算剩余 Token，也不采集或缓存用于该估算的额度样本。
 

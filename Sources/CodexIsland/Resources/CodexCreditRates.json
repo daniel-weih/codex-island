@@ -172,5 +172,17 @@
       "verifiedOn": "2026-09-30",
       "includedSubscription": 2.0
     }
-  ]
+  ],
+  "updateIntervalDays": 7,
+  "subscriptionEstimates": {
+    "plus": {
+      "credits": 1250,
+      "basis": "User-configurable project estimate; not an official account balance."
+    }
+  },
+  "subscriptionMultipliers": {
+    "prolite": 10,
+    "pro": 20,
+    "promax": 50
+  }
 }

@@ -188,6 +188,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
     private var lastObservedNow: Date?
     private var cachedRolloutPaths: Set<String> = []
     private var entries: [String: DailyTokenFileEntry] = [:]
+    private var pricingGeneration: UInt64 = 0
     private var nextHistoricalMetadataRefreshAt: Date?
     private var aggregateTodayTotal: Int64 = 0
     private var aggregateHourlyTotals: [Date: Int64] = [:]
@@ -292,6 +293,14 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
 
         lock.lock()
         defer { lock.unlock() }
+        let generation = CodexCreditConfiguration.generation
+        if generation != pricingGeneration {
+            entries.removeAll()
+            resetAggregates()
+            aggregatesNeedRebuild = true
+            pricingGeneration = generation
+        }
+
 
         let resolvedCalendarSignature = DailyTokenCalendarSignature(
             calendar: calendar

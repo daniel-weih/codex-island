@@ -30,14 +30,11 @@ enum IslandLayout {
     static let expandedMetricsHeight: CGFloat = 210
     static let expandedSeparatorHeight: CGFloat = 1
     static let expandedBottomPadding: CGFloat = 14
-    static let resetSubscriptionSummaryHeight: CGFloat = 36
-    // Every expanded page uses the dashboard's height, including while the
-    // subscription is disabled. Longer secondary pages scroll within this frame.
-    static let expandedBodyHeight: CGFloat = expandedMetricsHeight
-        + recentConversationsHeight
-        + expandedSeparatorHeight * 2
-        + expandedBottomPadding
-        + resetSubscriptionSummaryHeight
+    static let settingsRowHeight: CGFloat = 46
+    static let settingsRowSpacing: CGFloat = 6
+    // All expanded pages share the dashboard's height and outer shape.
+    static let expandedBodyHeight: CGFloat = expandedMetricsHeight + recentConversationsHeight
+        + expandedSeparatorHeight * 2 + expandedBottomPadding
 
     static func compactWidth(forNotchWidth notchWidth: CGFloat) -> CGFloat {
         max(compactMinimumWidth, notchWidth + compactExtraWidth)
@@ -430,7 +427,7 @@ struct IslandView: View {
     @ObservedObject var viewModel: CodexStatusViewModel
     @ObservedObject var displayGeometry: IslandDisplayGeometry
     @ObservedObject var displaySelection: IslandDisplaySelectionModel
-    @ObservedObject var resetSubscription: ResetSubscriptionService
+    @ObservedObject var configurationService: CodexConfigurationService
     @ObservedObject var navigation: IslandNavigation
     @Environment(\.displayScale) private var displayScale
     @AppStorage("codexIsland.statusAnimationsEnabled")
@@ -456,9 +453,6 @@ struct IslandView: View {
     private let initialPopover: IslandPopoverPresentation?
     private let initialTokenConsumptionPhase: Double?
     private let previewDisplayPickerPresentation: Bool?
-    private let previewModelPickerPresentation: Bool?
-    private let previewEffortHoverIndex: Int?
-    private let previewIntervalPickerPresentation: Bool?
     private let previewLanguagePreference: IslandLanguagePreference?
     private let previewColorTheme: IslandColorTheme?
     private let onCopyScreenshot: () -> Bool
@@ -468,7 +462,7 @@ struct IslandView: View {
         viewModel: CodexStatusViewModel,
         displayGeometry: IslandDisplayGeometry,
         displaySelection: IslandDisplaySelectionModel,
-        resetSubscription: ResetSubscriptionService? = nil,
+        configurationService: CodexConfigurationService? = nil,
         navigation: IslandNavigation? = nil,
         initialHoveredTokenThreadID: String? = nil,
         initialHoveredContextThreadID: String? = nil,
@@ -476,9 +470,6 @@ struct IslandView: View {
         initialHoveredChartLegend: CreditChartLegendKind? = nil,
         initialIslandSettingsPresented: Bool = false,
         previewDisplayPickerPresentation: Bool? = nil,
-        previewIntervalPickerPresentation: Bool? = nil,
-        previewModelPickerPresentation: Bool? = nil,
-        previewEffortHoverIndex: Int? = nil,
         initialHoveredHeaderAction: IslandHeaderAction? = nil,
         initialTokenConsumptionPhase: Double? = nil,
         initialTokenChartRange: TokenChartRange = .days30,
@@ -491,17 +482,14 @@ struct IslandView: View {
         self.viewModel = viewModel
         self.displayGeometry = displayGeometry
         self.displaySelection = displaySelection
-        self.resetSubscription = resetSubscription ?? ResetSubscriptionService(
-            settings: ResetSubscriptionSettings(), persistenceEnabled: false
+        self.configurationService = configurationService ?? CodexConfigurationService(
+            persistenceEnabled: false
         )
         self.navigation = navigation ?? IslandNavigation(
             page: initialIslandSettingsPresented ? .islandSettings : .dashboard
         )
         self.initialTokenConsumptionPhase = initialTokenConsumptionPhase
         self.previewDisplayPickerPresentation = previewDisplayPickerPresentation
-        self.previewIntervalPickerPresentation = previewIntervalPickerPresentation
-        self.previewModelPickerPresentation = previewModelPickerPresentation
-        self.previewEffortHoverIndex = previewEffortHoverIndex
         _tokenChartRange = State(initialValue: initialTokenChartRange)
         _previousThreadStates = State(
             initialValue: Self.threadStates(
@@ -979,10 +967,10 @@ struct IslandView: View {
                     themeWatermarkEnabled: $themeWatermarkEnabled,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh,
-                    subscription: resetSubscription,
-                    onConfigureSubscription: {
+                    configurationService: configurationService,
+                    onConfigureModels: {
                         activePopover = nil
-                        navigation.navigate(to: .resetSettings)
+                        navigation.navigate(to: .configurationSettings)
                     }
                 )
                 .frame(maxHeight: .infinity)
@@ -991,26 +979,9 @@ struct IslandView: View {
                     .move(edge: .trailing)
                         .combined(with: .opacity)
                 )
-            case .resetDetails:
-                ResetSubscriptionDetailsPage(
-                    service: resetSubscription,
-                    language: interfaceLanguage,
-                    theme: selectedColorTheme,
-                    onBack: navigation.back,
-                    onConfigure: { navigation.navigate(to: .resetSettings) }
-                )
-            case .resetSettings:
-                ResetSubscriptionSettingsPage(
-                    service: resetSubscription,
-                    language: interfaceLanguage,
-                    theme: selectedColorTheme,
-                    allowsNetworkRequests: usesTimelineUpdates,
-                    previewIntervalPickerPresentation: previewIntervalPickerPresentation,
-                    previewModelPickerPresentation: previewModelPickerPresentation,
-                    previewEffortHoverIndex: previewEffortHoverIndex,
-                    onBack: navigation.back,
-                    onDetails: { navigation.navigate(to: .resetDetails) }
-                )
+            case .configurationSettings:
+                CodexConfigurationSettingsPage(service: configurationService, language: interfaceLanguage,
+                                               theme: selectedColorTheme, onBack: navigation.back)
             case .dashboard:
                 dashboardContent
                     .frame(maxHeight: .infinity)
@@ -1416,11 +1387,6 @@ struct IslandView: View {
             chartCreditTotals: viewModel.snapshot.chartCreditTotals,
             window: viewModel.snapshot.rateLimit?.primary,
             resetSummary: viewModel.snapshot.resetCredits,
-            resetSubscription: resetSubscription,
-            onOpenResetSubscription: {
-                activePopover = nil
-                navigation.navigate(to: .resetDetails)
-            },
             onResetHoverChange: { hovering, pointer in
                 updateResetHover(hovering: hovering, pointer: pointer)
             },
@@ -1749,8 +1715,8 @@ private struct IslandSettingsPanel: View {
     @Binding var themeWatermarkEnabled: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
-    @ObservedObject var subscription: ResetSubscriptionService
-    let onConfigureSubscription: () -> Void
+    @ObservedObject var configurationService: CodexConfigurationService
+    let onConfigureModels: () -> Void
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
@@ -1758,7 +1724,7 @@ private struct IslandSettingsPanel: View {
     @State private var isRefreshHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: IslandLayout.settingsRowSpacing) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(language.text("灵动岛设置", "Island settings"))
                     .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
@@ -1782,7 +1748,7 @@ private struct IslandSettingsPanel: View {
                     GridItem(.flexible(), spacing: 8),
                     GridItem(.flexible(), spacing: 0)
                 ],
-                spacing: 8
+                spacing: IslandLayout.settingsRowSpacing
             ) {
                 IslandSettingToggleCard(
                     icon: "dot.radiowaves.left.and.right",
@@ -1883,7 +1849,7 @@ private struct IslandSettingsPanel: View {
                 .fixedSize(horizontal: true, vertical: true)
             }
             .padding(.horizontal, 9)
-            .frame(height: 52)
+            .frame(height: IslandLayout.settingsRowHeight)
             .background { settingsCardBackground.overlay(settingsCardBorder) }
 
             HStack(spacing: 8) {
@@ -1968,14 +1934,14 @@ private struct IslandSettingsPanel: View {
             }
             .padding(.horizontal, 9)
             .frame(maxWidth: .infinity)
-            .frame(height: 56)
+            .frame(height: IslandLayout.settingsRowHeight)
             .background { settingsCardBackground.overlay(settingsCardBorder) }
 
-            ResetSubscriptionSettingCard(
-                service: subscription,
+            CodexConfigurationSettingCard(
+                service: configurationService,
                 language: language,
                 theme: theme,
-                onConfigure: onConfigureSubscription
+                onConfigure: onConfigureModels
             )
         }
         .padding(.horizontal, IslandLayout.contentHorizontalInset)
@@ -2230,7 +2196,7 @@ private struct IslandSettingToggleCard: View {
         .disabled(!isInteractive)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity)
-        .frame(height: 52)
+        .frame(height: IslandLayout.settingsRowHeight)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Color.white.opacity(isHovered ? 0.045 : 0.028))
@@ -3262,7 +3228,6 @@ private struct ThreadTokenUsageView: View {
 private struct TokenUsageDetailPopover: View {
     @AppStorage("codexIsland.remainingShowsCredits")
     private var showsRemainingCredits = false
-    static let minimumWidth: CGFloat = 278
     static let height: CGFloat = 78
 
     static func size(
@@ -3595,8 +3560,6 @@ private struct AccountActivityCard: View {
     let chartCreditTotals: [Date: CodexChartCreditTotal]
     let window: RateLimitWindow?
     let resetSummary: ResetCreditSummary?
-    @ObservedObject var resetSubscription: ResetSubscriptionService
-    let onOpenResetSubscription: () -> Void
     let onResetHoverChange: (Bool, CGPoint?) -> Void
     let onLegendHoverChange: (CreditChartLegendKind, Bool, CGPoint?) -> Void
     let plan: CodexSubscriptionPlan?
@@ -3624,8 +3587,6 @@ private struct AccountActivityCard: View {
         chartCreditTotals: [Date: CodexChartCreditTotal],
         window: RateLimitWindow?,
         resetSummary: ResetCreditSummary?,
-        resetSubscription: ResetSubscriptionService,
-        onOpenResetSubscription: @escaping () -> Void,
         onResetHoverChange: @escaping (Bool, CGPoint?) -> Void,
         onLegendHoverChange: @escaping (
             CreditChartLegendKind,
@@ -3643,8 +3604,6 @@ private struct AccountActivityCard: View {
         self.chartCreditTotals = chartCreditTotals
         self.window = window
         self.resetSummary = resetSummary
-        self.resetSubscription = resetSubscription
-        self.onOpenResetSubscription = onOpenResetSubscription
         self.onResetHoverChange = onResetHoverChange
         self.onLegendHoverChange = onLegendHoverChange
         self.plan = plan
@@ -3713,17 +3672,6 @@ private struct AccountActivityCard: View {
             .padding(.top, 4)
             .contentShape(Rectangle())
             .onTapGesture { CodexLauncher.openCodex() }
-
-            if resetSubscription.settings.enabled {
-                ResetSubscriptionSummaryRow(
-                    service: resetSubscription,
-                    language: language,
-                    theme: theme,
-                    onOpen: onOpenResetSubscription
-                )
-                .frame(height: IslandLayout.resetSubscriptionSummaryHeight)
-                .padding(.horizontal, IslandLayout.contentHorizontalInset)
-            }
 
             Hairline()
                 .padding(.horizontal, IslandLayout.contentHorizontalInset)
@@ -5114,16 +5062,6 @@ private struct ResetExpirationPopover: View {
 
 }
 
-private struct MetricDivider: View {
-    let width: CGFloat
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.075))
-            .frame(width: width, height: 70)
-    }
-}
-
 private struct PixelVerticalDivider: View {
     let height: CGFloat
     let opacity: Double
@@ -5185,36 +5123,6 @@ private struct CompactQuotaRing: View {
         // for the rounded trim caps at cardinal angles such as exactly 50%.
         .frame(width: 16, height: 16)
     }
-}
-
-private func windowLabel(
-    _ window: RateLimitWindow?,
-    fallback: String,
-    language: IslandInterfaceLanguage
-) -> String {
-    guard let minutes = window?.windowDurationMinutes else { return fallback }
-    if minutes == 7 * 24 * 60 {
-        return language.text("剩余用量", "Remaining usage")
-    }
-    if minutes < 60 {
-        return language.text(
-            "\(minutes) 分钟限额",
-            "\(minutes)-minute limit"
-        )
-    }
-    if minutes < 24 * 60, minutes % 60 == 0 {
-        return language.text(
-            "\(minutes / 60) 小时限额",
-            "\(minutes / 60)-hour limit"
-        )
-    }
-    if minutes % (24 * 60) == 0 {
-        return language.text(
-            "\(minutes / (24 * 60)) 天限额",
-            "\(minutes / (24 * 60))-day limit"
-        )
-    }
-    return fallback
 }
 
 private func displayModelName(_ rawValue: String) -> String {

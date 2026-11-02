@@ -52,12 +52,6 @@ struct LaunchAtLoginBackend {
         )
     }
 
-    static let previewDisabled = LaunchAtLoginBackend(
-        readStatus: { .notRegistered },
-        register: {},
-        unregister: {}
-    )
-
     static func launchAgent(
         plistURL: URL,
         legacyPlistURLs: [URL] = [],
