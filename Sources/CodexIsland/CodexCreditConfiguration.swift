@@ -141,8 +141,42 @@ struct CodexCreditConfiguration: Codable {
         }.map(\.element)
     }
 
+    /// Presentation only: newest versions first, then older versions, retaining
+    /// output-cost order within each group and all configured pricing data.
+    var visibleModelsByOutputCost: [CatalogModel] {
+        let ordered = modelsByOutputCost
+        let olderIDs = supersededModelIDs
+        return ordered.filter { !olderIDs.contains($0.id) }
+            + ordered.filter { olderIDs.contains($0.id) }
+    }
+
+    var supersededModelIDs: Set<String> {
+        let models = catalog ?? []
+        let versions = models.compactMap { Self.modelFamilyVersion($0.id) }
+        return Set(models.filter { model in
+            guard let candidate = Self.modelFamilyVersion(model.id) else { return false }
+            return versions.contains { other in
+                other.family == candidate.family
+                    && candidate.version.lexicographicallyPrecedes(other.version)
+            }
+        }.map(\.id))
+    }
+
+    private static func modelFamilyVersion(_ id: String) -> (family: String, version: [Int])? {
+        // Unknown naming schemes remain visible; suffixes identify distinct variants.
+        guard id.range(of: #"^gpt-[0-9]+(?:\.[0-9]+)*(?:-[a-z][a-z0-9-]*)?$"#,
+                       options: .regularExpression) != nil else { return nil }
+        let parts = id.dropFirst(4).split(separator: "-", maxSplits: 1)
+        let components = parts[0].split(separator: ".")
+        var version = components.compactMap { Int($0) }
+        guard version.count == components.count else { return nil }
+        // Treat 6 and 6.0 as the same version.
+        while version.last == 0 { version.removeLast() }
+        return (parts.count > 1 ? String(parts[1]) : "", version)
+    }
+
     var fastModels: [CatalogModel] {
-        modelsByOutputCost.filter { $0.supportsFast }
+        visibleModelsByOutputCost.filter { $0.supportsFast }
     }
 
     /// Only the Codex catalog establishes availability. Pricing rows never add models.

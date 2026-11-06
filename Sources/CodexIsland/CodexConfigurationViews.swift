@@ -51,6 +51,7 @@ struct CodexConfigurationSettingsPage: View {
     let onBack: () -> Void
 
     var body: some View {
+        let olderModelIDs = service.configuration?.supersededModelIDs ?? []
         VStack(spacing: 10) {
             HStack {
                 Button(action: onBack) { Image(systemName: "chevron.left") }.buttonStyle(.plain)
@@ -102,11 +103,14 @@ struct CodexConfigurationSettingsPage: View {
                     Divider().overlay(.white.opacity(0.08))
                     Text(language.text("Codex 可用模型 · 输入 / 缓存 / 输出（credits / 百万 Token）", "Available Codex models · input / cached / output (credits / 1M tokens)"))
                         .foregroundStyle(.white.opacity(0.45))
-                    ForEach(service.configuration?.modelsByOutputCost ?? [], id: \.id) { model in
+                    ForEach(service.configuration?.visibleModelsByOutputCost ?? [], id: \.id) { model in
+                        let isOlder = olderModelIDs.contains(model.id)
                         HStack {
                             Text(model.displayName).lineLimit(1)
+                                .foregroundStyle(.white.opacity(isOlder ? 0.4 : 0.8))
                             Spacer()
-                            Text(rate(model.id)).monospacedDigit().foregroundStyle(.white.opacity(0.65))
+                            Text(rate(model.id)).monospacedDigit()
+                                .foregroundStyle(.white.opacity(isOlder ? 0.4 : 0.65))
                         }
                     }
                     if service.configuration?.catalog?.isEmpty != false {
@@ -116,6 +120,7 @@ struct CodexConfigurationSettingsPage: View {
                         .foregroundStyle(.white.opacity(0.45))
                     ForEach(service.configuration?.fastModels ?? [], id: \.id) { model in
                         metadata(model.displayName, fastRate(model.id))
+                            .opacity(olderModelIDs.contains(model.id) ? 0.5 : 1)
                     }
                     if service.configuration?.fastModels.isEmpty != false {
                         Text(language.text("当前目录暂无提供 Fast 的模型", "No models in this catalog offer Fast"))

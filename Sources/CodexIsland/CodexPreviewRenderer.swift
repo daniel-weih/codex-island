@@ -924,8 +924,14 @@ enum CodexPreviewRenderer {
 
         var configurationPreview = CodexCreditConfiguration.bundled
         configurationPreview?.catalog = [
+            .init(id: "gpt-6-astra", displayName: "GPT-6 Astra", reasoningEfforts: ["high"], serviceTiers: ["priority"]),
+            .init(id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", reasoningEfforts: ["high"], serviceTiers: ["priority"]),
+            .init(id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", reasoningEfforts: ["high"], serviceTiers: []),
             .init(id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra", reasoningEfforts: ["high", "max"], serviceTiers: []),
-            .init(id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", reasoningEfforts: ["high", "max"], serviceTiers: ["priority"])
+            .init(id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", reasoningEfforts: ["high", "max"], serviceTiers: ["priority"]),
+            .init(id: "gpt-6-sol", displayName: "GPT-6 Sol", reasoningEfforts: ["high"], serviceTiers: ["priority"]),
+            .init(id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", reasoningEfforts: ["high"], serviceTiers: []),
+            .init(id: "gpt-6-luna", displayName: "GPT-6 Luna", reasoningEfforts: ["high"], serviceTiers: [])
         ]
         configurationPreview?.pricingUpdatedAt = Date()
         configurationPreview?.catalogUpdatedAt = Date()
