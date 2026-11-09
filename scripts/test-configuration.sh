@@ -18,7 +18,9 @@ swiftc -sdk "$RUNTIME_SDK" -parse-as-library \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadSettingsReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexThreadCreditUsageReader.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexConfigurationRefresh.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CodexArtificialAnalysis.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexConfigurationService.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/IslandNavigation.swift" \
     "$ROOT_DIR/Tests/ConfigurationChecks/main.swift" \
     -o "$OUTPUT_DIR/ConfigurationChecks"
 

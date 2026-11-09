@@ -5,23 +5,28 @@ enum CodexConfigurationRefresh {
     static let pricingURL = URL(string: "https://learn.chatgpt.com/docs/pricing.md")!
 
     enum RefreshError: LocalizedError {
-        case invalidSource, invalidCatalog
+        case invalidSource, invalidCatalog, invalidAA
         var errorDescription: String? {
             switch self {
             case .invalidSource: return "官方费率页面格式变化或数据不完整，已保留上次配置。 / Official pricing could not be verified; previous configuration retained."
             case .invalidCatalog: return "Codex 模型目录不可用，已保留上次目录。 / Model catalog unavailable; previous catalog retained."
+            case .invalidAA: return "AA 评分不可用，已保留上次数据。 / AA scores unavailable; previous data retained."
             }
         }
     }
 
     static func fetchPricing() async throws -> String {
-        var request = URLRequest(url: pricingURL)
+        try await fetchPage(pricingURL)
+    }
+
+    static func fetchPage(_ url: URL) async throws -> String {
+        var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.url?.host == pricingURL.host, http.url?.scheme == "https",
-              data.count <= 2_000_000, let text = String(data: data, encoding: .utf8) else {
+              http.url?.host == url.host, http.url?.scheme == "https",
+              data.count <= 8_000_000, let text = String(data: data, encoding: .utf8) else {
             throw RefreshError.invalidSource
         }
         return text
@@ -111,7 +116,7 @@ enum CodexConfigurationRefresh {
         }, onCancel: { client.stop() })
     }
 
-    private static func captures(_ pattern: String, _ text: String) -> [[String]] {
+    static func captures(_ pattern: String, _ text: String) -> [[String]] {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { match in

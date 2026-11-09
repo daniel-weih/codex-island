@@ -2,9 +2,9 @@ import Combine
 import Foundation
 
 enum IslandPage: String, Equatable {
-    case dashboard, islandSettings, configurationSettings
+    case dashboard, islandSettings, modelInformation
 
-    var isConfigurationPage: Bool { self == .configurationSettings }
+    var isModelInformationPage: Bool { self == .modelInformation }
 }
 
 @MainActor
@@ -15,14 +15,19 @@ final class IslandNavigation: ObservableObject {
     init(page: IslandPage = .dashboard) { self.page = page }
 
     func navigate(to page: IslandPage) {
-        if page.isConfigurationPage && !self.page.isConfigurationPage {
+        if page.isModelInformationPage && !self.page.isModelInformationPage {
             returnPage = self.page
         }
         self.page = page
     }
 
     func back() {
-        page = page.isConfigurationPage ? returnPage : .dashboard
+        page = page.isModelInformationPage ? returnPage : .dashboard
+    }
+
+    func toggleModelInformation() {
+        if page.isModelInformationPage { back() }
+        else { navigate(to: .modelInformation) }
     }
 
     func reset() {

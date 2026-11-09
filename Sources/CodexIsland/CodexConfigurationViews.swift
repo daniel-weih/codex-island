@@ -1,50 +1,65 @@
 import AppKit
 import SwiftUI
 
-struct CodexConfigurationSettingCard: View {
+struct CodexConfigurationUpdateCard: View {
     @ObservedObject var service: CodexConfigurationService
     let language: IslandInterfaceLanguage
     let theme: IslandColorTheme
-    let onConfigure: () -> Void
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        Button(action: onConfigure) {
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(theme.accent.opacity(0.78))
-                    .frame(width: 30, height: 30)
-                    .background(theme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 6))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(language.text("模型与额度配置", "Models & credit configuration"))
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(1)
-                    Text(service.isRefreshing ? language.text("正在更新…", "Updating…") :
-                         language.text("每 \(service.intervalDays) 天自动更新 · 不消耗额度", "Updates every \(service.intervalDays) days · No credit usage"))
-                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.28))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Text(language.text("配置", "Configure"))
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(theme.accent.opacity(0.78))
+                .frame(width: 30, height: 30)
+                .background(theme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(language.text("模型与额度配置", "Model data updates"))
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(theme.accent.opacity(0.82))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(1)
+                Text(statusText)
+                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(service.error == nil ? .white.opacity(0.28) : .orange)
+                    .lineLimit(1)
+                    .help(service.error ?? statusText)
+            }
+            Spacer(minLength: 0)
+            Stepper(value: Binding(get: { service.intervalDays }, set: service.setIntervalDays), in: 1...365) {
+                Text(language.text("每 \(service.intervalDays) 天", "Every \(service.intervalDays) days"))
+                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                    .monospacedDigit().foregroundStyle(.white.opacity(0.72))
+            }
+            .fixedSize()
+            .accessibilityLabel(language.text("自动更新周期，天", "Automatic update interval, days"))
+            .accessibilityIdentifier("model-update-interval")
+            Button(action: service.updateNow) {
+                Text(service.isRefreshing ? language.text("刷新中", "Refreshing") : language.text("立即刷新", "Refresh now"))
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.accent.opacity(service.isRefreshing ? 0.4 : 0.82))
                     .padding(.horizontal, 10).frame(height: 28)
                     .background(theme.accent.opacity(0.075), in: Capsule())
                     .fixedSize()
             }
-            .padding(.horizontal, 9)
-            .frame(height: IslandLayout.settingsRowHeight)
-            .background(.white.opacity(0.028), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(.white.opacity(0.065), lineWidth: 1 / max(1, displayScale)))
+            .buttonStyle(.plain)
+            .disabled(service.isRefreshing)
+            .accessibilityIdentifier("refresh-model-data")
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .frame(height: IslandLayout.settingsRowHeight)
+        .background(.white.opacity(0.028), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(.white.opacity(0.065), lineWidth: 1 / max(1, displayScale)))
+    }
+
+    private var statusText: String {
+        if service.isRefreshing { return language.text("正在更新…", "Updating…") }
+        if service.error != nil { return language.text("更新失败 · 已保留缓存", "Update failed · Cache retained") }
+        return language.text("自动更新 · 不消耗额度", "Auto updates · No credit usage")
     }
 }
 
-struct CodexConfigurationSettingsPage: View {
+struct CodexModelInformationPage: View {
     @ObservedObject var service: CodexConfigurationService
     let language: IslandInterfaceLanguage
     let theme: IslandColorTheme
@@ -55,35 +70,28 @@ struct CodexConfigurationSettingsPage: View {
         VStack(spacing: 10) {
             HStack {
                 Button(action: onBack) { Image(systemName: "chevron.left") }.buttonStyle(.plain)
-                Text(language.text("模型与额度配置", "Models & credit configuration")).fontWeight(.semibold)
+                Text(language.text("模型信息", "Model information")).fontWeight(.semibold)
                 Spacer()
-                Button(language.text("立即更新", "Update now")) { service.updateNow() }
-                    .buttonStyle(.plain).foregroundStyle(theme.accent).disabled(service.isRefreshing)
             }
             .font(.system(size: 12))
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text(language.text("自动更新周期", "Automatic update interval"))
-                        Spacer()
-                        Stepper(value: Binding(get: { service.intervalDays }, set: service.setIntervalDays), in: 1...365) {
-                            Text(language.text("\(service.intervalDays) 天", "\(service.intervalDays) days")).monospacedDigit()
-                        }.fixedSize()
-                    }
                     if service.isRefreshing {
                         Text(language.text("正在获取最新配置…", "Fetching latest configuration…")).foregroundStyle(theme.accent)
                     }
                     if let error = service.error { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
                     DisclosureGroup {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text(language.text("直接读取官方费率与 Codex 模型目录，不调用模型。更新后立即生效，失败时保留有效配置。",
-                                               "Reads official pricing and the Codex catalog without model calls. Updates apply immediately; failures keep valid data."))
+                            Text(language.text("读取 OpenAI 费率、Codex 目录与 AA 官网评分，不调用模型。失败时保留上次数据。",
+                                               "Reads OpenAI pricing, the Codex catalog and AA scores without model calls. Failures keep previous data."))
                                 .foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
                             metadata(language.text("费率更新", "Pricing updated"), date(service.configuration?.pricingUpdatedAt))
                             metadata(language.text("目录更新", "Catalog updated"), date(service.configuration?.catalogUpdatedAt))
+                            metadata(language.text("AA 更新", "AA updated"), date(service.configuration?.aaUpdatedAt))
                             metadata(language.text("下次更新", "Next update"), date(service.nextUpdate))
                             HStack {
                                 Link(language.text("官方费率", "Official pricing"), destination: CodexConfigurationRefresh.pricingURL)
+                                Link("AA", destination: CodexArtificialAnalysis.modelsURL)
                                 Spacer()
                                 Button(language.text("显示配置文件", "Show configuration file")) {
                                     NSWorkspace.shared.activateFileViewerSelecting([service.fileURL])
@@ -101,7 +109,8 @@ struct CodexConfigurationSettingsPage: View {
                     .tint(theme.accent)
                     CodexSubscriptionEstimatesCard(service: service, language: language, theme: theme)
                     Divider().overlay(.white.opacity(0.08))
-                    Text(language.text("Codex 可用模型 · 输入 / 缓存 / 输出（credits / 百万 Token）", "Available Codex models · input / cached / output (credits / 1M tokens)"))
+                    Text(language.text("Credits 消耗", "Credit usage")).fontWeight(.semibold)
+                    Text(language.text("输入 / 缓存 / 输出（credits / 百万 Token）", "Input / cached / output (credits / 1M tokens)"))
                         .foregroundStyle(.white.opacity(0.45))
                     ForEach(service.configuration?.visibleModelsByOutputCost ?? [], id: \.id) { model in
                         let isOlder = olderModelIDs.contains(model.id)
@@ -116,7 +125,26 @@ struct CodexConfigurationSettingsPage: View {
                     if service.configuration?.catalog?.isEmpty != false {
                         Text(language.text("目录将在首次更新后显示", "Catalog appears after the first update")).foregroundStyle(.white.opacity(0.4))
                     }
-                    Text(language.text("Fast 倍率（订阅内 / 购买额度）", "Fast multipliers (included / purchased)"))
+                    Divider().overlay(.white.opacity(0.08))
+                    Text(language.text("AA 评分", "AA scores")).fontWeight(.semibold)
+                    Text(language.text("Intelligence Index · 按推理强度 · — 表示暂无评分", "Intelligence Index · by reasoning effort · — means unavailable"))
+                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(service.configuration?.visibleModelsByOutputCost ?? [], id: \.id) { model in
+                        let isOlder = olderModelIDs.contains(model.id)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(model.displayName).lineLimit(1)
+                                .foregroundStyle(.white.opacity(isOlder ? 0.4 : 0.8))
+                            Text(aaSummary(model)).font(.system(size: 10)).monospacedDigit()
+                                .foregroundStyle(.white.opacity(isOlder ? 0.3 : 0.5))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if service.configuration?.catalog?.isEmpty != false {
+                        Text(language.text("目录将在首次更新后显示", "Catalog appears after the first update")).foregroundStyle(.white.opacity(0.4))
+                    }
+                    Divider().overlay(.white.opacity(0.08))
+                    Text(language.text("Fast 消耗倍率（订阅内 / 购买额度）", "Fast usage multipliers (included / purchased)"))
                         .foregroundStyle(.white.opacity(0.45))
                     ForEach(service.configuration?.fastModels ?? [], id: \.id) { model in
                         metadata(model.displayName, fastRate(model.id))
@@ -137,6 +165,22 @@ struct CodexConfigurationSettingsPage: View {
         HStack { Text(title).foregroundStyle(.white.opacity(0.5)); Spacer(); Text(value).monospacedDigit() }
     }
     private func number(_ value: Double) -> String { String(format: "%g", value) }
+    private func aaSummary(_ model: CodexCreditConfiguration.CatalogModel) -> String {
+        let entries = service.configuration?.aaScores?.filter { $0.model == model.id } ?? []
+        let versions = Set(entries.map(\.version)).sorted().joined(separator: "/")
+        let available = Set((model.reasoningEfforts + entries.map(\.effort)).filter { $0.lowercased() != "ultra" })
+        let order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        let efforts = order.filter { available.contains($0) } + available.subtracting(order).sorted()
+        let values = efforts.map { effort in
+            let score = entries.first { $0.effort == effort }?.score
+            return effort + " " + (score.map { String(format: "%.1f", $0) } ?? "—")
+        }.joined(separator: " · ")
+        let prefix = versions.isEmpty ? "AA" : "AA " + versions
+        if service.configuration?.aaUpdatedAt == nil && entries.isEmpty {
+            return prefix + language.text(" · 等待首次更新", " · Awaiting first update")
+        }
+        return prefix + " · " + (values.isEmpty ? "—" : values)
+    }
     private func fastRate(_ id: String) -> String {
         guard let policy = service.configuration?.fastPolicy(for: id) else { return "—" }
         return "\(number(policy.includedSubscription))× / \(policy.purchasedCredits.map { number($0) + "×" } ?? "—")"

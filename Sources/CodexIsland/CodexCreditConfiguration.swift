@@ -37,6 +37,16 @@ struct CodexCreditConfiguration: Codable {
     var subscriptionEstimates: [String: SubscriptionEstimate]? = nil
     var subscriptionMultipliers: [String: Double]? = nil
     var updateIntervalDays: Int? = nil
+    var aaScores: [AAScore]? = nil
+    var aaUpdatedAt: Date? = nil
+
+    struct AAScore: Codable, Equatable {
+        let model: String
+        let effort: String
+        let score: Double?
+        let version: String
+        let source: String
+    }
 
     struct Rate: Codable, Equatable {
         let input: Double
@@ -85,6 +95,16 @@ struct CodexCreditConfiguration: Codable {
               } ?? true),
               (card.catalog.map { Set($0.map(\.id)).count == $0.count && $0.allSatisfy { isID($0.id) && !$0.displayName.isEmpty } } ?? true),
               (card.knownCodexModelIDs.map { Set($0).count == $0.count && $0.allSatisfy(isID) } ?? true),
+              (card.aaScores.map { scores in
+                  Set(scores.map { $0.model + "/" + $0.effort }).count == scores.count && scores.allSatisfy {
+                      isID($0.model) && isID($0.effort)
+                          && ($0.score.map { $0.isFinite && (0...100).contains($0) } ?? true)
+                          && $0.version.range(of: #"^v[0-9]+(?:\.[0-9]+)*$"#, options: .regularExpression) != nil
+                          && URL(string: $0.source)?.scheme == "https"
+                          && URL(string: $0.source)?.host == "artificialanalysis.ai"
+                          && URL(string: $0.source)?.path.hasPrefix("/models/") == true
+                  }
+              } ?? true),
               !card.models.isEmpty,
               Set(card.models.map(\.id)).count == card.models.count,
               Set(card.fastPolicies.map(\.family)).count == card.fastPolicies.count,

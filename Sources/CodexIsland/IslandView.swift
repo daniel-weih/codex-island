@@ -77,7 +77,7 @@ private enum IslandCoordinateSpace {
 enum IslandHeaderAction: Sendable {
     case islandSettings
     case screenshot
-    case codexSettings
+    case modelInformation
     case quit
 }
 
@@ -745,8 +745,8 @@ struct IslandView: View {
             return interfaceLanguage.text("灵动岛设置", "Island settings")
         case .screenshot:
             return interfaceLanguage.text("截图并复制", "Copy screenshot")
-        case .codexSettings:
-            return interfaceLanguage.text("Codex 设置", "Codex settings")
+        case .modelInformation:
+            return interfaceLanguage.text("模型信息", "Model information")
         case .quit:
             return interfaceLanguage.text("退出应用", "Quit app")
         }
@@ -759,7 +759,7 @@ struct IslandView: View {
         let buttonsToRight: CGFloat
         switch action {
         case .screenshot: buttonsToRight = 3
-        case .codexSettings: buttonsToRight = 2
+        case .modelInformation: buttonsToRight = 2
         case .islandSettings: buttonsToRight = 1
         case .quit: buttonsToRight = 0
         }
@@ -967,11 +967,7 @@ struct IslandView: View {
                     themeWatermarkEnabled: $themeWatermarkEnabled,
                     isRefreshing: viewModel.isRefreshing,
                     onRefresh: viewModel.refresh,
-                    configurationService: configurationService,
-                    onConfigureModels: {
-                        activePopover = nil
-                        navigation.navigate(to: .configurationSettings)
-                    }
+                    configurationService: configurationService
                 )
                 .frame(maxHeight: .infinity)
                 .onAppear(perform: refreshLaunchAtLoginSetting)
@@ -979,8 +975,8 @@ struct IslandView: View {
                     .move(edge: .trailing)
                         .combined(with: .opacity)
                 )
-            case .configurationSettings:
-                CodexConfigurationSettingsPage(service: configurationService, language: interfaceLanguage,
+            case .modelInformation:
+                CodexModelInformationPage(service: configurationService, language: interfaceLanguage,
                                                theme: selectedColorTheme, onBack: navigation.back)
             case .dashboard:
                 dashboardContent
@@ -1039,7 +1035,7 @@ struct IslandView: View {
 
             HStack(spacing: IslandLayout.headerActionSpacing) {
                 screenshotButton
-                codexSettingsButton
+                modelInformationButton
                 islandSettingsButton
                 quitButton
             }
@@ -1105,8 +1101,8 @@ struct IslandView: View {
         hoveredHeaderAction == .screenshot
     }
 
-    private var isCodexSettingsButtonHovered: Bool {
-        hoveredHeaderAction == .codexSettings
+    private var isModelInformationButtonHovered: Bool {
+        hoveredHeaderAction == .modelInformation
     }
 
     private var isQuitButtonHovered: Bool {
@@ -1221,25 +1217,28 @@ struct IslandView: View {
         )
     }
 
-    private var codexSettingsButton: some View {
+    private var modelInformationButton: some View {
         Button {
-            CodexLauncher.openSettings()
+            activePopover = nil
+            withAnimation(.easeOut(duration: 0.18)) {
+                navigation.toggleModelInformation()
+            }
         } label: {
             ZStack {
                 Circle()
                     .fill(
-                        Color.white.opacity(
-                            isCodexSettingsButtonHovered ? 0.075 : 0
-                        )
+                        navigation.page.isModelInformationPage
+                            ? selectedColorTheme.accent.opacity(0.12)
+                            : Color.white.opacity(isModelInformationButtonHovered ? 0.075 : 0)
                     )
                     .frame(width: 22, height: 22)
 
-                Image(systemName: "gearshape")
+                Image(systemName: "cpu")
                     .font(.system(size: IslandTypography.body, weight: .semibold))
                     .foregroundStyle(
-                        Color.white.opacity(
-                            isCodexSettingsButtonHovered ? 0.72 : 0.38
-                        )
+                        navigation.page.isModelInformationPage
+                            ? selectedColorTheme.accent.opacity(0.88)
+                            : Color.white.opacity(isModelInformationButtonHovered ? 0.72 : 0.38)
                     )
             }
             .frame(
@@ -1252,11 +1251,13 @@ struct IslandView: View {
         .onContinuousHover(
             coordinateSpace: .named(IslandCoordinateSpace.name)
         ) { phase in
-            handleHeaderActionHover(.codexSettings, phase: phase)
+            handleHeaderActionHover(.modelInformation, phase: phase)
         }
         .accessibilityLabel(
-            interfaceLanguage.text("打开 Codex 设置", "Open Codex settings")
+            interfaceLanguage.text("模型信息", "Model information")
         )
+        .accessibilityIdentifier("model-information")
+        .accessibilityAddTraits(navigation.page.isModelInformationPage ? .isSelected : [])
     }
 
     private var quitButton: some View {
@@ -1716,7 +1717,6 @@ private struct IslandSettingsPanel: View {
     let isRefreshing: Bool
     let onRefresh: () -> Void
     @ObservedObject var configurationService: CodexConfigurationService
-    let onConfigureModels: () -> Void
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
@@ -1937,11 +1937,10 @@ private struct IslandSettingsPanel: View {
             .frame(height: IslandLayout.settingsRowHeight)
             .background { settingsCardBackground.overlay(settingsCardBorder) }
 
-            CodexConfigurationSettingCard(
+            CodexConfigurationUpdateCard(
                 service: configurationService,
                 language: language,
-                theme: theme,
-                onConfigure: onConfigureModels
+                theme: theme
             )
         }
         .padding(.horizontal, IslandLayout.contentHorizontalInset)

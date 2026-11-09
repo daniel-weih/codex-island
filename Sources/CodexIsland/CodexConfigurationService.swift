@@ -11,6 +11,7 @@ final class CodexConfigurationService: ObservableObject {
     private let persistenceEnabled: Bool
     private let fetchPricing: () async throws -> String
     private let listModels: () async throws -> [CodexCreditConfiguration.CatalogModel]
+    private let fetchAA: ([CodexCreditConfiguration.CatalogModel]) async throws -> [CodexCreditConfiguration.AAScore]
     private let clock: () -> Date
     private var task: Task<Void, Never>?
     private var timer: Timer?
@@ -24,19 +25,22 @@ final class CodexConfigurationService: ObservableObject {
     }
     var intervalDays: Int { configuration?.updateIntervalDays ?? 7 }
     var nextUpdate: Date? {
-        guard let pricing = configuration?.pricingUpdatedAt, let catalog = configuration?.catalogUpdatedAt else { return nil }
-        return min(pricing, catalog).addingTimeInterval(Double(intervalDays) * 86400)
+        guard let pricing = configuration?.pricingUpdatedAt, let catalog = configuration?.catalogUpdatedAt,
+              let aa = configuration?.aaUpdatedAt else { return nil }
+        return min(pricing, catalog, aa).addingTimeInterval(Double(intervalDays) * 86400)
     }
 
     init(persistenceEnabled: Bool = true, fileURL: URL = CodexConfigurationService.defaultFileURL,
          initialConfiguration: CodexCreditConfiguration? = CodexCreditConfiguration.bundled,
          fetchPricing: @escaping () async throws -> String = CodexConfigurationRefresh.fetchPricing,
          listModels: @escaping () async throws -> [CodexCreditConfiguration.CatalogModel] = CodexConfigurationRefresh.listModels,
+         fetchAA: @escaping ([CodexCreditConfiguration.CatalogModel]) async throws -> [CodexCreditConfiguration.AAScore] = CodexArtificialAnalysis.fetchScores,
          clock: @escaping () -> Date = Date.init) {
         self.persistenceEnabled = persistenceEnabled
         self.fileURL = fileURL
         self.fetchPricing = fetchPricing
         self.listModels = listModels
+        self.fetchAA = fetchAA
         self.clock = clock
         configuration = initialConfiguration
         if persistenceEnabled {
@@ -122,10 +126,18 @@ final class CodexConfigurationService: ObservableObject {
             var failures: [String] = []
             var pricing: String?
             var models: [CodexCreditConfiguration.CatalogModel]?
+            var aa: [CodexCreditConfiguration.AAScore]?
             // Independent failures must not prevent the other source from refreshing.
             do { pricing = try await fetchPricing() } catch { failures.append(error.localizedDescription) }
             guard !Task.isCancelled else { return }
             do { models = try await listModels() } catch { failures.append(error.localizedDescription) }
+            guard !Task.isCancelled else { return }
+            do {
+                guard let catalog = models ?? configuration?.catalog, !catalog.isEmpty else {
+                    throw CodexConfigurationRefresh.RefreshError.invalidAA
+                }
+                aa = try await fetchAA(catalog)
+            } catch { failures.append(CodexConfigurationRefresh.RefreshError.invalidAA.localizedDescription) }
             guard !Task.isCancelled else { return }
             if var updated = configuration {
                 // Read the latest configuration after I/O, so interval edits made in flight survive.
@@ -139,6 +151,13 @@ final class CodexConfigurationService: ObservableObject {
                 if let pricing {
                     do { updated = try CodexConfigurationRefresh.applyingPricing(pricing, to: updated, now: clock()) }
                     catch { failures.append(error.localizedDescription) }
+                }
+                if let aa {
+                    var candidate = updated
+                    candidate.aaScores = aa
+                    candidate.aaUpdatedAt = clock()
+                    do { updated = try CodexCreditConfiguration.decode(JSONEncoder().encode(candidate)) }
+                    catch { failures.append(CodexConfigurationRefresh.RefreshError.invalidAA.localizedDescription) }
                 }
                 do { try save(updated) } catch { failures.append(error.localizedDescription) }
             } else { failures.append("配置不可用 / Configuration unavailable") }

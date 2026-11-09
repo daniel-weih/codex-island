@@ -287,7 +287,7 @@ final class IslandPanelController: NSObject {
 
     private func evaluatePointerPosition(forceHoverUpdate: Bool = false) {
         let mouse = NSEvent.mouseLocation
-        if !(viewModel.isExpanded && navigation.page.isConfigurationPage),
+        if !(viewModel.isExpanded && navigation.page.isModelInformationPage),
            let screen = screen(containing: mouse) {
             let targetChanged = targetScreen !== screen
             targetScreen = screen
@@ -368,7 +368,7 @@ final class IslandPanelController: NSObject {
     }
 
     private func preferredScreen() -> NSScreen? {
-        if viewModel.isExpanded && navigation.page.isConfigurationPage,
+        if viewModel.isExpanded && navigation.page.isModelInformationPage,
            let current = panel.screen,
            NSScreen.screens.contains(where: { $0 === current }) {
             return current
@@ -450,7 +450,7 @@ final class IslandPanelController: NSObject {
     }
 
     private func updateKeyboardInteraction() {
-        let allowsInput = viewModel.isExpanded && navigation.page.isConfigurationPage
+        let allowsInput = viewModel.isExpanded && navigation.page.isModelInformationPage
         panel.allowsKeyboardInput = allowsInput
         panel.becomesKeyOnlyIfNeeded = !allowsInput
         if allowsInput {

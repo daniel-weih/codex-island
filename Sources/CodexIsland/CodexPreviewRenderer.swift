@@ -234,8 +234,8 @@ enum CodexPreviewRenderer {
         let headerScreenshotHoverURL = directory.appendingPathComponent(
             "codex-island-expanded-header-screenshot-hover.png"
         )
-        let headerCodexSettingsHoverURL = directory.appendingPathComponent(
-            "codex-island-expanded-header-codex-settings-hover.png"
+        let headerModelInformationHoverURL = directory.appendingPathComponent(
+            "codex-island-expanded-header-model-information-hover.png"
         )
         let hoverTopURL = directory.appendingPathComponent(
             "codex-island-expanded-token-hover-top.png"
@@ -277,7 +277,7 @@ enum CodexPreviewRenderer {
             resetHoverEnglishURL,
             headerIslandSettingsHoverURL,
             headerScreenshotHoverURL,
-            headerCodexSettingsHoverURL,
+            headerModelInformationHoverURL,
             headerQuitHoverURL,
             hoverTopURL,
             hoverTopEnglishURL,
@@ -523,10 +523,11 @@ enum CodexPreviewRenderer {
             snapshot: snapshot,
             displayGeometry: geometry,
             expanded: true,
-            initialHoveredHeaderAction: .codexSettings,
+            initialHoveredHeaderAction: .modelInformation,
             previewLanguagePreference: .chinese,
+            initialPage: .islandSettings,
             size: expandedSize,
-            to: headerCodexSettingsHoverURL
+            to: headerModelInformationHoverURL
         )
         try render(
             snapshot: snapshot,
@@ -935,9 +936,12 @@ enum CodexPreviewRenderer {
         ]
         configurationPreview?.pricingUpdatedAt = Date()
         configurationPreview?.catalogUpdatedAt = Date()
+        if let path = ProcessInfo.processInfo.environment["CODEX_ISLAND_PREVIEW_CONFIGURATION_PATH"] {
+            configurationPreview = try CodexCreditConfiguration.decode(Data(contentsOf: URL(fileURLWithPath: path)))
+        }
         let configurationService = CodexConfigurationService(persistenceEnabled: false, initialConfiguration: configurationPreview)
         for language in [IslandLanguagePreference.chinese, .english] {
-            for page in [IslandPage.islandSettings, .configurationSettings] {
+            for page in [IslandPage.islandSettings, .modelInformation] {
                 let url = directory.appendingPathComponent("codex-island-configuration-\(page.rawValue)-\(language.rawValue).png")
                 try render(snapshot: snapshot, displayGeometry: geometry, expanded: true,
                            previewLanguagePreference: language, configurationService: configurationService,
@@ -947,6 +951,15 @@ enum CodexPreviewRenderer {
         }
 
         for language in [IslandInterfaceLanguage.chinese, .english] {
+            var longestInterval = configurationPreview
+            longestInterval?.updateIntervalDays = 365
+            let updateService = CodexConfigurationService(persistenceEnabled: false, initialConfiguration: longestInterval)
+            let updateURL = directory.appendingPathComponent("codex-island-model-update-365-\(language.rawValue).png")
+            let updateSize = CGSize(width: 472, height: IslandLayout.settingsRowHeight)
+            try renderHostedView(CodexConfigurationUpdateCard(service: updateService, language: language, theme: .meituan)
+                .frame(width: updateSize.width, height: updateSize.height).background(Color.black),
+                size: updateSize, scale: 2, to: updateURL)
+            outputURLs.append(updateURL)
             let cardURL = directory.appendingPathComponent("codex-island-allowance-\(language.rawValue)-display.png")
             let cardSize = CGSize(width: 440, height: 220)
             try renderHostedView(CodexSubscriptionEstimatesCard(service: configurationService,
@@ -964,8 +977,8 @@ enum CodexPreviewRenderer {
                 outputURLs.append(popoverURL)
             }
             let url = directory.appendingPathComponent("codex-island-configuration-details-\(language.rawValue).png")
-            let size = CGSize(width: 500, height: 620)
-            try renderHostedView(CodexConfigurationSettingsPage(service: configurationService,
+            let size = CGSize(width: 500, height: 1500)
+            try renderHostedView(CodexModelInformationPage(service: configurationService,
                 language: language, theme: .meituan, onBack: {})
                 .frame(width: size.width, height: size.height).background(Color.black),
                 size: size, scale: 2, to: url)
@@ -1201,7 +1214,7 @@ enum CodexPreviewRenderer {
         // Static dashboard cards render completely with ImageRenderer. AppKit
         // cacheDisplay can omit glyphs when many hidden preview windows follow
         // one another, so reserve hosting for pages with native controls.
-        if page.isConfigurationPage || (hasPreviewOverrides && page != .dashboard) {
+        if page != .dashboard {
             try renderHostedView(view, size: renderedSize, scale: scale, to: url)
             return
         }
