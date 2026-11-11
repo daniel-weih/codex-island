@@ -35,6 +35,7 @@ final class CodexConfigurationService: ObservableObject {
          fetchPricing: @escaping () async throws -> String = CodexConfigurationRefresh.fetchPricing,
          listModels: @escaping () async throws -> [CodexCreditConfiguration.CatalogModel] = CodexConfigurationRefresh.listModels,
          fetchAA: @escaping ([CodexCreditConfiguration.CatalogModel]) async throws -> [CodexCreditConfiguration.AAScore] = CodexArtificialAnalysis.fetchScores,
+         readModelCache: () -> Data? = CodexConfigurationRefresh.readModelCache,
          clock: @escaping () -> Date = Date.init) {
         self.persistenceEnabled = persistenceEnabled
         self.fileURL = fileURL
@@ -53,9 +54,14 @@ final class CodexConfigurationService: ObservableObject {
                 catch { self.error = "本地配置无效，使用内置配置 / Invalid local configuration; using bundled defaults" }
             }
             if let original = configuration {
-                let scoped = original.migratingSubscriptionEstimates().retainingCodexModels()
+                var scoped = original.migratingSubscriptionEstimates().retainingCodexModels()
+                if loadedConfiguration, let catalog = scoped.catalog, let updatedAt = scoped.catalogUpdatedAt {
+                    scoped.catalog = CodexConfigurationRefresh.reconcileCatalog(catalog, cacheData: readModelCache(),
+                                                                               newerThan: updatedAt, now: clock())
+                }
                 needsScopeMigration = loadedConfiguration && (
-                    scoped.models.count != original.models.count
+                    scoped.catalog != original.catalog
+                    || scoped.models.count != original.models.count
                     || scoped.fastPolicies.count != original.fastPolicies.count
                     || scoped.knownCodexModelIDs != original.knownCodexModelIDs
                     || scoped.subscriptionMultipliers != original.subscriptionMultipliers

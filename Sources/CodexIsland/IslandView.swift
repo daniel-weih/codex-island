@@ -746,7 +746,7 @@ struct IslandView: View {
         case .screenshot:
             return interfaceLanguage.text("截图并复制", "Copy screenshot")
         case .modelInformation:
-            return interfaceLanguage.text("模型信息", "Model information")
+            return interfaceLanguage.text("模型评分及额度信息", "Model scores & credits")
         case .quit:
             return interfaceLanguage.text("退出应用", "Quit app")
         }
@@ -965,8 +965,6 @@ struct IslandView: View {
                     previewDisplayPickerPresentation: previewDisplayPickerPresentation,
                     colorTheme: colorThemeBinding,
                     themeWatermarkEnabled: $themeWatermarkEnabled,
-                    isRefreshing: viewModel.isRefreshing,
-                    onRefresh: viewModel.refresh,
                     configurationService: configurationService
                 )
                 .frame(maxHeight: .infinity)
@@ -1254,7 +1252,7 @@ struct IslandView: View {
             handleHeaderActionHover(.modelInformation, phase: phase)
         }
         .accessibilityLabel(
-            interfaceLanguage.text("模型信息", "Model information")
+            interfaceLanguage.text("模型评分及额度信息", "Model scores & credits")
         )
         .accessibilityIdentifier("model-information")
         .accessibilityAddTraits(navigation.page.isModelInformationPage ? .isSelected : [])
@@ -1714,14 +1712,11 @@ private struct IslandSettingsPanel: View {
     let previewDisplayPickerPresentation: Bool?
     @Binding var colorTheme: IslandColorTheme
     @Binding var themeWatermarkEnabled: Bool
-    let isRefreshing: Bool
-    let onRefresh: () -> Void
     @ObservedObject var configurationService: CodexConfigurationService
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
-    @State private var isRefreshHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: IslandLayout.settingsRowSpacing) {
@@ -1795,6 +1790,45 @@ private struct IslandSettingsPanel: View {
             HStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.accent.opacity(0.08))
+
+                    Image(systemName: "globe")
+                        .font(.system(size: IslandTypography.body, weight: .semibold))
+                        .foregroundStyle(theme.accent.opacity(0.72))
+                }
+                .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(language.text("语言", "Language"))
+                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.72))
+
+                    Text(languageDetailText)
+                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.28))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                IslandLanguagePicker(selection: $languagePreference)
+                    .layoutPriority(2)
+
+                IslandDisplayPicker(
+                    selection: displaySelection,
+                    previewPresentation: previewDisplayPickerPresentation
+                )
+                .layoutPriority(1)
+
+            }
+            .padding(.horizontal, 9)
+            .frame(maxWidth: .infinity)
+            .frame(height: IslandLayout.settingsRowHeight)
+            .background { settingsCardBackground.overlay(settingsCardBorder) }
+
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(theme.accent.opacity(0.09))
 
                     Image(systemName: "paintpalette.fill")
@@ -1849,91 +1883,6 @@ private struct IslandSettingsPanel: View {
                 .fixedSize(horizontal: true, vertical: true)
             }
             .padding(.horizontal, 9)
-            .frame(height: IslandLayout.settingsRowHeight)
-            .background { settingsCardBackground.overlay(settingsCardBorder) }
-
-            HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(theme.accent.opacity(0.08))
-
-                    Image(systemName: "globe")
-                        .font(.system(size: IslandTypography.body, weight: .semibold))
-                        .foregroundStyle(theme.accent.opacity(0.72))
-                }
-                .frame(width: 30, height: 30)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(language.text("语言", "Language"))
-                        .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
-
-                    Text(languageDetailText)
-                        .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.28))
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 4)
-
-                IslandLanguagePicker(selection: $languagePreference)
-                    .layoutPriority(2)
-
-                IslandDisplayPicker(
-                    selection: displaySelection,
-                    previewPresentation: previewDisplayPickerPresentation
-                )
-                .layoutPriority(1)
-
-                Button(action: onRefresh) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: IslandTypography.body, weight: .semibold))
-
-                        Text(
-                            isRefreshing
-                                ? language.text("同步中", "Syncing")
-                                : language.text("同步", "Sync")
-                        )
-                            .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
-                    }
-                    .foregroundStyle(
-                        theme.accent.opacity(isRefreshing ? 0.40 : 0.82)
-                    )
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(
-                                    theme.accent.opacity(
-                                        isRefreshHovered && !isRefreshing ? 0.13 : 0.075
-                                    )
-                                )
-                        )
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(
-                                    theme.accent.opacity(0.12),
-                                    lineWidth: 1 / max(1, displayScale)
-                                )
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(isRefreshing)
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.08)) {
-                        isRefreshHovered = hovering
-                    }
-                }
-                .help(
-                    language.text(
-                        "立即同步 Codex 数据",
-                        "Sync Codex data now"
-                    )
-                )
-            }
-            .padding(.horizontal, 9)
-            .frame(maxWidth: .infinity)
             .frame(height: IslandLayout.settingsRowHeight)
             .background { settingsCardBackground.overlay(settingsCardBorder) }
 

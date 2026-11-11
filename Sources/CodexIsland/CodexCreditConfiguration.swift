@@ -182,6 +182,11 @@ struct CodexCreditConfiguration: Codable {
         }.map(\.id))
     }
 
+    var aaModels: [CatalogModel] {
+        let olderIDs = supersededModelIDs
+        return modelsByOutputCost.filter { !olderIDs.contains($0.id) }
+    }
+
     private static func modelFamilyVersion(_ id: String) -> (family: String, version: [Int])? {
         // Unknown naming schemes remain visible; suffixes identify distinct variants.
         guard id.range(of: #"^gpt-[0-9]+(?:\.[0-9]+)*(?:-[a-z][a-z0-9-]*)?$"#,

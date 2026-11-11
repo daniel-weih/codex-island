@@ -45,7 +45,34 @@ struct ConfigurationChecks {
         precondition(unscored.first?.score == nil)
         let nonReasoning = try CodexArtificialAnalysis.parseScores(aaFixture.replacingOccurrences(of: "(Low)", with: "(Non-reasoning)"), modelID: "gpt-6.1-sol", source: aaSource)
         precondition(nonReasoning.first?.effort == "none" && nonReasoning.first?.score == aaScores.first?.score)
+        var aaTable = base
+        aaTable.catalog = ["gpt-6.9-sol", "gpt-6.10-sol", "gpt-6-terra", "gpt-6-luna"].map {
+            .init(id: $0, displayName: $0, reasoningEfforts: ["low", "high"], serviceTiers: [])
+        }
+        precondition(Set(aaTable.aaModels.map(\.id)) == ["gpt-6.10-sol", "gpt-6-terra", "gpt-6-luna"])
+        func score(_ model: String, _ effort: String, _ value: Double?) -> CodexCreditConfiguration.AAScore {
+            .init(model: model, effort: effort, score: value, version: "v5.0.1", source: aaSource.absoluteString)
+        }
         let now = ISO8601DateFormatter().date(from: "2026-11-02T08:00:00Z")!
+        let cacheData = Data(#"{"fetched_at":"2026-11-02T08:00:00.000Z","models":[{"slug":"gpt-6.1-sol","visibility":"list"},{"slug":"gpt-hidden","visibility":"hide"},{"slug":"gpt-cache-only","visibility":"list"}]}"#.utf8)
+        var staleCatalog = base
+        staleCatalog.catalog! += [
+            .init(id: "gpt-5.5", displayName: "GPT-5.5", reasoningEfforts: ["high"], serviceTiers: ["priority"]),
+            .init(id: "gpt-hidden", displayName: "Hidden", reasoningEfforts: ["high"], serviceTiers: ["priority"])
+        ]
+        staleCatalog.aaScores = [score("gpt-5.5", "high", 99), score("gpt-6.1-sol", "high", 50)]
+        staleCatalog.catalogUpdatedAt = now.addingTimeInterval(-60)
+        let reconciled = CodexConfigurationRefresh.reconcileCatalog(staleCatalog.catalog!, cacheData: cacheData,
+            newerThan: staleCatalog.catalogUpdatedAt!, now: now)
+        precondition(reconciled == [base.catalog![0]])
+        for unusableCache in [nil, Data("{}".utf8), Data(#"{"fetched_at":"2026-11-02T08:00:00Z","models":[]}"#.utf8)] as [Data?] {
+            precondition(CodexConfigurationRefresh.reconcileCatalog(staleCatalog.catalog!, cacheData: unusableCache,
+                newerThan: .distantPast, now: now) == staleCatalog.catalog)
+        }
+        precondition(CodexConfigurationRefresh.reconcileCatalog(staleCatalog.catalog!, cacheData: cacheData,
+            newerThan: now.addingTimeInterval(1), now: now) == staleCatalog.catalog)
+        precondition(CodexConfigurationRefresh.reconcileCatalog(staleCatalog.catalog!, cacheData: cacheData,
+            newerThan: .distantPast, now: now.addingTimeInterval(-1)) == staleCatalog.catalog)
         let updated = try CodexConfigurationRefresh.applyingPricing(fixture, to: base, now: now)
         precondition(updated.rate(for: "gpt-6.1-terra")?.cachedInput == 1.25)
         precondition(updated.fastPolicy(for: "gpt-6.1-sol")?.includedSubscription == 2.5)
@@ -100,6 +127,36 @@ struct ConfigurationChecks {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("island-configuration-\(UUID())")
         defer { try? FileManager.default.removeItem(at: folder); CodexCreditConfiguration.activate(base) }
         let file = folder.appendingPathComponent("config.json")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Hidden Fast multipliers still refresh and survive a restart.
+        let policyFile = folder.appendingPathComponent("fast-policy.json")
+        let policyService = CodexConfigurationService(fileURL: policyFile, initialConfiguration: base,
+            fetchPricing: { fixture.replacingOccurrences(of: "2.5x", with: "3.5x").replacingOccurrences(of: "2x", with: "3x") },
+            listModels: { base.catalog! }, fetchAA: { _ in aaScores }, readModelCache: { nil }, clock: { now })
+        policyService.updateNow()
+        try await wait(policyService)
+        precondition(policyService.error == nil)
+        let policyReload = CodexConfigurationService(fileURL: policyFile, readModelCache: { nil })
+        precondition(policyReload.configuration?.fastPolicy(for: "gpt-6.1-sol")?.includedSubscription == 3.5)
+        precondition(policyReload.configuration?.fastPolicy(for: "gpt-6.1-sol")?.purchasedCredits == 3)
+        precondition(policyReload.configuration?.aaScores == aaScores)
+        policyService.stop()
+        policyReload.stop()
+        let migratedFile = folder.appendingPathComponent("stale-catalog.json")
+        try JSONEncoder().encode(staleCatalog).write(to: migratedFile)
+        let migratedCatalog = CodexConfigurationService(fileURL: migratedFile,
+            fetchPricing: { fixture }, listModels: { reconciled }, fetchAA: { _ in throw CodexConfigurationRefresh.RefreshError.invalidAA },
+            readModelCache: { cacheData }, clock: { now })
+        precondition(migratedCatalog.configuration?.visibleModelsByOutputCost.map(\.id) == ["gpt-6.1-sol"])
+        precondition(migratedCatalog.configuration?.aaModels.map(\.id) == ["gpt-6.1-sol"])
+        precondition(migratedCatalog.configuration?.fastModels.map(\.id) == ["gpt-6.1-sol"])
+        precondition(migratedCatalog.configuration?.rate(for: "gpt-5.5") == base.rate(for: "gpt-5.5"))
+        migratedCatalog.start()
+        try await wait(migratedCatalog)
+        migratedCatalog.stop()
+        let migratedReadback = try CodexCreditConfiguration.decode(Data(contentsOf: migratedFile))
+        precondition(migratedReadback.catalog == reconciled && migratedReadback.aaScores == staleCatalog.aaScores)
+        precondition(migratedReadback.rate(for: "gpt-5.5") == base.rate(for: "gpt-5.5"))
         let catalog = [CodexCreditConfiguration.CatalogModel(id: "gpt-fixture", displayName: "Fixture", reasoningEfforts: ["high"], serviceTiers: ["fast"])]
         var requests = 0
         var failPricing = false
@@ -130,7 +187,7 @@ struct ConfigurationChecks {
         service.checkIfDue()
         precondition(!service.isRefreshing, "Failed updates should back off")
         service.stop()
-        let restored = CodexConfigurationService(fileURL: file, initialConfiguration: base)
+        let restored = CodexConfigurationService(fileURL: file, initialConfiguration: base, readModelCache: { nil })
         precondition(restored.intervalDays == 1 && restored.configuration?.catalog == catalog)
         restored.stop()
         // Migrate the previous release's price-table-only entries without changing user estimates.
@@ -155,7 +212,7 @@ struct ConfigurationChecks {
         precondition(cleaned.subscriptionCredits(for: "prolite") == 34560)
         precondition(cleaned.subscriptionCredits(for: "pro") == 69120)
         precondition(cleaned.subscriptionCredits(for: "promax") == 172800)
-        let reloaded = CodexConfigurationService(fileURL: file, initialConfiguration: base)
+        let reloaded = CodexConfigurationService(fileURL: file, initialConfiguration: base, readModelCache: { nil })
         precondition(reloaded.configuration?.subscriptionCredits(for: "promax") == 172800)
         reloaded.stop()
 
@@ -191,13 +248,13 @@ struct ConfigurationChecks {
         fetchContinuation.resume(returning: fixture)
         try await wait(editing)
         precondition(editing.configuration?.subscriptionCredits(for: "promax") == 87500)
-        let editedRestart = CodexConfigurationService(fileURL: editFile, initialConfiguration: base)
+        let editedRestart = CodexConfigurationService(fileURL: editFile, initialConfiguration: base, readModelCache: { nil })
         precondition(editedRestart.configuration?.subscriptionCredits(for: "plus") == 1750)
         editing.stop()
         editedRestart.stop()
 
         try Data("invalid".utf8).write(to: file)
-        let corrupt = CodexConfigurationService(fileURL: file, initialConfiguration: base)
+        let corrupt = CodexConfigurationService(fileURL: file, initialConfiguration: base, readModelCache: { nil })
         precondition(corrupt.error != nil && corrupt.configuration?.revision == base.revision)
         // A storage failure cannot activate a new configuration or destroy existing data.
         let blocked = CodexConfigurationService(fileURL: file.appendingPathComponent("child.json"), initialConfiguration: base,
@@ -212,6 +269,18 @@ struct ConfigurationChecks {
         precondition(blocked.error != nil && blocked.configuration?.pricingUpdatedAt == nil)
         let untouched = try String(contentsOf: file, encoding: .utf8)
         precondition(untouched == "invalid")
+        if CommandLine.arguments.contains("--live-catalog") {
+            let models = try await CodexConfigurationRefresh.listModels()
+            let local = CodexConfigurationService()
+            var configuration = local.configuration!
+            configuration.catalog = models
+            precondition(Set(configuration.visibleModelsByOutputCost.map(\.id)) == Set(models.map(\.id)))
+            print("Live selectable catalog: " + models.map(\.id).joined(separator: ", "))
+            print("Migrated local catalog: " + (local.configuration?.catalog ?? []).map(\.id).joined(separator: ", "))
+            if let index = CommandLine.arguments.firstIndex(of: "--output"), CommandLine.arguments.indices.contains(index + 1) {
+                try JSONEncoder().encode(configuration).write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]), options: .atomic)
+            }
+        }
         if CommandLine.arguments.contains("--live") {
             let text = try await CodexConfigurationRefresh.fetchPricing()
             let models = try await CodexConfigurationRefresh.listModels()

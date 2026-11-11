@@ -951,6 +951,20 @@ enum CodexPreviewRenderer {
         }
 
         for language in [IslandInterfaceLanguage.chinese, .english] {
+            let aaURL = directory.appendingPathComponent("codex-island-aa-\(language.rawValue).png")
+            let aaSize = CGSize(width: 472, height: 600)
+            let aaRenderer = ImageRenderer(content: CodexAAScoresSection(configuration: configurationPreview,
+                language: language)
+                .padding(14).frame(width: aaSize.width, height: aaSize.height, alignment: .topLeading)
+                .background(Color.black))
+            aaRenderer.scale = 2
+            guard let aaImage = aaRenderer.nsImage, let aaTIFF = aaImage.tiffRepresentation,
+                  let aaBitmap = NSBitmapImageRep(data: aaTIFF),
+                  let aaPNG = aaBitmap.representation(using: .png, properties: [:]) else {
+                throw PreviewError.renderFailed
+            }
+            try aaPNG.write(to: aaURL, options: .atomic)
+            outputURLs.append(aaURL)
             var longestInterval = configurationPreview
             longestInterval?.updateIntervalDays = 365
             let updateService = CodexConfigurationService(persistenceEnabled: false, initialConfiguration: longestInterval)

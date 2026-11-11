@@ -87,6 +87,7 @@ enum CodexConfigurationRefresh {
     }
 
     static func listModels() async throws -> [CodexCreditConfiguration.CatalogModel] {
+        let startedAt = Date()
         let client = CodexAppServerClient(clientName: "codex_island_catalog")
         defer { client.stop() }
         return try await withTaskCancellationHandler(operation: {
@@ -112,8 +113,40 @@ enum CodexConfigurationRefresh {
                 guard seen.count < 20 else { throw RefreshError.invalidCatalog }
             } while cursor != nil
             guard !models.isEmpty else { throw RefreshError.invalidCatalog }
-            return models
+            return reconcileCatalog(models, cacheData: readModelCache(), newerThan: startedAt.addingTimeInterval(-300))
         }, onCancel: { client.stop() })
+    }
+
+    static func readModelCache() -> Data? {
+        let configuredHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
+            .map { ($0 as NSString).expandingTildeInPath }
+        let home = configuredHome.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        return try? Data(contentsOf: home.appendingPathComponent("models_cache.json"))
+    }
+
+    /// Some CLI catalogs include bundled fallback models. A newer remote catalog
+    /// bounds picker availability; prices and historical usage never establish it.
+    static func reconcileCatalog(_ models: [CodexCreditConfiguration.CatalogModel], cacheData: Data?,
+                                 newerThan date: Date, now: Date = Date()) -> [CodexCreditConfiguration.CatalogModel] {
+        struct Cache: Decodable {
+            struct Model: Decodable { let slug: String; let visibility: String }
+            let fetched_at: String
+            let models: [Model]
+        }
+        guard let cacheData, let cache = try? JSONDecoder().decode(Cache.self, from: cacheData) else { return models }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fetchedAt = formatter.date(from: cache.fetched_at)
+            ?? ISO8601DateFormatter().date(from: cache.fetched_at)
+        guard let fetchedAt, fetchedAt >= date, fetchedAt <= now,
+              !cache.models.isEmpty,
+              cache.models.allSatisfy({ !$0.slug.isEmpty && ["list", "hide"].contains($0.visibility) }),
+              Set(cache.models.map(\.slug)).count == cache.models.count else { return models }
+        let visibleIDs = Set(cache.models.filter { $0.visibility == "list" }.map(\.slug))
+        guard !visibleIDs.isEmpty else { return models }
+        // Keep app-server metadata and auth filtering; never add cache-only models.
+        return models.filter { visibleIDs.contains($0.id) }
     }
 
     static func captures(_ pattern: String, _ text: String) -> [[String]] {

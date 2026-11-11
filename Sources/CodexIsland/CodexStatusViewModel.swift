@@ -62,7 +62,7 @@ final class CodexStatusViewModel: ObservableObject {
         isStopped = false
         snapshot.connection = .connecting
         refresh()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -357,7 +357,7 @@ final class CodexStatusViewModel: ObservableObject {
         do {
             listedThreads = try await requestRecentThreads(timeout: 3)
         } catch {
-            // The 30-second full refresh owns connection and warning state. A
+            // The 60-second full refresh owns connection and warning state. A
             // transient fast-poll failure should not make the island flicker.
             return
         }
