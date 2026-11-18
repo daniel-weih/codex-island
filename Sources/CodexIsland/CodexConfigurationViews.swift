@@ -121,7 +121,7 @@ struct CodexModelInformationPage: View {
                             }
                             .font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
                             Divider().overlay(.white.opacity(0.08)).gridCellUnsizedAxes(.horizontal)
-                            ForEach(service.configuration?.visibleModelsByOutputCost ?? [], id: \.id) { model in
+                            ForEach(service.configuration?.creditModels ?? [], id: \.id) { model in
                                 let isOlder = olderModelIDs.contains(model.id)
                                 let rate = service.configuration?.rate(for: model.id)
                                 GridRow {

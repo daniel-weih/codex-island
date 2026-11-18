@@ -53,6 +53,21 @@ struct ConfigurationChecks {
         func score(_ model: String, _ effort: String, _ value: Double?) -> CodexCreditConfiguration.AAScore {
             .init(model: model, effort: effort, score: value, version: "v5.0.1", source: aaSource.absoluteString)
         }
+        aaTable.aaScores = [score("gpt-6.9-sol", "max", 95), score("gpt-6.10-sol", "max", nil),
+                            score("gpt-6.10-sol", "high", 90), score("gpt-6-terra", "max", 50),
+                            score("gpt-6-luna", "max", 55)]
+        precondition(aaTable.aaModels.map(\.id) == ["gpt-6-luna", "gpt-6-terra", "gpt-6.10-sol"])
+        aaTable.aaScores = [score("gpt-6-terra", "max", 50), score("gpt-6-luna", "max", 50)]
+        precondition(aaTable.aaModels.map(\.id) == ["gpt-6-terra", "gpt-6-luna", "gpt-6.10-sol"])
+        aaTable.catalog! += ["gpt-5-sol", "gpt-5-terra", "gpt-5-luna"].map {
+            .init(id: $0, displayName: $0, reasoningEfforts: ["max"], serviceTiers: [])
+        }
+        aaTable.aaScores! += [score("gpt-6.9-sol", "high", 99), score("gpt-5-sol", "max", 60),
+                              score("gpt-5-terra", "max", 90), score("gpt-5-luna", "max", 60)]
+        precondition(aaTable.creditModels.map(\.id) == [
+            "gpt-6-terra", "gpt-6-luna", "gpt-6.10-sol",
+            "gpt-5-terra", "gpt-5-sol", "gpt-5-luna", "gpt-6.9-sol"
+        ])
         let now = ISO8601DateFormatter().date(from: "2026-11-02T08:00:00Z")!
         let cacheData = Data(#"{"fetched_at":"2026-11-02T08:00:00.000Z","models":[{"slug":"gpt-6.1-sol","visibility":"list"},{"slug":"gpt-hidden","visibility":"hide"},{"slug":"gpt-cache-only","visibility":"list"}]}"#.utf8)
         var staleCatalog = base
@@ -80,6 +95,49 @@ struct ConfigurationChecks {
         precondition(!updated.models.contains { ["daybreak-blue", "daybreak-red", "gpt-rosalind-research"].contains($0.id) })
         precondition(updated.fastModels.map(\.id) == ["gpt-6.1-sol", "gpt-fixture"])
         precondition(!updated.fastPolicies.contains { $0.family == "daybreak-blue" })
+        let grouped = try String(contentsOf: root.appendingPathComponent("Tests/ConfigurationChecks/pricing-grouped.md"), encoding: .utf8)
+        var newCatalog = base
+        newCatalog.catalog! += ["gpt-6.2-astra", "gpt-6.2-sol"].map {
+            .init(id: $0, displayName: $0, reasoningEfforts: ["max"], serviceTiers: ["priority"])
+        }
+        let groupedUpdate = try CodexConfigurationRefresh.applyingPricing(grouped, to: newCatalog, now: now)
+        precondition(groupedUpdate.rate(for: "gpt-6.2-astra") == .init(input: 200, cachedInput: 10, output: 1000))
+        precondition(groupedUpdate.rate(for: "gpt-6.2-sol") == .init(input: 50, cachedInput: 2.5, output: 250))
+        for model in ["gpt-6.2-astra", "gpt-6.2-sol"] {
+            precondition(groupedUpdate.fastPolicy(for: model)?.includedSubscription == 2)
+            precondition(groupedUpdate.fastPolicy(for: model)?.purchasedCredits == 2)
+        }
+        precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-sol")?.includedSubscription == 2.5)
+        precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-sol")?.purchasedCredits == 2)
+        precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-terra")?.verifiedOn == base.fastPolicy(for: "gpt-6.1-terra")?.verifiedOn)
+        let indented = grouped.replacingOccurrences(of: "\n| GPT-6.1 Sol<br", with: "\n | GPT-6.1 Sol<br")
+        let indentedUpdate = try CodexConfigurationRefresh.applyingPricing(indented, to: newCatalog, now: now)
+        precondition(indentedUpdate.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == groupedUpdate.revision)
+        let splitRows = grouped.replacingOccurrences(of: "| GPT-6.2 Astra<br />GPT-6.2 Sol | 2x | 2x |",
+                                                    with: "| GPT-6.2 Astra | 2x | 2x |\n| GPT-6.2 Sol | 2x | 2x |")
+        let mixedPipes = splitRows.replacingOccurrences(of: "\n| GPT-6.2 Sol |", with: "\n GPT-6.2 Sol |")
+        func withoutOuterPipes(_ page: String) -> String {
+            page.replacingOccurrences(of: #"(?m)^\|\h*|\h*\|$"#, with: "", options: .regularExpression)
+        }
+        for page in [splitRows, mixedPipes, withoutOuterPipes(splitRows)] {
+            let refreshed = try CodexConfigurationRefresh.applyingPricing(page, to: newCatalog, now: now)
+            precondition(refreshed.fastPolicy(for: "gpt-6.2-sol")?.purchasedCredits == 2)
+            precondition(refreshed.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == refreshed.revision)
+            CodexCreditConfiguration.activate(refreshed)
+            precondition(CodexCreditRateCard.credits(model: "gpt-6.2-sol", serviceTier: "fast",
+                inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0) == 100)
+        }
+        CodexCreditConfiguration.activate(base)
+        let borderlessLegacy = try CodexConfigurationRefresh.applyingPricing(withoutOuterPipes(fixture), to: base, now: now)
+        precondition(borderlessLegacy.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == borderlessLegacy.revision)
+        for invalid in [grouped.replacingOccurrences(of: "Fast\n", with: "Unknown\n"),
+                        grouped.replacingOccurrences(of: "2.5x |", with: "unknown |"),
+                        mixedPipes.replacingOccurrences(of: "GPT-6.2 Sol | 2x | 2x |", with: "GPT-6.2 Sol | | 2x |"),
+                        mixedPipes.replacingOccurrences(of: "GPT-6.2 Sol | 2x | 2x |", with: "GPT-6.2 Sol"),
+                        grouped.replacingOccurrences(of: "GPT-6.1 Sol<br", with: "GPT-6.2 Sol<br")] {
+            do { _ = try CodexConfigurationRefresh.applyingPricing(invalid, to: newCatalog); fatalError("Invalid Fast table accepted") }
+            catch {}
+        }
         let future = try CodexConfigurationRefresh.applyingPricing(fixture.replacingOccurrences(of: "Daybreak Blue", with: "GPT-Fixture"), to: base, now: now)
         precondition(future.rate(for: "gpt-fixture")?.input == 100 && future.fastPolicy(for: "gpt-fixture")?.includedSubscription == 2.5)
         var retired = future
@@ -147,7 +205,7 @@ struct ConfigurationChecks {
         let migratedCatalog = CodexConfigurationService(fileURL: migratedFile,
             fetchPricing: { fixture }, listModels: { reconciled }, fetchAA: { _ in throw CodexConfigurationRefresh.RefreshError.invalidAA },
             readModelCache: { cacheData }, clock: { now })
-        precondition(migratedCatalog.configuration?.visibleModelsByOutputCost.map(\.id) == ["gpt-6.1-sol"])
+        precondition(migratedCatalog.configuration?.creditModels.map(\.id) == ["gpt-6.1-sol"])
         precondition(migratedCatalog.configuration?.aaModels.map(\.id) == ["gpt-6.1-sol"])
         precondition(migratedCatalog.configuration?.fastModels.map(\.id) == ["gpt-6.1-sol"])
         precondition(migratedCatalog.configuration?.rate(for: "gpt-5.5") == base.rate(for: "gpt-5.5"))
@@ -274,7 +332,7 @@ struct ConfigurationChecks {
             let local = CodexConfigurationService()
             var configuration = local.configuration!
             configuration.catalog = models
-            precondition(Set(configuration.visibleModelsByOutputCost.map(\.id)) == Set(models.map(\.id)))
+            precondition(Set(configuration.creditModels.map(\.id)) == Set(models.map(\.id)))
             print("Live selectable catalog: " + models.map(\.id).joined(separator: ", "))
             print("Migrated local catalog: " + (local.configuration?.catalog ?? []).map(\.id).joined(separator: ", "))
             if let index = CommandLine.arguments.firstIndex(of: "--output"), CommandLine.arguments.indices.contains(index + 1) {

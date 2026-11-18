@@ -58,25 +58,18 @@ enum CodexConfigurationRefresh {
             parsed.append(.init(id: id, verifiedOn: date, rate: .init(input: amounts[0], cachedInput: amounts[1], output: amounts[2])))
         }
         guard !parsed.isEmpty else { throw RefreshError.invalidSource }
-        // Match the speed table and its billing columns, not API prices or prose speed ratios.
-        guard let header = text.range(of: #"(?m)^\|\s*Speed mode\s*\|\s*Included subscription usage\s*\|\s*Purchased credits and Enterprise pay-as-you-go usage\s*\|"#, options: .regularExpression) else {
-            throw RefreshError.invalidSource
-        }
-        let section = String(text[header.lowerBound...]).components(separatedBy: "\n\n").first ?? ""
-        let fast = captures(#"(?m)^\|\s*Fast\s*\|\s*([0-9.]+)x\s*\|\s*([0-9.]+)x\s*\|"#, section)
-        guard fast.count == 1, let included = Double(fast[0][0]), let purchased = Double(fast[0][1]) else {
-            throw RefreshError.invalidSource
-        }
+        let fastRates = try fastMultipliers(in: text, pricedModels: parsed.map(\.id))
         var result = original.retainingCodexModels()
         let allowed = Set(result.models.map(\.id) + (result.knownCodexModelIDs ?? []))
+        let fastIDs = Set(result.fastModels.map(\.id))
         result.revision = max(original.revision, date)
         for model in parsed where allowed.contains(model.id) {
             if let index = result.models.firstIndex(where: { $0.id == model.id }) { result.models[index] = model }
             else { result.models.append(model) }
             // A price row alone does not establish that Fast exists for this model.
-            guard result.fastModels.contains(where: { $0.id == model.id }) else { continue }
+            guard fastIDs.contains(model.id), let fast = fastRates[model.id] else { continue }
             let policy = CodexCreditConfiguration.FastPolicy(family: model.id, verifiedOn: date,
-                                                             includedSubscription: included, purchasedCredits: purchased)
+                                                             includedSubscription: fast.included, purchasedCredits: fast.purchased)
             if let index = result.fastPolicies.firstIndex(where: { $0.family == model.id }) { result.fastPolicies[index] = policy }
             else { result.fastPolicies.append(policy) }
         }
@@ -84,6 +77,56 @@ enum CodexConfigurationRefresh {
         // are deliberately preserved: the official page does not publish fixed plan balances.
         result.pricingUpdatedAt = now
         return try CodexCreditConfiguration.decode(JSONEncoder().encode(result))
+    }
+
+    private static func fastMultipliers(in text: String, pricedModels: [String]) throws
+        -> [String: (included: Double, purchased: Double)] {
+        // Fast and Ultrafast use the same column names. Match the Fast label together with its header.
+        let groupedHeader = #"(?m)^\h*Fast\h*\R\s*\|?\h*Model\h*\|\h*Included usage\h*\|\h*Credits / PAYG\h*\|?\h*\R"#
+        let legacyHeader = #"(?m)^\h*\|?\h*Speed mode\h*\|\h*Included subscription usage\h*\|\h*Purchased credits and Enterprise pay-as-you-go usage\h*\|?\h*\R"#
+        let grouped = text.range(of: groupedHeader, options: .regularExpression)
+        guard let header = grouped ?? text.range(of: legacyHeader, options: .regularExpression) else {
+            throw RefreshError.invalidSource
+        }
+        let lines = text[header.upperBound...].split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .lazy.map { $0.trimmingCharacters(in: .whitespaces) }
+            .prefix { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("</") }
+        // Outer pipes are optional on each line. Preserve empty internal cells for validation.
+        let rows = lines.map { line in
+            var row = line[...]
+            if row.first == "|" { row = row.dropFirst() }
+            if row.last == "|" { row = row.dropLast() }
+            return row.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        guard let divider = rows.first, divider.count == 3,
+              divider.allSatisfy({ $0.range(of: #"^:?-+:?$"#, options: .regularExpression) != nil }) else {
+            throw RefreshError.invalidSource
+        }
+
+        func multiplier(_ cell: String) -> Double? {
+            guard cell.hasSuffix("x"), let value = Double(cell.dropLast()), value.isFinite, value >= 1 else { return nil }
+            return value
+        }
+        var rates: [String: (included: Double, purchased: Double)] = [:]
+        for cells in rows.dropFirst() {
+            guard cells.count == 3 else { throw RefreshError.invalidSource }
+            if grouped == nil && cells[0] != "Fast" { continue }
+            guard let included = multiplier(cells[1]), let purchased = multiplier(cells[2]) else {
+                throw RefreshError.invalidSource
+            }
+            let ids = grouped == nil ? pricedModels : cells[0]
+                .replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\n", options: .regularExpression)
+                .components(separatedBy: "\n").map {
+                    $0.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
+                }
+            for id in ids {
+                guard id.range(of: #"^[a-z0-9][a-z0-9.-]*$"#, options: .regularExpression) != nil,
+                      rates[id] == nil else { throw RefreshError.invalidSource }
+                rates[id] = (included, purchased)
+            }
+        }
+        guard !rates.isEmpty else { throw RefreshError.invalidSource }
+        return rates
     }
 
     static func listModels() async throws -> [CodexCreditConfiguration.CatalogModel] {

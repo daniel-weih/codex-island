@@ -151,20 +151,19 @@ struct CodexCreditConfiguration: Codable {
         return result
     }
 
-    /// Highest Standard output-token credit rate first; unknown rates last.
-    /// Preserve catalog order for equal prices to avoid reshuffling on refresh.
-    var modelsByOutputCost: [CatalogModel] {
-        (catalog ?? []).enumerated().sorted { lhs, rhs in
-            let left = rate(for: lhs.element.id)?.output ?? -.infinity
-            let right = rate(for: rhs.element.id)?.output ?? -.infinity
-            return left == right ? lhs.offset < rhs.offset : left > right
-        }.map(\.element)
+    private var modelsByMaxScore: [CatalogModel] {
+        var maxScores: [String: Double] = [:]
+        for entry in aaScores ?? [] where entry.effort == "max" {
+            maxScores[entry.model] = entry.score
+        }
+        // Swift's stable sort keeps catalog order for ties and missing scores.
+        return (catalog ?? []).sorted {
+            (maxScores[$0.id] ?? -.infinity) > (maxScores[$1.id] ?? -.infinity)
+        }
     }
 
-    /// Presentation only: newest versions first, then older versions, retaining
-    /// output-cost order within each group and all configured pricing data.
-    var visibleModelsByOutputCost: [CatalogModel] {
-        let ordered = modelsByOutputCost
+    var creditModels: [CatalogModel] {
+        let ordered = modelsByMaxScore
         let olderIDs = supersededModelIDs
         return ordered.filter { !olderIDs.contains($0.id) }
             + ordered.filter { olderIDs.contains($0.id) }
@@ -184,7 +183,7 @@ struct CodexCreditConfiguration: Codable {
 
     var aaModels: [CatalogModel] {
         let olderIDs = supersededModelIDs
-        return modelsByOutputCost.filter { !olderIDs.contains($0.id) }
+        return modelsByMaxScore.filter { !olderIDs.contains($0.id) }
     }
 
     private static func modelFamilyVersion(_ id: String) -> (family: String, version: [Int])? {
@@ -201,7 +200,7 @@ struct CodexCreditConfiguration: Codable {
     }
 
     var fastModels: [CatalogModel] {
-        visibleModelsByOutputCost.filter { $0.supportsFast }
+        (catalog ?? []).filter(\.supportsFast)
     }
 
     /// Only the Codex catalog establishes availability. Pricing rows never add models.
