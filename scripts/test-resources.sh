@@ -12,6 +12,7 @@ swiftc \
     "$ROOT_DIR/Sources/CodexIsland/AppResources.swift" \
     "$ROOT_DIR/Sources/CodexIsland/CodexCreditConfiguration.swift" \
     "$ROOT_DIR/Sources/CodexIsland/TaskSoundPlayer.swift" \
+    "$ROOT_DIR/Sources/CodexIsland/CompletionSoundOutputVolume.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandColorTheme.swift" \
     "$ROOT_DIR/Sources/CodexIsland/IslandLanguage.swift" \
     "$ROOT_DIR/Tests/ResourceChecks/main.swift" \

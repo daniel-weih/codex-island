@@ -1023,7 +1023,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
         // Replayed parent records can share the child's first-turn timestamp.
         // They restore cumulative counters and settings but never add usage.
         guard isAfterActivityBoundary, event.timestamp >= countingStart else { return }
-        let credits: Double?
+        let credits: (standard: Double, actual: Double)?
         if usesChatGPTCredits,
            normalizedModelProvider(modelProvider) == "openai",
            rawDelta > 0, event.lastTokens == rawDelta,
@@ -1032,7 +1032,7 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
            let output = event.outputTokens,
            input >= 0, output >= 0, input <= rawDelta,
            rawDelta - input == output {
-            credits = CodexCreditRateCard.credits(
+            credits = CodexCreditRateCard.estimatedCredits(
                 model: model, serviceTier: serviceTier,
                 inputTokens: input, cachedInputTokens: cachedInput, outputTokens: output
             )
@@ -1040,11 +1040,9 @@ private final class DailyTokenUsageCache: @unchecked Sendable {
             credits = nil
         }
         if rawDelta > 0, let hour = calendar.dateInterval(of: .hour, for: event.timestamp)?.start {
-            let fastMultiplier = CodexDisplayPolicy.isFastServiceTier(serviceTier)
-                ? (CodexFastModeUsagePolicy.multiplier(for: model) ?? 1) : 1
             chartCreditTotals[hour, default: CodexChartCreditTotal()].merge(
-                CodexChartCreditTotal(tokens: Double(rawDelta), credits: credits ?? 0,
-                                      standardCredits: (credits ?? 0) / fastMultiplier,
+                CodexChartCreditTotal(tokens: Double(rawDelta), credits: credits?.actual ?? 0,
+                                      standardCredits: credits?.standard ?? 0,
                                       unpricedCalls: credits == nil ? 1 : 0)
             )
         }

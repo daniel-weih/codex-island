@@ -85,8 +85,11 @@ struct ResourceChecks {
                     "\(name): decodes fallback MP3")
             require(resources.sound(named: "TaskApprovalAlert", withExtension: "wav") != nil,
                     "\(name): decodes approval WAV")
-            require(TaskSoundPlayer.loadCompletionSound(using: resources) != nil,
-                    "\(name): task completion sound initializes")
+            let sounds = TaskSoundPlayer.loadCompletionSounds(using: resources)
+            require(sounds.map(\.duration) == [
+                resources.sound(named: "TaskCompletion8Bit", withExtension: "wav")?.duration,
+                resources.sound(named: "TaskCompletion", withExtension: "mp3")?.duration
+            ].compactMap { $0 }, "\(name): preferred WAV plays before the fallback MP3")
         }
 
         let absent = try fixture("no-bundle", location: nil)
@@ -157,8 +160,8 @@ struct ResourceChecks {
         require(extendedCard.rate(for: "fixture-model-mini") == nil,
                 "undocumented variants do not inherit a family's configured price")
         require(absent.image(named: "AlibabaLogo") == nil, "missing bundle omits the watermark")
-        require(TaskSoundPlayer.loadCompletionSound(using: absent) == nil,
-                "missing bundle safely selects the system sound fallback")
+        require(TaskSoundPlayer.loadCompletionSounds(using: absent).isEmpty,
+                "missing bundle leaves completion playback silent")
         require(absent.sound(named: "TaskApprovalAlert", withExtension: "wav") == nil,
                 "missing bundle safely handles approval sound initialization")
 
@@ -172,9 +175,9 @@ struct ResourceChecks {
                     "\(name) preferred sound is rejected")
             require(resources.sound(named: "TaskApprovalAlert", withExtension: "wav") == nil,
                     "\(name) approval sound is optional")
-            let fallback = TaskSoundPlayer.loadCompletionSound(using: resources)
-            require(fallback != nil, "\(name) preferred sound falls back to the MP3")
-            require(fallback?.duration == resources.sound(named: "TaskCompletion", withExtension: "mp3")?.duration,
+            let sounds = TaskSoundPlayer.loadCompletionSounds(using: resources)
+            require(sounds.count == 1, "\(name) preferred sound falls back to the MP3")
+            require(sounds.first?.duration == resources.sound(named: "TaskCompletion", withExtension: "mp3")?.duration,
                     "\(name) preferred sound uses the working fallback")
             require(resources.image(named: "TencentLogoReverse") != nil,
                     "\(name) asset does not prevent other resources from loading")
@@ -183,8 +186,95 @@ struct ResourceChecks {
         let brokenSounds = try fixture("all-sounds-corrupt", corrupt: [
             "TaskCompletion8Bit.wav", "TaskCompletion.mp3", "TaskApprovalAlert.wav"
         ])
-        require(TaskSoundPlayer.loadCompletionSound(using: brokenSounds) == nil,
-                "all invalid completion sounds safely select the system sound fallback")
+        require(TaskSoundPlayer.loadCompletionSounds(using: brokenSounds).isEmpty,
+                "corrupt completion sounds leave completion playback silent")
+
+        let sounds = TaskSoundPlayer.loadCompletionSounds(using: try fixture("playback"))
+        require(sounds.count == 2, "playback fixture has both completion sounds")
+        let outputID = "fixture-output-device"
+        var gains: [Float] = []
+        let played = TaskSoundPlayer.playCompletion(sounds, volume: 0.2, playback: { limit in
+            require(limit == 0.2, "the saved cap is passed to the output volume calculation")
+            return .init(deviceIdentifier: outputID, gain: 0.15)
+        }) { sound in
+            require(sound.playbackDeviceIdentifier == outputID, "both sounds use the device that was calibrated")
+            gains.append(sound.volume)
+            return sound === sounds[1]
+        }
+        require(played && gains == [0.15, 0.15],
+                "both WAV and MP3 attempts use the gain calculated for the current output")
+
+        gains.removeAll()
+        TaskSoundPlayer.playCompletion(sounds, volume: 1, playback: { _ in
+            .init(deviceIdentifier: outputID, gain: 1)
+        }) { sound in
+            gains.append(sound.volume)
+            return true
+        }
+        require(gains == [1],
+                "the preferred sound plays without attenuation with a 100% cap")
+
+        for volume in [0, -0.1] {
+            let played = TaskSoundPlayer.playCompletion(sounds, volume: volume, start: { _ in
+                fail("zero or lower gains must skip playback")
+            })
+            require(!played, "muted preview reports no playback")
+        }
+        require(TaskSoundPlayer.clampedCompletionVolume(1.2) == 1, "gain above 100% is clamped")
+        require(TaskSoundPlayer.clampedCompletionVolume(.nan) == 0.2, "invalid gain uses the 20% default")
+
+        let skipped = TaskSoundPlayer.playCompletion(sounds, volume: 0.2, playback: { _ in nil }) { _ in
+            fail("playback must stop when the device cannot verify safe attenuation")
+        }
+        require(!skipped, "an unavailable output is reported to the preview")
+        let failed = TaskSoundPlayer.playCompletion(sounds, volume: 0.2, playback: { _ in
+            .init(deviceIdentifier: outputID, gain: 0.15)
+        }) { _ in false }
+        require(!failed, "the preview reports failure if neither sound starts")
+        require(CompletionSoundOutputVolume.cappedGain(limit: 0.2, systemVolume: nil) { nil } == 0,
+                "an unknown system volume cannot establish a low cap")
+        require(CompletionSoundOutputVolume.cappedGain(limit: 0.2, systemVolume: 0.5) { nil } == 0,
+                "output above the cap requires verified attenuation")
+        require(CompletionSoundOutputVolume.cappedGain(limit: 0.2, systemVolume: 0.1) { nil } == 1,
+                "output below the cap keeps its system volume without attenuation")
+        require(CompletionSoundOutputVolume.cappedGain(limit: 1, systemVolume: nil) { nil } == 1,
+                "the 100% cap allows playback when the device has no readable volume")
+
+        let minimumDB: Float = -50
+        let maximumDB: Float = 10
+        func referenceDB(_ scalar: Float) -> Float {
+            minimumDB + (maximumDB - minimumDB) * sqrt(scalar)
+        }
+        func referenceVolume(_ db: Float) -> Float {
+            let position = max(0, (db - minimumDB) / (maximumDB - minimumDB))
+            return position * position
+        }
+        let expectations: [(system: Float, limit: Float, effective: Float)] = [
+            (0, 0.20, 0), (0.005, 0.20, 0.005), (0.01, 0.20, 0.01),
+            (0.02, 0.20, 0.02), (0.19, 0.20, 0.19), (0.20, 0.20, 0.20),
+            (0.50, 0.20, 0.20), (1.00, 0.20, 0.20),
+            (0.50, 0, 0), (0.50, 1.00, 0.50),
+            (0.20, 0.50, 0.20), (0.80, 0.50, 0.50), (0.50, 0.01, 0.01),
+        ]
+        for (system, limit, expected) in expectations {
+            let currentDB = referenceDB(system)
+            let gain = CompletionSoundOutputVolume.cappedGain(limit: limit, systemVolume: system) {
+                require(system > limit, "only system volumes above the cap need conversion")
+                guard let targetDB = CompletionSoundOutputVolume.decibelsAtLimit(
+                    limit, currentScalar: system, currentDB: currentDB,
+                    minimumDB: minimumDB, scalarAtDecibels: referenceVolume
+                ) else { fail("expected a dB target for system volume \(system)") }
+                return CompletionSoundOutputVolume.gain(targetDB: targetDB, currentDB: currentDB)
+            }
+            let effective = gain == 0 ? 0 : referenceVolume(currentDB + 20 * log10(gain))
+            require(abs(effective - expected) < 0.00001,
+                    "system volume \(system) and cap \(limit) map to \(expected)")
+        }
+        require(CompletionSoundOutputVolume.decibelsAtLimit(
+            0.20, currentScalar: 0.5, currentDB: -20, minimumDB: minimumDB,
+            scalarAtDecibels: referenceVolume
+        ) == nil, "a device curve that disagrees with the live volume is rejected")
+
         print("All resource checks passed (relocated apps, both bundle layouts, absent and corrupt assets)")
     }
 

@@ -1150,6 +1150,7 @@ enum CodexPreviewRenderer {
             for key in ["statusAnimationsEnabled", "tokenConsumptionEffectEnabled", "completionSoundEnabled", "themeWatermarkEnabled"] {
                 arguments["codexIsland.\(key)"] = enabled
             }
+            arguments[TaskSoundPlayer.completionVolumeKey] = TaskSoundPlayer.defaultCompletionVolume
         }
         if let showsCredits = previewShowsCredits {
             arguments["codexIsland.remainingShowsCredits"] = showsCredits

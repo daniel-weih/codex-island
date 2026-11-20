@@ -89,10 +89,10 @@ extension CreditChartLegendKind {
 
     func explanation(for language: IslandInterfaceLanguage) -> String {
         self == .standard
-            ? language.text("标准是在不开启 Fast 模式时，相同本机用量按各次调用模型费率计算的额度点。实际 − 标准代表开启 Fast 浪费的额度。",
-                            "Standard is the credit cost of the same local usage with Fast off. Actual minus Standard is the extra credit cost of enabling Fast.")
-            : language.text("实际是按本机各次调用的模型和 Fast 模式计算的总消耗，包含标准用量。实际 − 标准代表开启 Fast 浪费的额度。两项同时显示时，实心为标准，空心轮廓为实际总量。",
-                            "Actual is the total local credit cost, including Standard and Fast surcharges. Actual minus Standard is the extra cost of enabling Fast. The solid bar shows Standard; the outline shows the Actual total.")
+            ? language.text("标准按各次本机调用的模型与 Standard 费率估算订阅内用量。实际减去标准就是 Fast 或 Ultrafast 增加的用量。",
+                            "Standard estimates included subscription usage at each local call's Standard rate. The difference from Actual is the extra usage from Fast or Ultrafast.")
+            : language.text("实际按各次本机调用的模型与速度档位估算订阅内用量。两项同时显示时，实心为标准，空心轮廓为实际总量。",
+                            "Actual estimates included subscription usage at each local call's recorded speed. The solid bar shows Standard and the outline shows Actual when both are visible.")
     }
 }
 
@@ -436,6 +436,8 @@ struct IslandView: View {
     private var tokenConsumptionEffectEnabled = true
     @AppStorage("codexIsland.completionSoundEnabled")
     private var completionSoundEnabled = false
+    @AppStorage(TaskSoundPlayer.completionVolumeKey)
+    private var completionSoundVolume = TaskSoundPlayer.defaultCompletionVolume
     @AppStorage("codexIsland.languagePreference")
     private var storedLanguagePreference = IslandLanguagePreference.automatic.rawValue
     @AppStorage(IslandColorTheme.storageKey)
@@ -646,7 +648,7 @@ struct IslandView: View {
         if !inputRequestedThreadIDs.isEmpty {
             TaskSoundPlayer.playApproval()
         } else if !completedThreadIDs.isEmpty {
-            TaskSoundPlayer.playCompletion()
+            TaskSoundPlayer.playCompletion(volume: completionSoundVolume)
         }
     }
 
@@ -958,6 +960,7 @@ struct IslandView: View {
                     statusAnimationsEnabled: $statusAnimationsEnabled,
                     tokenConsumptionEffectEnabled: $tokenConsumptionEffectEnabled,
                     completionSoundEnabled: $completionSoundEnabled,
+                    completionSoundVolume: TaskSoundPlayer.clampedCompletionVolume(completionSoundVolume),
                     launchAtLoginState: launchAtLoginSetting.state,
                     launchAtLoginEnabled: launchAtLoginBinding,
                     languagePreference: languagePreferenceBinding,
@@ -1705,6 +1708,7 @@ private struct IslandSettingsPanel: View {
     @Binding var statusAnimationsEnabled: Bool
     @Binding var tokenConsumptionEffectEnabled: Bool
     @Binding var completionSoundEnabled: Bool
+    let completionSoundVolume: Double
     let launchAtLoginState: LaunchAtLoginPresentationState
     @Binding var launchAtLoginEnabled: Bool
     @Binding var languagePreference: IslandLanguagePreference
@@ -1717,6 +1721,7 @@ private struct IslandSettingsPanel: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.islandInterfaceLanguage) private var language
     @Environment(\.islandColorTheme) private var theme
+    @State private var showsCompletionVolume = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: IslandLayout.settingsRowSpacing) {
@@ -1770,13 +1775,15 @@ private struct IslandSettingsPanel: View {
                 IslandSettingToggleCard(
                     icon: "speaker.wave.2.fill",
                     title: language.text("完成音效", "Completion sound"),
-                    detail: language.text(
-                        "完成或等待输入时播放",
-                        "Plays on finish or input request"
-                    ),
                     tint: theme.accent,
                     isOn: $completionSoundEnabled
-                )
+                ) {
+                    completionVolumeButton
+                }
+                .help(language.text(
+                    "完成或等待输入时播放提示音",
+                    "Plays a sound on completion or when input is requested"
+                ))
 
                 IslandSettingToggleCard(
                     icon: "power",
@@ -1898,6 +1905,39 @@ private struct IslandSettingsPanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private var completionVolumeButton: some View {
+        let percent = completionSoundVolume.formatted(.percent.precision(.fractionLength(0)))
+        let label = language.text("音量上限 \(percent)", "Volume limit \(percent)")
+        let help = language.text("调整完成音效音量", "Adjust completion sound volume")
+        return Button {
+            showsCompletionVolume.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .rotationEffect(.degrees(showsCompletionVolume ? 90 : 0))
+            }
+            .foregroundStyle(theme.accent.opacity(showsCompletionVolume ? 1 : 0.82))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(Text(help))
+        .accessibilityValue(Text(percent))
+        .accessibilityIdentifier("completion-volume-button")
+        .background(IslandPopoverAnchor(
+            isPresented: $showsCompletionVolume,
+            consumesAnchorClickOnDismissal: true
+        ) {
+            CompletionSoundVolumePopover(language: language, theme: theme) {
+                showsCompletionVolume = false
+            }
+        })
+    }
+
     private var languageDetailText: String {
         if languagePreference == .automatic {
             return language.text(
@@ -1930,6 +1970,117 @@ private struct IslandSettingsPanel: View {
                 Color.white.opacity(0.065),
                 lineWidth: 1 / max(1, displayScale)
             )
+    }
+}
+
+private struct CompletionSoundVolumePopover: View {
+    let language: IslandInterfaceLanguage
+    let theme: IslandColorTheme
+    let onDismiss: () -> Void
+
+    @AppStorage(TaskSoundPlayer.completionVolumeKey)
+    private var savedVolume = TaskSoundPlayer.defaultCompletionVolume
+    @State private var draftVolume: Double?
+    @State private var samplePlaybackFailed = false
+
+    private var volume: Double { draftVolume ?? TaskSoundPlayer.clampedCompletionVolume(savedVolume) }
+
+    var body: some View {
+        let title = language.text("完成音量上限", "Completion volume limit")
+        let percent = Text(volume, format: .percent.precision(.fractionLength(0)))
+        let sliderVolume = Binding(
+            get: { volume },
+            set: {
+                let newVolume = TaskSoundPlayer.clampedCompletionVolume($0)
+                guard newVolume != volume else { return }
+                if draftVolume != nil {
+                    draftVolume = newVolume
+                } else {
+                    TaskSoundPlayer.stopCompletion()
+                    saveVolume(newVolume)
+                }
+            }
+        )
+
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.system(size: IslandTypography.emphasized, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.86))
+                Spacer(minLength: 0)
+                percent
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.accent)
+            }
+
+            Slider(value: sliderVolume, in: TaskSoundPlayer.completionVolumeRange,
+                   label: { Text(title) }, onEditingChanged: editVolume)
+            .labelsHidden()
+            .tint(theme.accent)
+            .accessibilityValue(percent)
+            .accessibilityIdentifier("completion-volume-slider")
+
+            Text(language.text(
+                "上限按系统音量刻度计算。提示音取当前系统音量和上限中的较小值。",
+                "The limit uses the system volume scale. The sound follows system volume up to this limit."
+            ))
+            .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.70))
+            .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                samplePlaybackFailed = !TaskSoundPlayer.playCompletion(volume: volume)
+            } label: {
+                Label(language.text("试听", "Play sample"), systemImage: "play.fill")
+                    .font(.system(size: IslandTypography.body, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.accent.opacity(volume > 0 ? 0.95 : 0.40))
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(volume == 0)
+            .help(language.text(
+                "当前输出设备无法确认安全音量时，跳过播放。",
+                "Playback is skipped when the output device cannot verify a safe volume."
+            ))
+            .accessibilityIdentifier("completion-volume-preview")
+
+            if samplePlaybackFailed {
+                Text(language.text("无法播放试听，请检查输出设备和音量。", "Couldn’t play the sample. Check the output device and volume."))
+                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(width: 232)
+        .onExitCommand(perform: onDismiss)
+        .onDisappear(perform: finishVolumeEdit)
+    }
+
+    private func editVolume(_ isEditing: Bool) {
+        if isEditing {
+            draftVolume = volume
+            TaskSoundPlayer.stopCompletion()
+        } else {
+            finishVolumeEdit()
+        }
+    }
+
+    private func finishVolumeEdit() {
+        guard let draftVolume else { return }
+        saveVolume(draftVolume)
+        self.draftVolume = nil
+    }
+
+    private func saveVolume(_ proposedVolume: Double) {
+        let newVolume = (proposedVolume * 100).rounded() / 100
+        guard newVolume != TaskSoundPlayer.clampedCompletionVolume(savedVolume) else { return }
+        savedVolume = newVolume
+        samplePlaybackFailed = false
     }
 }
 
@@ -2079,10 +2230,10 @@ private struct IslandDisplayPicker: View {
     }
 }
 
-private struct IslandSettingToggleCard: View {
+private struct IslandSettingToggleCard<Detail: View>: View {
     let icon: String
     let title: String
-    let detail: String
+    let detail: Detail
     let tint: Color
     let isInteractive: Bool
     @Binding var isOn: Bool
@@ -2093,14 +2244,14 @@ private struct IslandSettingToggleCard: View {
     init(
         icon: String,
         title: String,
-        detail: String,
         tint: Color,
         isInteractive: Bool = true,
-        isOn: Binding<Bool>
+        isOn: Binding<Bool>,
+        @ViewBuilder detail: () -> Detail
     ) {
         self.icon = icon
         self.title = title
-        self.detail = detail
+        self.detail = detail()
         self.tint = tint
         self.isInteractive = isInteractive
         _isOn = isOn
@@ -2124,10 +2275,7 @@ private struct IslandSettingToggleCard: View {
                     .foregroundStyle(.white.opacity(0.74))
                     .lineLimit(1)
 
-                Text(detail)
-                    .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.27))
-                    .lineLimit(1)
+                detail.lineLimit(1)
             }
 
             Spacer(minLength: 4)
@@ -2160,6 +2308,16 @@ private struct IslandSettingToggleCard: View {
             withAnimation(.easeOut(duration: 0.08)) {
                 isHovered = hovering && isInteractive
             }
+        }
+    }
+}
+
+private extension IslandSettingToggleCard where Detail == Text {
+    init(icon: String, title: String, detail: String, tint: Color, isOn: Binding<Bool>) {
+        self.init(icon: icon, title: title, tint: tint, isOn: isOn) {
+            Text(detail)
+                .font(.system(size: IslandTypography.body, weight: .medium, design: .rounded))
+                .foregroundColor(.white.opacity(0.27))
         }
     }
 }
@@ -3087,32 +3245,24 @@ private struct ThreadFastStatusIconView: View {
     }
 
     private var fastColor: Color {
-        guard let tier = thread.serviceTier?.lowercased() else {
+        guard let tier = thread.serviceTier?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
             return .white.opacity(0.08)
         }
-        let isFast = tier == "priority" || tier == "fast"
-        if isFast {
+        if tier == "ultrafast" || CodexDisplayPolicy.isFastServiceTier(tier) {
             return theme.accent.opacity(0.94)
         }
         return .white.opacity(0.12)
     }
 
     private var fastHelp: String {
-        let fast: String
-        if let tier = thread.serviceTier?.lowercased() {
-            fast = tier == "priority" || tier == "fast"
-                ? language.text("Fast 开启", "Fast on")
-                : language.text("Fast 关闭", "Fast off")
-        } else {
-            fast = language.text("Fast 状态未知", "Fast status unknown")
-        }
+        let label = language.serviceTierLabel(for: thread.serviceTier)
         let source = thread.serviceTierSource == .runtimeLog
             ? language.text(
                 "，来自本会话最近调用",
                 ", from this session's latest request"
             )
             : ""
-        return "\(fast)\(source)"
+        return label + source
     }
 }
 
@@ -3851,8 +4001,7 @@ private struct AccountActivityCard: View {
                     .foregroundStyle(.white.opacity(0.38))
             }
             .fixedSize(horizontal: true, vertical: true)
-            .help(language.text("模型的实际词元用量，Fast 模式不会改变此数值。",
-                                "The number of tokens processed by the model. Fast mode does not change this value."))
+            .help(language.text("模型实际处理的词元数。", "The number of tokens processed by the model."))
         }
     }
 
@@ -4360,6 +4509,21 @@ private struct CreditActivityChart: View {
             showsActualCredits ? bucket.total.credits : 0)
     }
 
+    private func help(for bucket: CreditChartBucket) -> String {
+        guard bucket.total.tokens > 0 else {
+            return bucket.label + language.text(" · 暂无本机用量记录", " · No local usage records")
+        }
+        let standard = bucket.total.amountText(for: bucket.total.standardCredits)
+        let actual = bucket.total.amountText(for: bucket.total.credits)
+        if standard == "—", actual == "—" {
+            return bucket.label + language.text(" · 本机订阅内用量暂无法估算", " · Local included subscription estimate unavailable")
+        }
+        return bucket.label + language.text(
+            " · 本机订阅内用量估算，标准 \(standard) 额度点，实际 \(actual) 额度点。",
+            " · Estimated local included subscription usage. Standard \(standard) credits · Actual \(actual) credits."
+        )
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let maximum = max(0.01, buckets.map(visibleCost).max() ?? 0)
@@ -4381,13 +4545,7 @@ private struct CreditActivityChart: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .contentShape(Rectangle())
                     .onHover { onHover(bucket.id, $0) }
-                    .help(bucket.total.tokens == 0
-                        ? bucket.label + language.text("：暂无本机用量记录", ": no local usage records")
-                        : bucket.label + (bucket.total.unpricedCalls > 0
-                            ? language.text("（仅可计价部分）", " (priced portion only)") : "") + language.text(
-                        "：本机标准 \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) 额度点；实际 \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) 额度点。标准为不开启 Fast 时的用量；实际 − 标准为开启 Fast 浪费的额度。",
-                        ": local Standard \(CodexThreadCreditEstimate(credits: bucket.total.standardCredits).amountText) credits; Actual \(CodexThreadCreditEstimate(credits: bucket.total.credits).amountText) credits. Standard assumes Fast off; Actual minus Standard is the extra Fast cost."
-                    ))
+                    .help(help(for: bucket))
                 }
             }
         }
@@ -5219,13 +5377,13 @@ private func tokenCreditHelp(
         )
     }
     var text = language.text(
-        "估算消耗：\(localizedCredits(estimate.displayText, language: language))。按官方费率分别计算普通输入（输入减缓存）、缓存输入和输出，再应用各次调用的 Fast 倍率。推理已包含在输出中。此值是费用参考，不代表实际扣费。",
-        "Estimated usage: \(estimate.displayText). Official rates are applied to uncached input (Input − Cache), cached input, and output, with each call's Fast multiplier. Reasoning is already included in Output. This is a cost reference, not an actual charge."
+        "估算消耗：\(localizedCredits(estimate.displayText, language: language))。按官方费率分别计算普通输入（输入减缓存）、缓存输入和输出，再应用各次调用的速度倍率。输出包含推理词元。此值为订阅内用量估算。",
+        "Estimated usage: \(estimate.displayText). Official rates are applied to uncached input (Input − Cache), cached input, and output with each call's speed multiplier. Output includes reasoning tokens. This estimates included subscription usage."
     )
     if estimate.assumesStandardTier {
         text += language.text(
-            " 未记录 Fast 状态的调用按 Standard 估算。",
-            " Calls without a recorded Fast setting are estimated at the Standard rate."
+            " 缺少速度档位的调用按 Standard 估算。",
+            " Calls without a recorded speed are estimated at the Standard rate."
         )
     }
     return text

@@ -54,18 +54,24 @@ struct CodexCreditConfiguration: Codable {
         let output: Double
     }
 
-    struct Model: Codable {
+    struct Model: Codable, Equatable {
         let id: String
         let verifiedOn: String
         let rate: Rate
     }
 
-    struct FastPolicy: Codable {
+    struct FastPolicy: Codable, Equatable {
         let family: String
         let verifiedOn: String
         let includedSubscription: Double
         // Optional for historical policies whose purchased-credit rate is unverified.
         let purchasedCredits: Double?
+    }
+
+    struct UltrafastPolicy: Codable, Equatable {
+        let model: String
+        let verifiedOn: String
+        let includedSubscription: Double
     }
 
     let schemaVersion: Int
@@ -74,6 +80,7 @@ struct CodexCreditConfiguration: Codable {
     let sources: [String]
     var models: [Model]
     var fastPolicies: [FastPolicy]
+    var ultrafastPolicies: [UltrafastPolicy]? = nil
 
     static func load(resources: AppResources) -> Self? {
         guard let data = resources.data(named: resourceName, withExtension: "json") else { return nil }
@@ -114,6 +121,13 @@ struct CodexCreditConfiguration: Codable {
                           .allSatisfy { $0.isFinite && $0 > 0 }
                       && model.rate.cachedInput <= model.rate.input
               }),
+              (card.ultrafastPolicies.map { policies in
+                  Set(policies.map(\.model)).count == policies.count && policies.allSatisfy { policy in
+                      isDate(policy.verifiedOn) && policy.verifiedOn <= card.revision
+                          && policy.includedSubscription.isFinite && policy.includedSubscription >= 1
+                          && card.models.contains { $0.id == policy.model }
+                  }
+              } ?? true),
               card.fastPolicies.allSatisfy({ policy in
                   isID(policy.family) && isDate(policy.verifiedOn) && policy.verifiedOn <= card.revision
                       && policy.includedSubscription.isFinite && policy.includedSubscription >= 1
@@ -148,6 +162,26 @@ struct CodexCreditConfiguration: Codable {
         for plan in (result.subscriptionMultipliers ?? [:]).keys {
             result.subscriptionEstimates?.removeValue(forKey: plan)
         }
+        return result
+    }
+
+    /// Fill missing bundled prices and speed policies while preserving saved values.
+    func addingMissingBundledPricing() -> Self {
+        guard let bundled = Self.bundled else { return self }
+        let modelIDs = Set(models.map(\.id))
+        let fastFamilies = Set(fastPolicies.map(\.family))
+        let ultrafastIDs = Set((ultrafastPolicies ?? []).map(\.model))
+        let missingModels = bundled.models.filter { !modelIDs.contains($0.id) }
+        let missingFast = bundled.fastPolicies.filter { !fastFamilies.contains($0.family) }
+        let missingUltrafast = (bundled.ultrafastPolicies ?? []).filter { !ultrafastIDs.contains($0.model) }
+        guard !missingModels.isEmpty || !missingFast.isEmpty || !missingUltrafast.isEmpty else { return self }
+        var result = self
+        result.models += missingModels
+        result.fastPolicies += missingFast
+        if !missingUltrafast.isEmpty {
+            result.ultrafastPolicies = (ultrafastPolicies ?? []) + missingUltrafast
+        }
+        result.revision = max(revision, bundled.revision)
         return result
     }
 
@@ -213,17 +247,15 @@ struct CodexCreditConfiguration: Codable {
         result.fastPolicies.removeAll { policy in
             !allowed.contains { $0 == policy.family || $0.hasPrefix(policy.family + "-") }
         }
+        result.ultrafastPolicies?.removeAll { !allowed.contains($0.model) }
         return result
     }
 
     func rate(for model: String?) -> Rate? {
         guard let slug = Self.normalizedModel(model) else { return nil }
-        if let exact = models.first(where: { $0.id == slug }) { return exact.rate }
         // Only dated snapshots inherit prices; unknown variants stay unpriced.
-        return models.first { entry in
-            slug.hasPrefix(entry.id + "-")
-                && Self.isDate(String(slug.dropFirst(entry.id.count + 1)))
-        }?.rate
+        return models.first(where: { $0.id == slug })?.rate
+            ?? models.first(where: { Self.isDatedSnapshot(slug, of: $0.id) })?.rate
     }
 
     func fastPolicy(for model: String?) -> FastPolicy? {
@@ -232,6 +264,16 @@ struct CodexCreditConfiguration: Codable {
         return fastPolicies.filter {
             slug == $0.family || slug.hasPrefix($0.family + "-")
         }.max { $0.family.count < $1.family.count }
+    }
+
+    func ultrafastPolicy(for model: String?) -> UltrafastPolicy? {
+        guard let slug = Self.normalizedModel(model) else { return nil }
+        return ultrafastPolicies?.first(where: { $0.model == slug })
+            ?? ultrafastPolicies?.first(where: { Self.isDatedSnapshot(slug, of: $0.model) })
+    }
+
+    private static func isDatedSnapshot(_ slug: String, of model: String) -> Bool {
+        slug.hasPrefix(model + "-") && isDate(String(slug.dropFirst(model.count + 1)))
     }
 
     private static func normalizedModel(_ model: String?) -> String? {

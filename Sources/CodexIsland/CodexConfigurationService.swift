@@ -25,6 +25,7 @@ final class CodexConfigurationService: ObservableObject {
     }
     var intervalDays: Int { configuration?.updateIntervalDays ?? 7 }
     var nextUpdate: Date? {
+        if let retryAfter { return retryAfter }
         guard let pricing = configuration?.pricingUpdatedAt, let catalog = configuration?.catalogUpdatedAt,
               let aa = configuration?.aaUpdatedAt else { return nil }
         return min(pricing, catalog, aa).addingTimeInterval(Double(intervalDays) * 86400)
@@ -54,15 +55,17 @@ final class CodexConfigurationService: ObservableObject {
                 catch { self.error = "本地配置无效，使用内置配置 / Invalid local configuration; using bundled defaults" }
             }
             if let original = configuration {
-                var scoped = original.migratingSubscriptionEstimates().retainingCodexModels()
+                var scoped = original.migratingSubscriptionEstimates()
+                    .addingMissingBundledPricing().retainingCodexModels()
                 if loadedConfiguration, let catalog = scoped.catalog, let updatedAt = scoped.catalogUpdatedAt {
                     scoped.catalog = CodexConfigurationRefresh.reconcileCatalog(catalog, cacheData: readModelCache(),
                                                                                newerThan: updatedAt, now: clock())
                 }
                 needsScopeMigration = loadedConfiguration && (
                     scoped.catalog != original.catalog
-                    || scoped.models.count != original.models.count
-                    || scoped.fastPolicies.count != original.fastPolicies.count
+                    || scoped.models != original.models
+                    || scoped.fastPolicies != original.fastPolicies
+                    || scoped.ultrafastPolicies != original.ultrafastPolicies
                     || scoped.knownCodexModelIDs != original.knownCodexModelIDs
                     || scoped.subscriptionMultipliers != original.subscriptionMultipliers
                     || scoped.subscriptionEstimates?.count != original.subscriptionEstimates?.count)
@@ -119,8 +122,7 @@ final class CodexConfigurationService: ObservableObject {
     }
 
     func checkIfDue() {
-        guard !isRefreshing, retryAfter.map({ $0 <= clock() }) ?? true,
-              nextUpdate.map({ $0 <= clock() }) ?? true else { return }
+        guard !isRefreshing, nextUpdate.map({ $0 <= clock() }) ?? true else { return }
         updateNow()
     }
     func updateNow() {

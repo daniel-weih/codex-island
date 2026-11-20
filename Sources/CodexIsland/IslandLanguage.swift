@@ -22,6 +22,16 @@ enum IslandInterfaceLanguage: String, Sendable {
         case .english: return english
         }
     }
+
+    func serviceTierLabel(for tier: String?) -> String {
+        switch tier?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ultrafast": return text("Ultrafast 开启", "Ultrafast on")
+        case "priority", "fast": return text("Fast 开启", "Fast on")
+        case "default", "standard": return text("标准速度", "Standard speed")
+        case "flex": return "Flex"
+        default: return text("速度档位未知", "Speed unknown")
+        }
+    }
 }
 
 enum IslandLanguageResolver {

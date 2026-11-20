@@ -51,7 +51,20 @@ enum InstallerChecks {
         try scenario("destination-inside-source", existing: false) { source, _, installer in
             var validated = false
             installer.validate = { _ in validated = true; throw injected }
-            for parent in [source, source.appendingPathComponent("nested")] {
+            let alias = source.deletingLastPathComponent().appendingPathComponent("payload-alias")
+            try fm.createSymbolicLink(at: alias, withDestinationURL: source.appendingPathComponent("Contents"))
+            guard let resolved = realpath(source.path, nil) else {
+                throw InstallationError(message: "Could not resolve the fixture source")
+            }
+            defer { free(resolved) }
+            let physicalSource = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            var parents = [source, source.appendingPathComponent("nested"),
+                           physicalSource.appendingPathComponent("missing/nested"), alias.appendingPathComponent("missing/nested")]
+            let otherCase = physicalSource.deletingLastPathComponent().appendingPathComponent(source.lastPathComponent.lowercased())
+            if fm.fileExists(atPath: otherCase.path) {
+                parents.append(otherCase.appendingPathComponent("missing/nested"))
+            }
+            for parent in parents {
                 expectFailure { try installer.install(from: source, to: parent.appendingPathComponent(AppInstaller.appName)) }
             }
             require(!validated, "a destination inside its payload is rejected before staging or validation")

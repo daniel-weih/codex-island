@@ -4,6 +4,7 @@ import SwiftUI
 /// A native transient popover keeps editing outside the island's scroll layout.
 struct IslandPopoverAnchor<Content: View>: NSViewRepresentable {
     @Binding var isPresented: Bool
+    var consumesAnchorClickOnDismissal = false
     @ViewBuilder let content: () -> Content
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -51,15 +52,20 @@ struct IslandPopoverAnchor<Content: View>: NSViewRepresentable {
             // Transient popovers can exempt clicks in a nonactivating parent
             // panel. Explicitly treat those clicks as cancellation as well.
             let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-            localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) { [weak self] event in
+            localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) { [weak self, weak anchor] event in
                 guard let self, let popoverWindow = self.popover?.contentViewController?.view.window else { return event }
                 var target = event.window
                 while let window = target {
                     if window === popoverWindow { return event }
                     target = window.parent
                 }
+                // A toggle anchor must not reopen the popover on the same click.
+                let clickedToggleAnchor = self.parent.consumesAnchorClickOnDismissal
+                    && event.type == .leftMouseDown
+                    && anchor.map { $0.window === event.window
+                        && $0.bounds.contains($0.convert(event.locationInWindow, from: nil)) } == true
                 self.close()
-                return event
+                return clickedToggleAnchor ? nil : event
             }
             globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] _ in
                 self?.close()

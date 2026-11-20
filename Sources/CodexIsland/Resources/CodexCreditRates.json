@@ -1,13 +1,32 @@
 {
   "schemaVersion": 1,
-  "revision": "2026-10-27",
+  "revision": "2026-11-19",
   "unit": "credits_per_million_tokens",
   "sources": [
     "https://learn.chatgpt.com/docs/pricing#token-rates",
+    "https://learn.chatgpt.com/docs/pricing#speed-multipliers",
     "https://learn.chatgpt.com/docs/agent-configuration/speed",
     "https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing"
   ],
   "models": [
+    {
+      "id": "gpt-6.2-astra",
+      "verifiedOn": "2026-11-19",
+      "rate": {
+        "input": 200.0,
+        "cachedInput": 10.0,
+        "output": 1000.0
+      }
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "verifiedOn": "2026-11-19",
+      "rate": {
+        "input": 50.0,
+        "cachedInput": 2.5,
+        "output": 250.0
+      }
+    },
     {
       "id": "gpt-6-astra",
       "verifiedOn": "2026-10-27",
@@ -128,6 +147,18 @@
   ],
   "fastPolicies": [
     {
+      "family": "gpt-6.2-astra",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 2.0,
+      "purchasedCredits": 2.0
+    },
+    {
+      "family": "gpt-6.2-sol",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 2.0,
+      "purchasedCredits": 2.0
+    },
+    {
       "family": "gpt-6-astra",
       "verifiedOn": "2026-10-27",
       "includedSubscription": 2.5,
@@ -171,6 +202,28 @@
       "family": "gpt-5.4",
       "verifiedOn": "2026-09-30",
       "includedSubscription": 2.0
+    }
+  ],
+  "ultrafastPolicies": [
+    {
+      "model": "gpt-6.2-astra",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 6.0
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 6.0
+    },
+    {
+      "model": "gpt-6-astra",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 8.0
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "verifiedOn": "2026-11-19",
+      "includedSubscription": 8.0
     }
   ],
   "updateIntervalDays": 7,

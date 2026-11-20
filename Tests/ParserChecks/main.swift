@@ -39,6 +39,11 @@ struct ParserChecks {
         let partialCredits = CodexChartCreditTotal(
             tokens: 100, credits: 1.26, standardCredits: 0.56, unpricedCalls: 1
         )
+        expect(partialCredits.amountText(for: partialCredits.credits) == "≥1.2",
+               "chart tooltip shows the same lower bound as the detail")
+        let unknownCredits = CodexChartCreditTotal(tokens: 100, unpricedCalls: 1)
+        expect(unknownCredits.amountText(for: unknownCredits.credits) == "—",
+               "the tooltip does not show zero for unpriced usage")
         expect(partialCredits.chartDisplayText(matching: 100, showsStandard: true, showsActual: true)
             == "≥0.5 / ≥1.2", "both credit series show conservative, separately labeled lower bounds")
         expect(partialCredits.chartDisplayText(matching: 100, showsStandard: false, showsActual: true)
@@ -1707,7 +1712,7 @@ struct ParserChecks {
         expect(CodexCreditRateCard.credits(
             model: "gpt-6.1-sol", serviceTier: "ultrafast",
             inputTokens: 100_000, cachedInputTokens: 80_000, outputTokens: 5_000
-        ) == nil, "GPT-6.1 Sol does not inherit Astra's unsupported Ultrafast pricing")
+        ) == 19.6, "GPT-6.1 Sol uses its documented Ultrafast multiplier")
         expect(CodexCreditRateCard.credits(
             model: "gpt-5.5", serviceTier: "default",
             inputTokens: 100, cachedInputTokens: 101, outputTokens: 0
@@ -2725,6 +2730,20 @@ struct ParserChecks {
             expect(CodexThreadServiceTierReader.readLatest(for: ["middle"], from: url)["middle"] == nil,
                    "unknown newer tiers do not resurrect an older Fast state")
 
+            try append("top", " Ultrafast ", at: 302)
+            try append("middle", "flex", at: 302)
+            let updated = CodexThreadServiceTierReader.fillingMissing(in: threads, from: url)
+            expect(updated[0].serviceTier == "ultrafast" && updated[0].serviceTierSource == .runtimeLog,
+                   "the latest Ultrafast request supplies a missing thread tier")
+            expect(updated[1].serviceTier == "flex" && updated[1].serviceTierSource == .runtimeLog,
+                   "the latest Flex request supplies a missing thread tier")
+            for language in [IslandInterfaceLanguage.chinese, .english] {
+                expect(language.serviceTierLabel(for: updated[0].serviceTier) == language.text("Ultrafast 开启", "Ultrafast on"),
+                       "the thread tooltip identifies Ultrafast")
+                expect(language.serviceTierLabel(for: updated[1].serviceTier) == "Flex",
+                       "the thread tooltip identifies Flex")
+            }
+
             try append("malformed", nil, at: 100, body: "feedback tags_json={invalid}")
             try append("oversized", nil, at: 100,
                        body: "feedback tags_json={\"padding\":\"\(String(repeating: "x", count: 70_000))\",\"service_tier\":\"priority\"}")
@@ -2736,7 +2755,7 @@ struct ParserChecks {
             expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: url).isEmpty,
                    "unsupported log indexes fail closed without scanning the database")
             try execute(indexSQL)
-            expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: url)["top"] == "default",
+            expect(CodexThreadServiceTierReader.readLatest(for: ["top"], from: url)["top"] == "ultrafast",
                    "read-only queries recover after an unavailable schema without a stale cache")
         } catch {
             expect(false, "thread request service tiers: \(error.localizedDescription)")
@@ -3200,6 +3219,13 @@ struct ParserChecks {
             let url = directory.appendingPathComponent("mixed.jsonl")
             let meta = try line("session_meta", ["source": "cli", "model_provider": "openai"])
             let luna = try line("turn_context", ["model": "gpt-6-luna", "service_tier": "default"])
+            let ultrafastURL = directory.appendingPathComponent("ultrafast.jsonl")
+            let ultrafast = try line("turn_context", ["model": "gpt-6.2-sol", "service_tier": "ultrafast"])
+            let fast = try line("turn_context", ["model": "gpt-6.2-sol", "service_tier": "priority"])
+            try Data((meta + ultrafast + token(1) + fast + token(2)).utf8).write(to: ultrafastURL)
+            try verify(ultrafastURL, 2, 256, "each call uses its own Ultrafast or Fast multiplier")
+            let standard = try daily(ultrafastURL).chartCreditTotals.values.reduce(0) { $0 + $1.standardCredits }
+            expect(abs(standard - 64) < 0.000001, "chart keeps the Standard baseline for both speed tiers")
             try Data((meta + luna + token(1)).utf8).write(to: url)
             try verify(url, 1, 1.7, "initial Luna call")
             let unrelated = try line("response_item", ["type": "function_call_output",

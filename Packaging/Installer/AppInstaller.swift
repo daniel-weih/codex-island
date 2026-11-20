@@ -39,12 +39,9 @@ struct AppInstaller {
         let source = source.standardizedFileURL
         let destination = destination.standardizedFileURL
         let parent = destination.deletingLastPathComponent()
-        let resolvedSource = source.resolvingSymlinksInPath().path
-        let resolvedParent = parent.resolvingSymlinksInPath().path
+        let payloadIdentity = try? Self.identity(source.resolvingSymlinksInPath())
         guard destination.lastPathComponent == Self.appName,
-              resolvedSource != destination.resolvingSymlinksInPath().path,
-              resolvedParent != resolvedSource,
-              !resolvedParent.hasPrefix(resolvedSource + "/") else {
+              payloadIdentity.map({ !Self.isWithinPayload(destination, identity: $0) }) ?? true else {
             throw InstallationError(message: InstallerText.choose("安装位置无效。", "Invalid installation location."))
         }
 
@@ -135,6 +132,28 @@ struct AppInstaller {
             }
         }
         return .installed
+    }
+
+    private static func isWithinPayload(_ destination: URL, identity: Identity) -> Bool {
+        // Resolve the nearest existing ancestor, then compare directory identities
+        // so symlinks, filesystem aliases and different casing are handled alike.
+        var ancestor = destination
+        while true {
+            if let resolved = realpath(ancestor.path, nil) {
+                ancestor = URL(fileURLWithPath: String(cString: resolved))
+                free(resolved)
+                break
+            }
+            let parent = ancestor.deletingLastPathComponent()
+            guard parent.path != ancestor.path else { return false }
+            ancestor = parent
+        }
+        while true {
+            if (try? Self.identity(ancestor)) == identity { return true }
+            let parent = ancestor.deletingLastPathComponent()
+            guard parent.path != ancestor.path else { return false }
+            ancestor = parent
+        }
     }
 
     static func identity(_ url: URL) throws -> Identity {

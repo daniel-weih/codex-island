@@ -68,7 +68,7 @@ enum CodexThreadServiceTierReader {
                       let value = tags["service_tier"] else { continue }
                 if let rawTier = value as? String {
                     let tier = rawTier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    if ["default", "standard", "priority", "fast", "flex"].contains(tier) {
+                    if ["default", "standard", "priority", "fast", "ultrafast", "flex"].contains(tier) {
                         tiers[id] = tier
                     }
                 }

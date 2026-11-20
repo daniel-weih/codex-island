@@ -24,7 +24,7 @@ enum CodexResourceProbe {
             }
         }
         // Exercise the same lazy initialization that runs on a thread change.
-        if TaskSoundPlayer.completionSound == nil { missing.append("completion sound") }
+        if TaskSoundPlayer.completionSounds.isEmpty { missing.append("completion sound") }
         if TaskSoundPlayer.approvalSound == nil { missing.append("approval sound") }
         guard missing.isEmpty else {
             fputs("Missing or invalid app resources: \(missing.joined(separator: ", "))\n", stderr)

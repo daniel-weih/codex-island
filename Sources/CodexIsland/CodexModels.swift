@@ -4,8 +4,8 @@ typealias JSONObject = [String: Any]
 
 enum CodexFastModeUsagePolicy {
     /// Included-subscription Fast multiplier from the active configuration.
-    static func multiplier(for model: String?) -> Double? {
-        CodexCreditConfiguration.current?.fastPolicy(for: model)?.includedSubscription
+    static func multiplier(for model: String?, in configuration: CodexCreditConfiguration? = .current) -> Double? {
+        configuration?.fastPolicy(for: model)?.includedSubscription
     }
 }
 
@@ -635,7 +635,7 @@ struct CodexChartCreditTotal: Equatable, Sendable {
         return amounts.isEmpty ? "—" : amounts.joined(separator: " / ")
     }
 
-    private func amountText(for cost: Double) -> String {
+    func amountText(for cost: Double) -> String {
         guard cost.isFinite else { return "—" }
         let complete = unpricedCalls == 0
         guard complete || cost >= 0.1 else { return "—" }

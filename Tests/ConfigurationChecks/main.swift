@@ -96,22 +96,24 @@ struct ConfigurationChecks {
         precondition(updated.fastModels.map(\.id) == ["gpt-6.1-sol", "gpt-fixture"])
         precondition(!updated.fastPolicies.contains { $0.family == "daybreak-blue" })
         let grouped = try String(contentsOf: root.appendingPathComponent("Tests/ConfigurationChecks/pricing-grouped.md"), encoding: .utf8)
+        let groupedNow = ISO8601DateFormatter().date(from: "2026-11-19T08:00:00Z")!
         var newCatalog = base
         newCatalog.catalog! += ["gpt-6.2-astra", "gpt-6.2-sol"].map {
             .init(id: $0, displayName: $0, reasoningEfforts: ["max"], serviceTiers: ["priority"])
         }
-        let groupedUpdate = try CodexConfigurationRefresh.applyingPricing(grouped, to: newCatalog, now: now)
+        let groupedUpdate = try CodexConfigurationRefresh.applyingPricing(grouped, to: newCatalog, now: groupedNow)
         precondition(groupedUpdate.rate(for: "gpt-6.2-astra") == .init(input: 200, cachedInput: 10, output: 1000))
         precondition(groupedUpdate.rate(for: "gpt-6.2-sol") == .init(input: 50, cachedInput: 2.5, output: 250))
         for model in ["gpt-6.2-astra", "gpt-6.2-sol"] {
             precondition(groupedUpdate.fastPolicy(for: model)?.includedSubscription == 2)
             precondition(groupedUpdate.fastPolicy(for: model)?.purchasedCredits == 2)
+            precondition(groupedUpdate.ultrafastPolicy(for: model)?.includedSubscription == 6)
         }
         precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-sol")?.includedSubscription == 2.5)
         precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-sol")?.purchasedCredits == 2)
         precondition(groupedUpdate.fastPolicy(for: "gpt-6.1-terra")?.verifiedOn == base.fastPolicy(for: "gpt-6.1-terra")?.verifiedOn)
         let indented = grouped.replacingOccurrences(of: "\n| GPT-6.1 Sol<br", with: "\n | GPT-6.1 Sol<br")
-        let indentedUpdate = try CodexConfigurationRefresh.applyingPricing(indented, to: newCatalog, now: now)
+        let indentedUpdate = try CodexConfigurationRefresh.applyingPricing(indented, to: newCatalog, now: groupedNow)
         precondition(indentedUpdate.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == groupedUpdate.revision)
         let splitRows = grouped.replacingOccurrences(of: "| GPT-6.2 Astra<br />GPT-6.2 Sol | 2x | 2x |",
                                                     with: "| GPT-6.2 Astra | 2x | 2x |\n| GPT-6.2 Sol | 2x | 2x |")
@@ -120,22 +122,53 @@ struct ConfigurationChecks {
             page.replacingOccurrences(of: #"(?m)^\|\h*|\h*\|$"#, with: "", options: .regularExpression)
         }
         for page in [splitRows, mixedPipes, withoutOuterPipes(splitRows)] {
-            let refreshed = try CodexConfigurationRefresh.applyingPricing(page, to: newCatalog, now: now)
+            let refreshed = try CodexConfigurationRefresh.applyingPricing(page, to: newCatalog, now: groupedNow)
             precondition(refreshed.fastPolicy(for: "gpt-6.2-sol")?.purchasedCredits == 2)
             precondition(refreshed.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == refreshed.revision)
             CodexCreditConfiguration.activate(refreshed)
             precondition(CodexCreditRateCard.credits(model: "gpt-6.2-sol", serviceTier: "fast",
                 inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0) == 100)
+            precondition(CodexCreditRateCard.credits(model: "openai/gpt-6.2-sol-2026-11-18", serviceTier: "ultrafast",
+                inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0) == 300)
         }
         CodexCreditConfiguration.activate(base)
+        let markdownHeadings = grouped
+            .replacingOccurrences(of: "\nFast\n", with: "\n### Fast\n")
+            .replacingOccurrences(of: "\nUltrafast\n", with: "\n### Ultrafast ###\n")
+            .replacingOccurrences(of: "| 6x |", with: "| 7x |")
+        let headingUpdate = try CodexConfigurationRefresh.applyingPricing(markdownHeadings, to: newCatalog, now: groupedNow)
+        precondition(headingUpdate.fastPolicy(for: "gpt-6.2-sol")?.includedSubscription == 2)
+        precondition(headingUpdate.ultrafastPolicy(for: "gpt-6.2-sol")?.includedSubscription == 7)
         let borderlessLegacy = try CodexConfigurationRefresh.applyingPricing(withoutOuterPipes(fixture), to: base, now: now)
-        precondition(borderlessLegacy.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == borderlessLegacy.revision)
+        precondition(borderlessLegacy.fastPolicy(for: "gpt-6.1-sol")?.verifiedOn == "2026-11-02")
+        let unrecognizedUltrafastTable = grouped.replacingOccurrences(of: "\nUltrafast\n", with: "\nUnknown speed\n")
+        let ultrafastRow = "| GPT-6.1 Sol | 9x | 6x |"
+        let completeUltrafast = grouped.replacingOccurrences(of: "\n\n<table>", with: "\n\(ultrafastRow)\n\n<table>")
+        let completeUpdate = try CodexConfigurationRefresh.applyingPricing(completeUltrafast, to: newCatalog, now: groupedNow)
+        precondition(completeUpdate.ultrafastPolicy(for: "gpt-6.1-sol")?.includedSubscription == 9)
+        let interruptedUltrafast = completeUltrafast.replacingOccurrences(of: "\n\(ultrafastRow)", with: "\n\n\(ultrafastRow)")
+        let interruptedFast = grouped.replacingOccurrences(of: "\n| GPT-6.1 Sol<br", with: "\n\n| GPT-6.1 Sol<br")
+        let missingTokenRateCell = grouped.replacingOccurrences(
+            of: "<td>2.5 credits</td><td>250 credits</td>", with: "<td>250 credits</td>"
+        )
+        let withTokenRateNote = grouped.replacingOccurrences(
+            of: "</tbody>", with: #"<tr><td colspan="4" style="text-align:center">Rate card note.</td></tr></tbody>"#
+        )
+        let noteUpdate = try CodexConfigurationRefresh.applyingPricing(withTokenRateNote, to: newCatalog, now: groupedNow)
+        precondition(noteUpdate.models == groupedUpdate.models)
         for invalid in [grouped.replacingOccurrences(of: "Fast\n", with: "Unknown\n"),
+                        unrecognizedUltrafastTable,
+                        interruptedUltrafast,
+                        withoutOuterPipes(interruptedUltrafast),
+                        interruptedFast,
+                        missingTokenRateCell,
+                        grouped.replacingOccurrences(of: "GPT-6.", with: "Unrelated-"),
+                        grouped.replacingOccurrences(of: "6x | 3x", with: "unknown | 3x"),
                         grouped.replacingOccurrences(of: "2.5x |", with: "unknown |"),
                         mixedPipes.replacingOccurrences(of: "GPT-6.2 Sol | 2x | 2x |", with: "GPT-6.2 Sol | | 2x |"),
                         mixedPipes.replacingOccurrences(of: "GPT-6.2 Sol | 2x | 2x |", with: "GPT-6.2 Sol"),
                         grouped.replacingOccurrences(of: "GPT-6.1 Sol<br", with: "GPT-6.2 Sol<br")] {
-            do { _ = try CodexConfigurationRefresh.applyingPricing(invalid, to: newCatalog); fatalError("Invalid Fast table accepted") }
+            do { _ = try CodexConfigurationRefresh.applyingPricing(invalid, to: newCatalog); fatalError("Invalid speed table accepted") }
             catch {}
         }
         let future = try CodexConfigurationRefresh.applyingPricing(fixture.replacingOccurrences(of: "Daybreak Blue", with: "GPT-Fixture"), to: base, now: now)
@@ -186,6 +219,53 @@ struct ConfigurationChecks {
         defer { try? FileManager.default.removeItem(at: folder); CodexCreditConfiguration.activate(base) }
         let file = folder.appendingPathComponent("config.json")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var beforeUltrafast = newCatalog
+        beforeUltrafast.ultrafastPolicies = nil
+        beforeUltrafast.models.removeAll { $0.id.hasPrefix("gpt-6.2-") }
+        beforeUltrafast.fastPolicies.removeAll { $0.family.hasPrefix("gpt-6.2-") }
+        beforeUltrafast.subscriptionEstimates?["plus"] = .init(credits: 1500, basis: "Manual reference")
+        beforeUltrafast.pricingUpdatedAt = groupedNow
+        beforeUltrafast.catalogUpdatedAt = groupedNow
+        beforeUltrafast.aaUpdatedAt = groupedNow
+        let upgradeFile = folder.appendingPathComponent("before-ultrafast.json")
+        try JSONEncoder().encode(beforeUltrafast).write(to: upgradeFile)
+        let upgraded = CodexConfigurationService(fileURL: upgradeFile, readModelCache: { nil }, clock: { groupedNow })
+        precondition(upgraded.configuration?.rate(for: "gpt-6.2-sol")?.input == 50)
+        precondition(upgraded.configuration?.ultrafastPolicy(for: "gpt-6.2-sol")?.includedSubscription == 6)
+        precondition(upgraded.configuration?.subscriptionCredits(for: "plus") == 1500)
+        for (model, credits) in [("gpt-6.2-sol", 100.0), ("gpt-6.2-astra", 400.0)] {
+            precondition(CodexCreditRateCard.credits(model: model, serviceTier: "fast",
+                inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0) == credits)
+        }
+        upgraded.start()
+        upgraded.stop()
+        var partialUpgrade = try CodexCreditConfiguration.decode(Data(contentsOf: upgradeFile))
+        precondition(partialUpgrade.fastPolicy(for: "gpt-6.2-sol")?.includedSubscription == 2)
+        partialUpgrade.fastPolicies.removeAll { $0.family == "gpt-6.2-sol" }
+        try JSONEncoder().encode(partialUpgrade).write(to: upgradeFile)
+        let repaired = CodexConfigurationService(fileURL: upgradeFile, readModelCache: { nil }, clock: { groupedNow })
+        precondition(repaired.configuration?.fastPolicy(for: "gpt-6.2-sol")?.includedSubscription == 2)
+        precondition(repaired.configuration?.ultrafastPolicies == partialUpgrade.ultrafastPolicies)
+
+        var equalCountUpgrade = try CodexCreditConfiguration.decode(Data(contentsOf: upgradeFile))
+        equalCountUpgrade.fastPolicies.append(base.fastPolicy(for: "gpt-6.2-sol")!)
+        let lunaRate = equalCountUpgrade.rate(for: "gpt-6-luna")!
+        equalCountUpgrade.models.removeAll { $0.id == "gpt-6-luna" }
+        equalCountUpgrade.models.append(.init(id: "gpt-unlisted-fixture", verifiedOn: "2026-11-19", rate: lunaRate))
+        equalCountUpgrade.fastPolicies.removeAll { $0.family == "gpt-6-luna" }
+        equalCountUpgrade.fastPolicies.append(.init(family: "gpt-unlisted-fixture", verifiedOn: "2026-11-19",
+                                                     includedSubscription: 2.5, purchasedCredits: 2))
+        try JSONEncoder().encode(equalCountUpgrade).write(to: upgradeFile)
+        let equalCountService = CodexConfigurationService(fileURL: upgradeFile, readModelCache: { nil }, clock: { groupedNow })
+        equalCountService.start()
+        equalCountService.stop()
+        let equalCountSaved = try CodexCreditConfiguration.decode(Data(contentsOf: upgradeFile))
+        precondition(equalCountSaved.models.count == equalCountUpgrade.models.count)
+        precondition(equalCountSaved.fastPolicies.count == equalCountUpgrade.fastPolicies.count)
+        precondition(equalCountSaved.rate(for: "gpt-6-luna") == lunaRate)
+        precondition(equalCountSaved.fastPolicy(for: "gpt-6-luna") != nil)
+        precondition(equalCountSaved.rate(for: "gpt-unlisted-fixture") == nil)
+
         // Hidden Fast multipliers still refresh and survive a restart.
         let policyFile = folder.appendingPathComponent("fast-policy.json")
         let policyService = CodexConfigurationService(fileURL: policyFile, initialConfiguration: base,
@@ -219,9 +299,14 @@ struct ConfigurationChecks {
         var requests = 0
         var failPricing = false
         var failAA = false
+        var pricingPage = fixture
         var currentTime = now
         let service = CodexConfigurationService(fileURL: file, initialConfiguration: base,
-            fetchPricing: { requests += 1; if failPricing { throw CodexConfigurationRefresh.RefreshError.invalidSource }; return fixture },
+            fetchPricing: {
+                requests += 1
+                if failPricing { throw CodexConfigurationRefresh.RefreshError.invalidSource }
+                return pricingPage
+            },
             listModels: { catalog }, fetchAA: { _ in if failAA { throw CodexConfigurationRefresh.RefreshError.invalidAA }; return aaScores }, clock: { currentTime })
         precondition(service.intervalDays == 7 && service.nextUpdate == nil)
         service.start()
@@ -244,7 +329,42 @@ struct ConfigurationChecks {
         precondition(service.configuration?.rate(for: "gpt-6.1-sol") == persisted.rate(for: "gpt-6.1-sol"))
         service.checkIfDue()
         precondition(!service.isRefreshing, "Failed updates should back off")
+        failPricing = false
+        failAA = false
+        pricingPage = interruptedUltrafast
+        service.updateNow()
+        try await wait(service)
+        precondition(requests == 3 && service.error == CodexConfigurationRefresh.RefreshError.invalidSource.localizedDescription)
+        let afterInvalidTable = try CodexCreditConfiguration.decode(Data(contentsOf: file))
+        precondition(afterInvalidTable.pricingUpdatedAt == persisted.pricingUpdatedAt)
+        precondition(afterInvalidTable.models == persisted.models && afterInvalidTable.fastPolicies == persisted.fastPolicies)
+        precondition(afterInvalidTable.ultrafastPolicies == persisted.ultrafastPolicies)
+        precondition(service.nextUpdate == currentTime.addingTimeInterval(3600))
         service.stop()
+        let earlyRefreshFile = folder.appendingPathComponent("early-refresh.json")
+        var retryClock = now.addingTimeInterval(60)
+        var retryPage = missingTokenRateCell
+        var retryRequests = 0
+        let earlyRefresh = CodexConfigurationService(fileURL: earlyRefreshFile, initialConfiguration: persisted,
+            fetchPricing: { retryRequests += 1; return retryPage }, listModels: { catalog },
+            fetchAA: { _ in aaScores }, readModelCache: { nil }, clock: { retryClock })
+        earlyRefresh.updateNow()
+        try await wait(earlyRefresh)
+        precondition(retryRequests == 1 && earlyRefresh.error != nil)
+        let afterPartialPricing = try CodexCreditConfiguration.decode(Data(contentsOf: earlyRefreshFile))
+        precondition(afterPartialPricing.models == persisted.models && afterPartialPricing.pricingUpdatedAt == now)
+        let retryAt = retryClock.addingTimeInterval(3600)
+        precondition(earlyRefresh.nextUpdate == retryAt)
+        retryClock = retryAt.addingTimeInterval(-1)
+        earlyRefresh.checkIfDue()
+        precondition(!earlyRefresh.isRefreshing && retryRequests == 1)
+        retryPage = fixture
+        retryClock = retryAt
+        earlyRefresh.checkIfDue()
+        try await wait(earlyRefresh)
+        precondition(retryRequests == 2 && earlyRefresh.error == nil)
+        precondition(earlyRefresh.configuration?.pricingUpdatedAt == retryAt)
+        earlyRefresh.stop()
         let restored = CodexConfigurationService(fileURL: file, initialConfiguration: base, readModelCache: { nil })
         precondition(restored.intervalDays == 1 && restored.configuration?.catalog == catalog)
         restored.stop()
