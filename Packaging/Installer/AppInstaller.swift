@@ -144,12 +144,15 @@ struct AppInstaller {
                 free(resolved)
                 break
             }
+            guard ancestor.path != "/" else { return false }
             let parent = ancestor.deletingLastPathComponent()
             guard parent.path != ancestor.path else { return false }
             ancestor = parent
         }
         while true {
             if (try? Self.identity(ancestor)) == identity { return true }
+            // Older Foundation versions can append ".." when asked for the parent of "/".
+            guard ancestor.path != "/" else { return false }
             let parent = ancestor.deletingLastPathComponent()
             guard parent.path != ancestor.path else { return false }
             ancestor = parent
